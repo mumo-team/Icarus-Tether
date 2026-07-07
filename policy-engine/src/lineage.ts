@@ -16,7 +16,7 @@
  * 계보는 참조(해시)만 갖는다.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ToolRiskTag } from "@taintguard/types";
 
 // ---------------------------------------------------------------------------
@@ -209,7 +209,7 @@ export function createTaintNode(
   }
 
   const node: TaintNode = {
-    id: `tn_${crypto.randomUUID()}`,
+    id: `tn_${randomUUID()}`,
     toolName,
     tags: new Set(tags),
     parents: parentLinks.map((l) => l.nodeId),
