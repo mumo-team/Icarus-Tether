@@ -28,6 +28,7 @@ import {
 import { getPolicyConfig, type PolicyConfig } from "./config.js";
 import { detectSecrets } from "./secret-detection.js";
 import { extractStructured, tokenizePII } from "./sanitization.js";
+import { createTaintNode, type TaintNode } from "./lineage.js";
 
 export {
   loadPolicyConfig,
@@ -55,6 +56,15 @@ export {
   type ExtractedRecord,
   type SanitizeOutcome,
 } from "./sanitization.js";
+export {
+  getSessionLineage,
+  getTaintNode,
+  MATCH_TOKEN_MIN_LENGTH,
+  STRONG_TOKEN_MIN_LENGTH,
+  type TaintNode,
+  type ParentLink,
+  type LinkMethod,
+} from "./lineage.js";
 
 // ---------------------------------------------------------------------------
 // 도구 분류 — 값은 설정(config/*.json)에서, 코드는 분류 로직만
@@ -125,7 +135,10 @@ function addSessionTags(session: SessionTaintState, tags: ToolRiskTag[]): void {
 
 /** 도구 결과가 도착했을 때 소스를 분류해 세션 오염 상태를 갱신한다. (Image 3 왼쪽 흐름) */
 export function tagToolResult(sessionId: string, toolName: string): void {
-  addSessionTags(getOrCreateSession(sessionId), classifySourceTags(toolName));
+  const tags = classifySourceTags(toolName);
+  addSessionTags(getOrCreateSession(sessionId), tags);
+  // 계보 병행 기록 — args/result가 없으므로 연결은 3순위(TEMPORAL_FALLBACK)/NONE으로 떨어진다
+  createTaintNode(sessionId, toolName, tags, {});
 }
 
 // ---------------------------------------------------------------------------
@@ -143,13 +156,8 @@ interface RecordedPayload {
 
 const payloadStore = new Map<string, RecordedPayload[]>();
 
-/**
- * 도구 결과 본문을 세션에 기록하고 태그를 갱신한다.
- * tagToolResult의 상위 호환 — 페이로드까지 넘기면 (a) 내용 기반 비밀 탐지
- * (2·3순위: 엔트로피·정규식)가 동작하고, (b) 나중에 attemptSanitization이
- * 이 데이터를 실제로 정화·검증할 수 있다.
- */
-export function recordToolPayload(sessionId: string, toolName: string, payload: unknown): void {
+/** 출처 기반(1순위) + 내용 기반(2·3순위) 태그를 계산한다 */
+function computeResultTags(toolName: string, payload: unknown): ToolRiskTag[] {
   const tags = classifySourceTags(toolName);
 
   // 내용 기반(2·3순위): 출처가 민감 소스가 아니어도 페이로드에 비밀(고엔트로피
@@ -158,13 +166,42 @@ export function recordToolPayload(sessionId: string, toolName: string, payload: 
   if (det && !tags.includes(ToolRiskTag.SENSITIVE) && detectSecrets(payload, det).length > 0) {
     tags.push(ToolRiskTag.SENSITIVE);
   }
+  return tags;
+}
 
+/**
+ * 도구 결과 본문을 세션에 기록하고 태그를 갱신한다.
+ * tagToolResult의 상위 호환 — 페이로드까지 넘기면 (a) 내용 기반 비밀 탐지
+ * (2·3순위: 엔트로피·정규식)가 동작하고, (b) 나중에 attemptSanitization이
+ * 이 데이터를 실제로 정화·검증할 수 있다.
+ */
+export function recordToolPayload(sessionId: string, toolName: string, payload: unknown): void {
+  recordToolResult(sessionId, toolName, undefined, payload);
+}
+
+/**
+ * recordToolPayload의 풀 기능 확장 — 호출 인자(args)까지 받는 새 진입점.
+ * 기존 동작(태깅·세션 갱신·payloadStore 기록)에 더해 계보(lineage) 노드를 만들어
+ * 반환한다. args가 있어야 1순위(MCP 참조)·2순위(값 매칭) parent 연결이 가능하다.
+ * 계보는 아직 판정에 영향을 주지 않는 병행 기록이다 (전파·정화 연동은 다음 단계).
+ */
+export function recordToolResult(
+  sessionId: string,
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+  result: unknown
+): TaintNode {
+  const tags = computeResultTags(toolName, result);
   addSessionTags(getOrCreateSession(sessionId), tags);
 
-  if (tags.length === 0) return; // 깨끗한 소스·내용은 정화 대상이 아니므로 기록 불필요
-  const records = payloadStore.get(sessionId) ?? [];
-  records.push({ toolName, tags, payload });
-  payloadStore.set(sessionId, records);
+  if (tags.length > 0) {
+    // 깨끗한 소스·내용은 정화 대상이 아니므로 payloadStore에는 기록하지 않는다
+    const records = payloadStore.get(sessionId) ?? [];
+    records.push({ toolName, tags, payload: result });
+    payloadStore.set(sessionId, records);
+  }
+
+  return createTaintNode(sessionId, toolName, tags, { args, result });
 }
 
 // ---------------------------------------------------------------------------
