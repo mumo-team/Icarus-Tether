@@ -1,0 +1,9 @@
+{
+  "sensitiveSources": ["query_customer_db", "read_internal_file"],
+  "untrustedSources": ["fetch_web_page", "read_email"],
+  "sinks": {
+    "send_email": "OUTBOUND_SINK",
+    "http_post": "OUTBOUND_SINK",
+    "write_external_file": "OUTBOUND_SINK"
+  }
+}
