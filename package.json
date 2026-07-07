@@ -1,0 +1,23 @@
+{
+  "name": "taintguard",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Icarus-Tether — MCP 행동 오염흐름 추적 보안 게이트웨이",
+  "workspaces": [
+    "shared/types",
+    "proxy",
+    "policy-engine",
+    "dashboard"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev:proxy": "npm run dev -w proxy",
+    "dev:policy": "npm run dev -w policy-engine",
+    "dev:dashboard": "npm run dev -w dashboard"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "Apache-2.0"
+}
