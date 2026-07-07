@@ -1,0 +1,22 @@
+{
+  "domain": "dev",
+  "sensitiveSourceTools": ["read_env_file", "read_secrets", "get_db_credentials"],
+  "untrustedSourceTools": ["read_github_issue", "read_pr_comment", "fetch_web_page"],
+  "outboundSinkTools": ["http_post", "push_to_remote", "install_package"],
+  "unknownToolPolicy": "deny",
+  "sensitiveSourcePolicy": "tag_all",
+  "secretDetection": {
+    "bySource": true,
+    "byEntropy": { "minLength": 20, "entropyThreshold": 3.8 },
+    "byRegex": [
+      { "type": "AWS_KEY", "pattern": "\\bAKIA[0-9A-Z]{16}\\b" },
+      { "type": "GITHUB_TOKEN", "pattern": "\\bgh[pousr]_[A-Za-z0-9]{36,255}\\b" }
+    ]
+  },
+  "extractionSchema": {
+    "fields": {
+      "type": { "kind": "enum", "values": ["bug", "feature", "question"] },
+      "title": { "kind": "string", "maxLength": 80, "charset": "safe-text" }
+    }
+  }
+}

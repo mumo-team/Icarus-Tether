@@ -4,6 +4,13 @@
  * 역할: 세션별 오염 태그를 추적하고, "SENSITIVE + UNTRUSTED_ORIGIN이 동시에
  * OUTBOUND_SINK로 나가려 하는가"를 결정론적 규칙으로 판정한다.
  *
+ * 5원칙:
+ *   1. 판단은 결정론 코드가 (AI 호출 없음)
+ *   2. 그릇을 좁게 (스키마 밖 값은 담길 자리 없음 — sanitization.ts)
+ *   3. 행동으로 판단 (코드는 도구 이름이 아니라 분류·성질만 다룬다; 이름은 설정에)
+ *   4. 모르면 의심 — 미분류 도구는 default-deny (unknownToolPolicy로 튜닝 가능)
+ *   5. 실패는 안전하게 — 정화·검증 실패 시 태그 유지 → 차단
+ *
  * 남은 TODO:
  * TODO(B): SessionTaintState를 인메모리 Map 대신 Redis 등으로 교체 (다중 인스턴스 대응)
  */
@@ -18,10 +25,27 @@ import {
   type SanitizationResult,
   SanitizationMethod,
 } from "@taintguard/types";
-import { getToolRegistry } from "./registry.js";
+import { getPolicyConfig, type PolicyConfig } from "./config.js";
+import { detectSecrets } from "./secret-detection.js";
 import { extractStructured, tokenizePII } from "./sanitization.js";
 
+export {
+  loadPolicyConfig,
+  getPolicyConfig,
+  NAMED_CHARSETS,
+  type PolicyConfig,
+  type UnknownToolPolicy,
+  type SecretDetectionConfig,
+  type ExtractionSchemaConfig,
+  type FieldSpec,
+  type PatternSpec,
+} from "./config.js";
 export { loadToolRegistry, getToolRegistry, type ToolRegistry } from "./registry.js";
+export {
+  detectSecrets,
+  shannonEntropy,
+  type DetectedSecret,
+} from "./secret-detection.js";
 export {
   extractStructured,
   tokenizePII,
@@ -33,18 +57,48 @@ export {
 } from "./sanitization.js";
 
 // ---------------------------------------------------------------------------
-// 도구 정적 분류 — config/tool-registry.json 에서 로드 (registry.ts)
+// 도구 분류 — 값은 설정(config/*.json)에서, 코드는 분류 로직만
 // ---------------------------------------------------------------------------
 
+/** 설정의 어느 목록에든 등장하는(= 우리가 성질을 아는) 도구인가 */
+function isClassifiedTool(cfg: PolicyConfig, toolName: string): boolean {
+  return (
+    cfg.sensitiveSourceTools.has(toolName) ||
+    cfg.untrustedSourceTools.has(toolName) ||
+    cfg.sinks.has(toolName)
+  );
+}
+
 function classifySink(toolName: string): SinkClass {
-  return getToolRegistry().sinks.get(toolName) ?? SinkClass.READ;
+  const cfg = getPolicyConfig();
+  const explicit = cfg.sinks.get(toolName);
+  if (explicit) return explicit;
+  if (isClassifiedTool(cfg, toolName)) return SinkClass.READ; // 소스로는 알지만 싱크 미등록 → 읽기
+
+  // 원칙 4 default-deny: 미분류 도구는 외부 유출 능력이 있다고 가정
+  if (cfg.unknownToolPolicy === "warn") {
+    console.warn(
+      `[policy-engine] 미분류 도구 "${toolName}" — unknownToolPolicy=warn이라 READ로 취급 (차단 안 함)`
+    );
+    return SinkClass.READ;
+  }
+  return SinkClass.OUTBOUND_SINK;
 }
 
 function classifySourceTags(toolName: string): ToolRiskTag[] {
-  const registry = getToolRegistry();
+  const cfg = getPolicyConfig();
   const tags: ToolRiskTag[] = [];
-  if (registry.sensitiveSources.has(toolName)) tags.push(ToolRiskTag.SENSITIVE);
-  if (registry.untrustedSources.has(toolName)) tags.push(ToolRiskTag.UNTRUSTED_ORIGIN);
+
+  // 1순위 출처 기반: 민감 소스면 내용 무관 전부 SENSITIVE (sensitiveSourcePolicy: tag_all)
+  const bySource = cfg.secretDetection?.bySource ?? true;
+  if (bySource && cfg.sensitiveSourceTools.has(toolName)) tags.push(ToolRiskTag.SENSITIVE);
+
+  if (cfg.untrustedSourceTools.has(toolName)) tags.push(ToolRiskTag.UNTRUSTED_ORIGIN);
+
+  // 원칙 4 default-deny: 미분류 도구의 결과는 신뢰할 수 없다
+  if (!isClassifiedTool(cfg, toolName) && !tags.includes(ToolRiskTag.UNTRUSTED_ORIGIN)) {
+    tags.push(ToolRiskTag.UNTRUSTED_ORIGIN);
+  }
   return tags;
 }
 
@@ -62,14 +116,16 @@ function getOrCreateSession(sessionId: string): SessionTaintState {
   return fresh;
 }
 
-/** 도구 결과가 도착했을 때 소스를 분류해 세션 오염 상태를 갱신한다. (Image 3 왼쪽 흐름) */
-export function tagToolResult(sessionId: string, toolName: string): void {
-  const session = getOrCreateSession(sessionId);
-
-  for (const tag of classifySourceTags(toolName)) {
+function addSessionTags(session: SessionTaintState, tags: ToolRiskTag[]): void {
+  for (const tag of tags) {
     if (!session.tags.includes(tag)) session.tags.push(tag);
   }
   session.updatedAt = new Date().toISOString();
+}
+
+/** 도구 결과가 도착했을 때 소스를 분류해 세션 오염 상태를 갱신한다. (Image 3 왼쪽 흐름) */
+export function tagToolResult(sessionId: string, toolName: string): void {
+  addSessionTags(getOrCreateSession(sessionId), classifySourceTags(toolName));
 }
 
 // ---------------------------------------------------------------------------
@@ -89,15 +145,23 @@ const payloadStore = new Map<string, RecordedPayload[]>();
 
 /**
  * 도구 결과 본문을 세션에 기록하고 태그를 갱신한다.
- * tagToolResult의 상위 호환 — 페이로드까지 넘기면 나중에 attemptSanitization이
+ * tagToolResult의 상위 호환 — 페이로드까지 넘기면 (a) 내용 기반 비밀 탐지
+ * (2·3순위: 엔트로피·정규식)가 동작하고, (b) 나중에 attemptSanitization이
  * 이 데이터를 실제로 정화·검증할 수 있다.
  */
 export function recordToolPayload(sessionId: string, toolName: string, payload: unknown): void {
-  tagToolResult(sessionId, toolName);
-
   const tags = classifySourceTags(toolName);
-  if (tags.length === 0) return; // 깨끗한 소스는 정화 대상이 아니므로 기록 불필요
 
+  // 내용 기반(2·3순위): 출처가 민감 소스가 아니어도 페이로드에 비밀(고엔트로피
+  // 문자열·유명 키 포맷)이 실려 있으면 SENSITIVE — "GitHub 이슈에 유출된 AWS 키" 케이스
+  const det = getPolicyConfig().secretDetection;
+  if (det && !tags.includes(ToolRiskTag.SENSITIVE) && detectSecrets(payload, det).length > 0) {
+    tags.push(ToolRiskTag.SENSITIVE);
+  }
+
+  addSessionTags(getOrCreateSession(sessionId), tags);
+
+  if (tags.length === 0) return; // 깨끗한 소스·내용은 정화 대상이 아니므로 기록 불필요
   const records = payloadStore.get(sessionId) ?? [];
   records.push({ toolName, tags, payload });
   payloadStore.set(sessionId, records);
@@ -109,7 +173,7 @@ export function recordToolPayload(sessionId: string, toolName: string, payload: 
 
 /**
  * 각 정화 방법이 해제를 검증할 수 있는 태그.
- * - 토큰화: PII를 불투명 토큰으로 치환했음을 검증 → SENSITIVE 해제
+ * - 토큰화: PII·비밀을 불투명 토큰으로 치환했음을 검증 → SENSITIVE 해제
  * - 구조화 추출: 좁은 스키마 필드만 남겼음을 검증 → UNTRUSTED_ORIGIN 해제
  */
 const METHOD_CLEARS: Record<SanitizationMethod, ToolRiskTag> = {
@@ -123,9 +187,10 @@ const METHOD_CLEARS: Record<SanitizationMethod, ToolRiskTag> = {
  *
  * 동작 (전부 결정론적 규칙, AI 판단 없음):
  * 1. method가 해제할 수 있는 태그(targetTag)를 지닌 기록 페이로드를 모두 찾는다.
- * 2. 각 페이로드에 정화를 적용하고 검증한다 (sanitization.ts).
+ * 2. 각 페이로드에 활성 설정 기준의 정화를 적용하고 검증한다 (sanitization.ts).
  * 3. "전부" 검증을 통과했을 때만 세션과 페이로드에서 targetTag를 해제한다.
- *    하나라도 실패하거나, 검증할 페이로드가 기록돼 있지 않으면 태그 유지 (fail-safe).
+ *    하나라도 실패하거나, 검증할 페이로드가 기록돼 있지 않거나, 설정에 해당
+ *    방법의 근거(스키마·패턴)가 없으면 태그 유지 (fail-safe).
  */
 export function attemptSanitization(
   sessionId: string,
@@ -185,11 +250,14 @@ export function evaluateToolCall(ctx: ToolCallContext): PolicyDecision {
   if (hasSensitive && hasUntrusted) {
     const matchedTags = [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN];
     emitTrifectaEvent(ctx, sinkClass, matchedTags);
+    const unclassified = !isClassifiedTool(getPolicyConfig(), ctx.toolName);
     return {
       sessionId: ctx.sessionId,
       toolName: ctx.toolName,
       allowed: false,
-      reason: "lethal trifecta 감지: 민감 데이터 + 비신뢰 입력이 외부 유출 시도와 겹침",
+      reason:
+        "lethal trifecta 감지: 민감 데이터 + 비신뢰 입력이 외부 유출 시도와 겹침" +
+        (unclassified ? " (미분류 도구 — default-deny로 OUTBOUND_SINK 취급)" : ""),
       matchedTags,
     };
   }
