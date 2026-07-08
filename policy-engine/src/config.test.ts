@@ -73,6 +73,25 @@ test("outboundSinkTools 배열과 sinks 맵이 둘 다 있으면 병합된다", 
   assert.equal(cfg.sinks.get("save_draft"), SinkClass.WRITE_INTERNAL);
 });
 
+test("propagationMode: dev.json은 live, 생략 시 기본 snapshot, 그 외 값은 예외", () => {
+  assert.equal(loadPolicyConfig(DEV_JSON).propagationMode, "live");
+
+  const legacy = writeTmpConfig("prop-default.json", {
+    sensitiveSources: [],
+    untrustedSources: [],
+    sinks: {},
+  });
+  assert.equal(loadPolicyConfig(legacy).propagationMode, "snapshot");
+
+  const bad = writeTmpConfig("prop-bad.json", {
+    sensitiveSourceTools: [],
+    untrustedSourceTools: [],
+    outboundSinkTools: [],
+    propagationMode: "eager",
+  });
+  assert.throws(() => loadPolicyConfig(bad), /"snapshot" \| "live"/);
+});
+
 test("fail-closed: 잘못된 형식은 전부 예외", () => {
   const base = {
     sensitiveSourceTools: [],

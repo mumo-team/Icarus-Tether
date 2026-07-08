@@ -36,6 +36,7 @@ export {
   NAMED_CHARSETS,
   type PolicyConfig,
   type UnknownToolPolicy,
+  type PropagationMode,
   type SecretDetectionConfig,
   type ExtractionSchemaConfig,
   type FieldSpec,
@@ -57,6 +58,7 @@ export {
   type SanitizeOutcome,
 } from "./sanitization.js";
 export {
+  addNodeTags,
   getSessionLineage,
   getTaintNode,
   MATCH_TOKEN_MIN_LENGTH,

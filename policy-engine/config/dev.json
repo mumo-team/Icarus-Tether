@@ -5,6 +5,7 @@
   "outboundSinkTools": ["http_post", "push_to_remote", "install_package"],
   "unknownToolPolicy": "deny",
   "sensitiveSourcePolicy": "tag_all",
+  "propagationMode": "live",
   "secretDetection": {
     "bySource": true,
     "byEntropy": { "minLength": 20, "entropyThreshold": 3.8 },

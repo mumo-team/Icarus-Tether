@@ -31,6 +31,14 @@ export type UnknownToolPolicy = "deny" | "warn";
 /** 민감 소스에서 나온 값의 태깅 정책. 현재는 "형식 무관 전부 SENSITIVE"만 지원 */
 export type SensitiveSourcePolicy = "tag_all";
 
+/**
+ * 계보 태그 전파 모드:
+ * - "snapshot" (기본): 노드 생성 시점에 부모 태그를 한 번만 복사. 가볍다.
+ * - "live": 생성 후 부모에 태그가 "추가"되면 자손도 하향 전파로 물려받는다. 정밀하지만 무겁다.
+ *   (두 모드 모두 태그 제거는 절대 전파하지 않는다 — 전파/정화 비대칭)
+ */
+export type PropagationMode = "snapshot" | "live";
+
 export interface PatternSpec {
   /** 토큰 이름에 들어가는 식별자 (대문자·숫자·언더스코어) */
   type: string;
@@ -69,6 +77,7 @@ export interface PolicyConfig {
   sinks: ReadonlyMap<string, SinkClass>;
   unknownToolPolicy: UnknownToolPolicy;
   sensitiveSourcePolicy: SensitiveSourcePolicy;
+  propagationMode: PropagationMode;
   secretDetection: SecretDetectionConfig | null;
   piiPatterns: PatternSpec[];
   extractionSchema: ExtractionSchemaConfig | null;
@@ -258,6 +267,11 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     fail(`"sensitiveSourcePolicy"는 현재 "tag_all"만 지원합니다`);
   }
 
+  const propagationMode = obj.propagationMode ?? "snapshot";
+  if (propagationMode !== "snapshot" && propagationMode !== "live") {
+    fail(`"propagationMode"는 "snapshot" | "live" 중 하나여야 합니다`);
+  }
+
   const domain = obj.domain ?? "default";
   if (typeof domain !== "string") fail(`"domain"은 문자열이어야 합니다`);
 
@@ -268,6 +282,7 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     sinks,
     unknownToolPolicy,
     sensitiveSourcePolicy,
+    propagationMode,
     secretDetection: parseSecretDetection(obj.secretDetection),
     piiPatterns: parsePatternList(obj.piiPatterns, "piiPatterns"),
     extractionSchema: parseExtractionSchema(obj.extractionSchema),

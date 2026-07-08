@@ -1,15 +1,22 @@
 /**
- * 값 단위 taint 계보(lineage) 그래프 — 1단계: 자료구조 + 노드 생성/연결만.
+ * 값 단위 taint 계보(lineage) 그래프 — 2단계: 태그 전파(propagation)까지.
  *
  * 기존 세션 boolean 방식(sessionStore)을 대체하지 않고 병행 기록한다.
- * 태그 전파(parent → child)와 정화 연동은 다음 단계 — 이 모듈은 아직
+ * 정화 연동과 계보 기반 판정 전환은 다음 단계 — 이 모듈은 아직
  * 판정(evaluateToolCall)에 아무 영향을 주지 않는다.
  *
  * parent 연결 3층 (전부 결정론, 우선순위 — 상위 층이 맞으면 하위 층 미시도):
  *   1순위 MCP_REF          — 인자 속에 세션 그래프의 노드 id("tn_…")가 있으면 명시 참조
  *   2순위 VALUE_MATCH      — 이전 노드 결과의 토큰(해시)이 이번 인자 토큰과 일치
- *   3순위 TEMPORAL_FALLBACK — 둘 다 없으면 아직 오염 태그가 남은 노드 전부를
+ *   3순위 TEMPORAL_FALLBACK — 둘 다 없으면 자체 오염(ownTags)이 있는 노드 전부를
  *                             보수적으로 parent 후보로 (시간 근사, fail-safe, 항상 약한 연결)
+ *
+ * 전파 3대 불변식 (구조적으로 보장):
+ *   1. 단방향 — 오염은 부모→자식으로만 흐른다. 역방향(자식→부모) 전파 코드는
+ *      존재하지 않는다 (cascadeDown은 childIndex만 따라간다).
+ *   2. 비대칭 — 전파는 "태그 추가"만. 태그를 제거하는 API 자체가 없다.
+ *      부모가 정화돼도 자식은 이미 원본 값을 복사했을 수 있으므로 자식 태그 유지.
+ *   3. 판정 불간섭 — 계보 태그는 병행 기록. 차단은 여전히 sessionStore가 담당.
  *
  * 프라이버시: 결과 원본은 계보에 저장하지 않는다. 값 매칭용 토큰의
  * sha256 해시(+길이)만 남긴다 — 민감 원본은 sanitization 볼트가 관리하고,
@@ -18,6 +25,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { ToolRiskTag } from "@taintguard/types";
+import { getPolicyConfig } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // 타입
@@ -38,8 +46,10 @@ export interface TaintNode {
   /** "tn_<uuid>" — 접두사 덕에 인자 속 MCP 참조(1순위)를 딥 스캔으로 식별 가능 */
   id: string;
   toolName: string;
-  /** 이 노드 자체의 소스·내용 기반 태그 (전파는 다음 단계) */
+  /** 유효 태그 = ownTags ∪ (모든 parent의 tags 합집합). 상속분이 여기에 쌓인다. */
   tags: Set<ToolRiskTag>;
+  /** 이 노드 자체의 소스·내용 기반 태그 (상속분 제외 — 감사 시 출처 구분용) */
+  ownTags: Set<ToolRiskTag>;
   /** parentLinks에서 파생된 id 목록 */
   parents: string[];
   /** 연결별 방법·신뢰도 기록 (디버깅·검수용) */
@@ -86,12 +96,27 @@ const TOKEN_RUN = /[\p{L}\p{N}@._+-]{8,}/gu;
 
 const lineageStore = new Map<string, Map<string, TaintNode>>();
 
+/**
+ * 자식 인덱스: sessionId → (parentId → 자식 id 집합).
+ * live 전파(cascadeDown)가 따라가는 유일한 방향 — 부모를 거슬러 올라가는
+ * 인덱스는 만들지 않아 역류(자식→부모) 전파가 구조적으로 불가능하다 (불변식 1).
+ */
+const childIndex = new Map<string, Map<string, Set<string>>>();
+
 function getOrCreateGraph(sessionId: string): Map<string, TaintNode> {
   const existing = lineageStore.get(sessionId);
   if (existing) return existing;
   const fresh = new Map<string, TaintNode>();
   lineageStore.set(sessionId, fresh);
   return fresh;
+}
+
+function registerChild(sessionId: string, parentId: string, childId: string): void {
+  const perSession = childIndex.get(sessionId) ?? new Map<string, Set<string>>();
+  childIndex.set(sessionId, perSession);
+  const children = perSession.get(parentId) ?? new Set<string>();
+  perSession.set(parentId, children);
+  children.add(childId);
 }
 
 export function getSessionLineage(sessionId: string): ReadonlyMap<string, TaintNode> {
@@ -195,9 +220,12 @@ export function createTaintNode(
     }
   }
 
-  // 3순위 TEMPORAL_FALLBACK: 아직 오염 태그가 남은 노드 전부 — 보수적, 항상 약한 연결 (fail-safe)
+  // 3순위 TEMPORAL_FALLBACK: 자체 오염(ownTags) 노드 전부 — 보수적, 항상 약한 연결 (fail-safe)
+  // 상속-만-오염인 노드는 제외한다: 그 태그의 출처인 자체-오염 조상이 이미 후보라
+  // 태그 보수성은 유지되고, 후보 눈덩이만 커지는 것을 막는다.
+  // (주의: 다음 단계에서 정화가 ownTags를 제거하게 되면 이 기준은 재검토 필요)
   if (linkMethod === "NONE") {
-    const tainted = [...graph.values()].filter((n) => n.tags.size > 0);
+    const tainted = [...graph.values()].filter((n) => n.ownTags.size > 0);
     if (tainted.length > 0) {
       linkMethod = "TEMPORAL_FALLBACK";
       parentLinks = tainted.map((n) => ({
@@ -208,10 +236,21 @@ export function createTaintNode(
     }
   }
 
+  // 전파 (요구사항 1): 유효 태그 = 자기자신 태그 ∪ 모든 parent의 tags 합집합.
+  // snapshot·live 모두 생성 시점에는 동일하게 복사한다 — live는 이후
+  // addNodeTags에 의한 사후 추가분이 하향 전파되는 점만 다르다.
+  const effectiveTags = new Set(tags);
+  for (const link of parentLinks) {
+    const parent = graph.get(link.nodeId);
+    if (!parent) continue;
+    for (const tag of parent.tags) effectiveTags.add(tag);
+  }
+
   const node: TaintNode = {
     id: `tn_${randomUUID()}`,
     toolName,
-    tags: new Set(tags),
+    tags: effectiveTags,
+    ownTags: new Set(tags),
     parents: parentLinks.map((l) => l.nodeId),
     parentLinks,
     linkMethod,
@@ -220,5 +259,60 @@ export function createTaintNode(
     resultTokens: input.result !== undefined ? extractMatchTokens(input.result) : new Map(),
   };
   graph.set(node.id, node);
+  for (const link of parentLinks) registerChild(sessionId, link.nodeId, node.id);
   return node;
+}
+
+// ---------------------------------------------------------------------------
+// 사후 태그 추가 + live 전파
+// ---------------------------------------------------------------------------
+
+/**
+ * 이미 생성된 노드에 오염 태그를 추가한다 — 지연 발견된 오염(사후 콘텐츠 스캔,
+ * 프록시의 늦은 보고 등)의 진입점. sessionStore는 건드리지 않는다 (불변식 3).
+ *
+ * propagationMode에 따라:
+ * - "snapshot": 이 노드에만 추가. 자식은 생성 시점 복사본을 유지.
+ * - "live": 새로 추가된 태그만 자손에게 하향 전파(BFS). 이미 있던 태그의
+ *   재추가는 no-op — 전파는 태그가 "늘어날" 때만 일어난다 (불변식 2).
+ */
+export function addNodeTags(sessionId: string, nodeId: string, tags: ToolRiskTag[]): void {
+  const node = lineageStore.get(sessionId)?.get(nodeId);
+  if (!node) {
+    throw new Error(`[lineage] 세션 "${sessionId}"에 노드 "${nodeId}"가 없습니다`);
+  }
+
+  const added = tags.filter((t) => !node.tags.has(t));
+  for (const tag of tags) {
+    node.ownTags.add(tag); // 이 노드에서 직접 관측된 오염이므로 자체 태그
+    node.tags.add(tag);
+  }
+  if (added.length === 0) return;
+
+  if (getPolicyConfig().propagationMode === "live") {
+    cascadeDown(sessionId, nodeId, added);
+  }
+}
+
+/**
+ * 하향 전파 — childIndex(부모→자식)만 따라가므로 역류가 불가능하다 (불변식 1).
+ * "추가"만 하고 제거는 없다 (불변식 2). 부모는 항상 자식보다 먼저 생성되므로
+ * 사이클이 있을 수 없지만, visited 집합으로 이중 안전장치를 둔다.
+ */
+function cascadeDown(sessionId: string, fromId: string, tags: ToolRiskTag[]): void {
+  const graph = lineageStore.get(sessionId);
+  const perSession = childIndex.get(sessionId);
+  if (!graph || !perSession) return;
+
+  const visited = new Set<string>([fromId]);
+  const queue = [...(perSession.get(fromId) ?? [])];
+  while (queue.length > 0) {
+    const id = queue.shift();
+    if (id === undefined || visited.has(id)) continue;
+    visited.add(id);
+    const child = graph.get(id);
+    if (!child) continue;
+    for (const tag of tags) child.tags.add(tag); // 상속분 — ownTags에는 넣지 않는다
+    queue.push(...(perSession.get(id) ?? []));
+  }
 }
