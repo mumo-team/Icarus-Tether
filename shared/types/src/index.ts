@@ -1,5 +1,5 @@
 /**
- * TaintGuard 공유 타입 계약
+ * Icarus-Tether 공유 타입 계약
  *
  * 이 파일은 proxy(A) · policy-engine(B) · dashboard(C) 세 워크스페이스가
  * 공통으로 import해서 쓰는 "1주차 계약"입니다.

@@ -1,5 +1,5 @@
 {
-  "name": "@taintguard/proxy",
+  "name": "@icarus-tether/proxy",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@taintguard/types": "*",
+    "@icarus-tether/types": "*",
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "devDependencies": {

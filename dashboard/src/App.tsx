@@ -9,7 +9,7 @@
  */
 
 import { useState } from "react";
-import type { AuditLogEntry, ApprovalRequest } from "@taintguard/types";
+import type { AuditLogEntry, ApprovalRequest } from "@icarus-tether/types";
 
 // 1주차 스텁 데이터 — 실제로는 API에서 받아온다
 const SAMPLE_LOGS: AuditLogEntry[] = [
@@ -31,7 +31,7 @@ export default function App() {
 
   return (
     <div style={{ fontFamily: "sans-serif", padding: "24px" }}>
-      <h1>TaintGuard 대시보드 (1주차 스텁)</h1>
+      <h1>Icarus-Tether 대시보드 (1주차 스텁)</h1>
 
       <h2>감사 로그</h2>
       <ul>
