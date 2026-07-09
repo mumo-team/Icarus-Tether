@@ -1,22 +1,25 @@
 /**
- * 값 단위 taint 계보(lineage) 그래프 — 2단계: 태그 전파(propagation)까지.
+ * 값 단위 taint 계보(lineage) 그래프 — 3단계: 정화(declassification) 연동까지.
  *
  * 기존 세션 boolean 방식(sessionStore)을 대체하지 않고 병행 기록한다.
- * 정화 연동과 계보 기반 판정 전환은 다음 단계 — 이 모듈은 아직
+ * 계보 기반 판정 전환은 다음 단계 — 이 모듈은 아직
  * 판정(evaluateToolCall)에 아무 영향을 주지 않는다.
  *
  * parent 연결 3층 (전부 결정론, 우선순위 — 상위 층이 맞으면 하위 층 미시도):
  *   1순위 MCP_REF          — 인자 속에 세션 그래프의 노드 id("tn_…")가 있으면 명시 참조
  *   2순위 VALUE_MATCH      — 이전 노드 결과의 토큰(해시)이 이번 인자 토큰과 일치
- *   3순위 TEMPORAL_FALLBACK — 둘 다 없으면 자체 오염(ownTags)이 있는 노드 전부를
+ *   3순위 TEMPORAL_FALLBACK — 둘 다 없으면 "살아있는 오염의 최전선(루트 보유자)"을
  *                             보수적으로 parent 후보로 (시간 근사, fail-safe, 항상 약한 연결)
  *
- * 전파 3대 불변식 (구조적으로 보장):
+ * 전파·정화 불변식 (구조적으로 보장):
  *   1. 단방향 — 오염은 부모→자식으로만 흐른다. 역방향(자식→부모) 전파 코드는
  *      존재하지 않는다 (cascadeDown은 childIndex만 따라간다).
- *   2. 비대칭 — 전파는 "태그 추가"만. 태그를 제거하는 API 자체가 없다.
- *      부모가 정화돼도 자식은 이미 원본 값을 복사했을 수 있으므로 자식 태그 유지.
- *   3. 판정 불간섭 — 계보 태그는 병행 기록. 차단은 여전히 sessionStore가 담당.
+ *   2. 비대칭 — 전파는 "태그 추가"만. 정화(제거)는 declassifyNodeTag가 그 노드
+ *      하나만 건드리며 자손 순회 코드가 없다 — 부모가 정화돼도 자식은 이미 원본
+ *      값을 복사했을 수 있으므로 각자 정화를 통과해야만 풀린다.
+ *   3. 소급 금지 — parents/parentLinks는 역사다. 정화는 "지금부터 안전"이지
+ *      "과거 오염이 없던 일"이 아니므로 절대 수정하지 않는다.
+ *   4. 판정 불간섭 — 계보 태그는 병행 기록. 차단은 여전히 sessionStore가 담당.
  *
  * 프라이버시: 결과 원본은 계보에 저장하지 않는다. 값 매칭용 토큰의
  * sha256 해시(+길이)만 남긴다 — 민감 원본은 sanitization 볼트가 관리하고,
@@ -176,6 +179,18 @@ export interface TaintNodeInput {
   result?: unknown;
 }
 
+/**
+ * 태그별 루트 보유자 판정: 노드가 어떤 태그 T에 대해 "T를 갖고 있으면서 부모 중
+ * 누구도 T를 갖고 있지 않은" 상태면 true. 폴백 후보 = 살아있는 오염의 최전선.
+ */
+function isLiveTaintRoot(graph: Map<string, TaintNode>, node: TaintNode): boolean {
+  for (const tag of node.tags) {
+    const coveredByParent = node.parents.some((pid) => graph.get(pid)?.tags.has(tag));
+    if (!coveredByParent) return true;
+  }
+  return false;
+}
+
 export function createTaintNode(
   sessionId: string,
   toolName: string,
@@ -220,12 +235,16 @@ export function createTaintNode(
     }
   }
 
-  // 3순위 TEMPORAL_FALLBACK: 자체 오염(ownTags) 노드 전부 — 보수적, 항상 약한 연결 (fail-safe)
-  // 상속-만-오염인 노드는 제외한다: 그 태그의 출처인 자체-오염 조상이 이미 후보라
-  // 태그 보수성은 유지되고, 후보 눈덩이만 커지는 것을 막는다.
-  // (주의: 다음 단계에서 정화가 ownTags를 제거하게 되면 이 기준은 재검토 필요)
+  // 3순위 TEMPORAL_FALLBACK: "살아있는 오염의 최전선(frontier)"만 후보 — 보수적,
+  // 항상 약한 연결 (fail-safe).
+  //
+  // 태그별 루트 보유자 규칙: N이 태그 T를 tags에 갖고 있고 N의 부모 중 누구도 T를
+  // 갖고 있지 않으면, N이 T의 루트 보유자 = 후보다.
+  //  - 정화 전: 소스 노드만 후보 (상속받은 자식은 부모가 T를 보유하므로 제외 — 눈덩이 방지)
+  //  - 소스 A가 정화돼 T를 잃으면: A의 직계 자식이 자동으로 루트 보유자로 승격(오염원 승계).
+  //    손자는 부모(자식)가 아직 T를 보유하므로 여전히 제외 — 후보는 항상 최전선만.
   if (linkMethod === "NONE") {
-    const tainted = [...graph.values()].filter((n) => n.ownTags.size > 0);
+    const tainted = [...graph.values()].filter((n) => isLiveTaintRoot(graph, n));
     if (tainted.length > 0) {
       linkMethod = "TEMPORAL_FALLBACK";
       parentLinks = tainted.map((n) => ({
@@ -299,6 +318,26 @@ export function addNodeTags(sessionId: string, nodeId: string, tags: ToolRiskTag
  * "추가"만 하고 제거는 없다 (불변식 2). 부모는 항상 자식보다 먼저 생성되므로
  * 사이클이 있을 수 없지만, visited 집합으로 이중 안전장치를 둔다.
  */
+/**
+ * 정화(declassification) 전용 태그 제거 — attemptSanitization(index.ts)만 사용할 것.
+ * 의도적으로 index.ts에서 re-export하지 않는다: 엔진 공개 API에 범용 태그 제거
+ * 함수가 존재하면 전파/정화 비대칭이 여기저기서 깨질 수 있기 때문.
+ *
+ * 정확히 "정화 검증을 통과한 그 노드 하나"만 건드린다:
+ *  - 이 함수에는 자식/자손 순회 코드가 없다 — childIndex를 아예 참조하지 않으므로
+ *    부모 정화가 자식 태그를 떼는 일은 구조적으로 불가능하다. 자식은 이미 부모의
+ *    원본 값을 복사했을 수 있으므로 각자 정화를 통과해야만 풀린다 (비대칭).
+ *  - parents/parentLinks는 건드리지 않는다 — 계보는 역사, 소급 수정 금지.
+ *  - 이 노드가 태그를 잃어 폴백 후보에서 빠지면, 오염을 물려받은 직계 자식이
+ *    루트 보유자 규칙(isLiveTaintRoot)에 의해 자동으로 후보 자격을 승계한다.
+ */
+export function declassifyNodeTag(sessionId: string, nodeId: string, tag: ToolRiskTag): void {
+  const node = lineageStore.get(sessionId)?.get(nodeId);
+  if (!node) return; // 계보는 부가 기록 — 노드가 없어도 정화 자체는 유효 (태그 유지 방향이 아님에 유의: 없는 노드는 제거할 것도 없다)
+  node.ownTags.delete(tag);
+  node.tags.delete(tag);
+}
+
 function cascadeDown(sessionId: string, fromId: string, tags: ToolRiskTag[]): void {
   const graph = lineageStore.get(sessionId);
   const perSession = childIndex.get(sessionId);

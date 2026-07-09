@@ -28,7 +28,7 @@ import {
 import { getPolicyConfig, type PolicyConfig } from "./config.js";
 import { detectSecrets } from "./secret-detection.js";
 import { extractStructured, tokenizePII } from "./sanitization.js";
-import { createTaintNode, type TaintNode } from "./lineage.js";
+import { createTaintNode, declassifyNodeTag, type TaintNode } from "./lineage.js";
 
 export {
   loadPolicyConfig,
@@ -154,6 +154,8 @@ interface RecordedPayload {
   /** 이 페이로드가 아직 지니고 있는 태그 (정화 성공 시 해당 태그 제거) */
   tags: ToolRiskTag[];
   payload: unknown;
+  /** 대응하는 계보 노드 id — 정화 성공 시 그 노드의 태그도 함께 해제하기 위한 연결 고리 */
+  nodeId?: string;
 }
 
 const payloadStore = new Map<string, RecordedPayload[]>();
@@ -196,14 +198,17 @@ export function recordToolResult(
   const tags = computeResultTags(toolName, result);
   addSessionTags(getOrCreateSession(sessionId), tags);
 
+  // 노드를 먼저 만들어 payload 레코드에 id를 심는다 (정화 ↔ 계보 연동 고리)
+  const node = createTaintNode(sessionId, toolName, tags, { args, result });
+
   if (tags.length > 0) {
     // 깨끗한 소스·내용은 정화 대상이 아니므로 payloadStore에는 기록하지 않는다
     const records = payloadStore.get(sessionId) ?? [];
-    records.push({ toolName, tags, payload: result });
+    records.push({ toolName, tags, payload: result, nodeId: node.id });
     payloadStore.set(sessionId, records);
   }
 
-  return createTaintNode(sessionId, toolName, tags, { args, result });
+  return node;
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +260,9 @@ export function attemptSanitization(
         const outcome = outcomes[i];
         if (outcome.ok) record.payload = outcome.value;
         record.tags = record.tags.filter((t) => t !== targetTag);
+        // 계보 연동: 정화 검증을 통과한 "그 노드"의 태그만 해제.
+        // 자식 노드는 절대 건드리지 않는다 — 각자 정화를 통과해야 풀린다 (비대칭).
+        if (record.nodeId) declassifyNodeTag(sessionId, record.nodeId, targetTag);
       });
       session.tags = session.tags.filter((t) => t !== targetTag);
       session.updatedAt = new Date().toISOString();
