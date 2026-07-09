@@ -15,7 +15,7 @@ import {
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { ToolRiskTag } from "@icarus-tether/types";
+import { ToolRiskTag, SinkClass } from "@icarus-tether/types";
 import type { ToolCallContext, PolicyDecision } from "@icarus-tether/types";
 
 // ESM엔 __dirname이 없어 import.meta.url로 계산 (실행 위치와 무관하게 경로 고정)
@@ -33,14 +33,22 @@ interface SessionState {
 const sessions = new Map<string, SessionState>();
 
 // 도메인 파트의 정책 엔진이 꽂힐 자리. 지금은 스텁이며, 이 함수 본문만 실제 엔진 호출로 교체하면 된다.
-async function requestPolicyCheck(ctx: ToolCallContext): Promise<PolicyDecision> {
-  if (ctx.toolName === "send_email") {
+async function requestPolicyCheck(
+  ctx: ToolCallContext,
+  sessionTags: Set<ToolRiskTag>
+): Promise<PolicyDecision> {
+  const isOutbound = getToolInfo(ctx.toolName).sinkClass === SinkClass.OUTBOUND_SINK;
+  const hasSensitive = sessionTags.has(ToolRiskTag.SENSITIVE);
+  const hasUntrusted = sessionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN);
+
+  // 트라이펙타: 외부 유출 싱크 + 민감데이터 + 비신뢰입력이 한 세션에 겹칠 때만 차단.
+  if (isOutbound && hasSensitive && hasUntrusted) {
     return {
       sessionId: ctx.sessionId,
       toolName: ctx.toolName,
       allowed: false,
-      reason: "send_email은 외부로 데이터가 나가는 싱크라 데모 정책상 차단됨",
-      matchedTags: [],
+      reason: "트라이펙타: 민감데이터+비신뢰입력이 쌓인 세션에서 외부 유출 시도",
+      matchedTags: [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN],
     };
   }
   return {
@@ -51,16 +59,20 @@ async function requestPolicyCheck(ctx: ToolCallContext): Promise<PolicyDecision>
   };
 }
 
-// 도메인 파트의 소스 분류(ToolRegistry)가 꽂힐 자리. 지금은 도구 이름 → 태그 스텁 표.
-function classifyResultTags(toolName: string): ToolRiskTag[] {
-  switch (toolName) {
-    case "query_customer_db":
-      return [ToolRiskTag.SENSITIVE];
-    case "read_webpage":
-      return [ToolRiskTag.UNTRUSTED_ORIGIN];
-    default:
-      return [];
-  }
+// 도메인 파트의 ToolRegistry가 꽂힐 자리. 도구 하나의 메타데이터를 한 표에 모은다.
+interface ToolInfo {
+  sourceTags: ToolRiskTag[]; // 이 도구 결과에 붙는 오염 태그
+  sinkClass: SinkClass; // 이 도구가 데이터를 어디로 보내는지
+}
+
+const TOOL_REGISTRY: Record<string, ToolInfo> = {
+  query_customer_db: { sourceTags: [ToolRiskTag.SENSITIVE], sinkClass: SinkClass.READ },
+  read_webpage: { sourceTags: [ToolRiskTag.UNTRUSTED_ORIGIN], sinkClass: SinkClass.READ },
+  send_email: { sourceTags: [], sinkClass: SinkClass.OUTBOUND_SINK },
+};
+
+function getToolInfo(toolName: string): ToolInfo {
+  return TOOL_REGISTRY[toolName] ?? { sourceTags: [], sinkClass: SinkClass.READ };
 }
 
 async function main() {
@@ -120,7 +132,7 @@ async function main() {
       timestamp: new Date().toISOString(),
     };
 
-    const decision = await requestPolicyCheck(ctx);
+    const decision = await requestPolicyCheck(ctx, session?.tags ?? new Set());
     if (!decision.allowed) {
       console.error(`[proxy] 차단  ${name}  reason=${decision.reason}`);
       return {
@@ -134,7 +146,7 @@ async function main() {
     const result = await downstream.callTool(request.params);
 
     // 결과에 실린 태그를 분류(스텁)해 세션에 누적한다.
-    for (const tag of classifyResultTags(name)) session?.tags.add(tag);
+    for (const tag of getToolInfo(name).sourceTags) session?.tags.add(tag);
     console.error(
       `[proxy] ⬅ 통과  ${name}  세션태그=[${[...(session?.tags ?? [])].join(", ")}]`
     );
