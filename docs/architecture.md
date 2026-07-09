@@ -28,7 +28,7 @@ THEN 차단 + 감사기록 + 사람 승인 요청
 기존 taint 추적 도구(예: lilith-zero)는 세션 단위로 태그를 누적만 하고 지우는 기능이 없어,
 시간이 지날수록 정상 작업까지 막히는 문제가 있다.
 
-TaintGuard는 토큰화(TOKENIZATION)·구조화 추출(STRUCTURED_EXTRACTION) 같은 검증된 방법을 통과한
+Icarus-Tether는 토큰화(TOKENIZATION)·구조화 추출(STRUCTURED_EXTRACTION) 같은 검증된 방법을 통과한
 데이터에 한해 태그를 안전하게 해제(declassify)해, 세션이 계속 정상 작동하도록 한다.
 
 구현 위치: `policy-engine/src/index.ts`의 `attemptSanitization()`

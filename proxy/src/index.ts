@@ -42,7 +42,7 @@ async function requestPolicyCheck(ctx: ToolCallContext): Promise<PolicyDecision>
     return {
       sessionId: ctx.sessionId,
       toolName: ctx.toolName,
-      allowed: false, // ← 차단
+      allowed: false, // <- 차단
       reason: "send_email은 외부로 데이터가 나가는 싱크라 데모 정책상 차단됨",
       matchedTags: [],
     };

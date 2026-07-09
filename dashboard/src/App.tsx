@@ -31,7 +31,7 @@ export default function App() {
 
   return (
     <div style={{ fontFamily: "sans-serif", padding: "24px" }}>
-      <h1>TaintGuard 대시보드 (1주차 스텁)</h1>
+      <h1>Icarus-Tether 대시보드 (1주차 스텁)</h1>
 
       <h2>감사 로그</h2>
       <ul>
