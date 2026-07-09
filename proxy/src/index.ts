@@ -14,13 +14,19 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { ToolRiskTag, SinkClass } from "@icarus-tether/types";
-import type { ToolCallContext, PolicyDecision } from "@icarus-tether/types";
+import type {
+  ToolCallContext,
+  PolicyDecision,
+  AuditLogEntry,
+} from "@icarus-tether/types";
 
 // ESM엔 __dirname이 없어 import.meta.url로 계산 (실행 위치와 무관하게 경로 고정)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MOCK_SERVER_PATH = resolve(__dirname, "../test/mock-server.ts");
+const AUDIT_LOG_PATH = resolve(__dirname, "../audit.log");
 
 interface SessionState {
   id: string;
@@ -31,6 +37,17 @@ interface SessionState {
 
 // 세션 저장소. stdio에선 세션 1개지만, 다중 클라이언트(HTTP)로 확장되면 여기에 여러 개가 쌓인다.
 const sessions = new Map<string, SessionState>();
+
+// 기록 내용의 sha256 해시 = 위변조 방지 서명. 나중에 다시 계산해 비교하면 변조를 탐지.
+function signEntry(entry: Omit<AuditLogEntry, "signature">): string {
+  return createHash("sha256").update(JSON.stringify(entry)).digest("hex");
+}
+
+// 판정 하나를 서명 붙여 audit.log에 JSON 한 줄로 append. (C가 나중에 이 기록을 전시)
+function writeAuditLog(entry: Omit<AuditLogEntry, "signature">): void {
+  const signed: AuditLogEntry = { ...entry, signature: signEntry(entry) };
+  appendFileSync(AUDIT_LOG_PATH, JSON.stringify(signed) + "\n");
+}
 
 // 도메인 파트의 정책 엔진이 꽂힐 자리. 지금은 스텁이며, 이 함수 본문만 실제 엔진 호출로 교체하면 된다.
 async function requestPolicyCheck(
@@ -133,6 +150,15 @@ async function main() {
     };
 
     const decision = await requestPolicyCheck(ctx, session?.tags ?? new Set());
+
+    writeAuditLog({
+      id: randomUUID(),
+      sessionId,
+      toolName: name,
+      decision: decision.allowed ? "ALLOWED" : "BLOCKED",
+      matchedTags: decision.matchedTags,
+      timestamp: new Date().toISOString(),
+    });
     if (!decision.allowed) {
       console.error(`[proxy] 차단  ${name}  reason=${decision.reason}`);
       return {
