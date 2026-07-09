@@ -15,6 +15,7 @@ import {
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { ToolRiskTag } from "@icarus-tether/types";
 import type { ToolCallContext, PolicyDecision } from "@icarus-tether/types";
 
 // ESM엔 __dirname이 없어 import.meta.url로 계산 (실행 위치와 무관하게 경로 고정)
@@ -25,6 +26,7 @@ interface SessionState {
   id: string;
   createdAt: string;
   toolCalls: number;
+  tags: Set<ToolRiskTag>; // 이 세션이 지금까지 결과에서 본 오염 태그
 }
 
 // 세션 저장소. stdio에선 세션 1개지만, 다중 클라이언트(HTTP)로 확장되면 여기에 여러 개가 쌓인다.
@@ -49,6 +51,18 @@ async function requestPolicyCheck(ctx: ToolCallContext): Promise<PolicyDecision>
   };
 }
 
+// 도메인 파트의 소스 분류(ToolRegistry)가 꽂힐 자리. 지금은 도구 이름 → 태그 스텁 표.
+function classifyResultTags(toolName: string): ToolRiskTag[] {
+  switch (toolName) {
+    case "query_customer_db":
+      return [ToolRiskTag.SENSITIVE];
+    case "read_webpage":
+      return [ToolRiskTag.UNTRUSTED_ORIGIN];
+    default:
+      return [];
+  }
+}
+
 async function main() {
   // stdio에선 이 프록시 프로세스 하나가 클라이언트 하나를 상대한다 = 세션 하나.
   const sessionId = randomUUID();
@@ -56,6 +70,7 @@ async function main() {
     id: sessionId,
     createdAt: new Date().toISOString(),
     toolCalls: 0,
+    tags: new Set(),
   });
   console.error(`[proxy] 세션 시작  session=${sessionId}`);
 
@@ -117,7 +132,12 @@ async function main() {
     }
 
     const result = await downstream.callTool(request.params);
-    console.error(`[proxy] ⬅ 통과  ${name}`);
+
+    // 결과에 실린 태그를 분류(스텁)해 세션에 누적한다.
+    for (const tag of classifyResultTags(name)) session?.tags.add(tag);
+    console.error(
+      `[proxy] ⬅ 통과  ${name}  세션태그=[${[...(session?.tags ?? [])].join(", ")}]`
+    );
     return result;
   });
 
