@@ -1,5 +1,5 @@
 {
-  "name": "@taintguard/policy-engine",
+  "name": "@icarus-tether/policy-engine",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "test": "node --test dist/*.test.js"
   },
   "dependencies": {
-    "@taintguard/types": "*"
+    "@icarus-tether/types": "*"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

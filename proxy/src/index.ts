@@ -21,7 +21,7 @@ import {
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 // 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
-import type { ToolCallContext, PolicyDecision } from "@taintguard/types";
+import type { ToolCallContext, PolicyDecision } from "@icarus-tether/types";
 
 // ESM에는 __dirname이 없다. import.meta.url(이 파일의 위치)로 직접 계산한다.
 // 이렇게 해두면 어디서 프록시를 실행하든 mock-server 경로가 안 깨진다.
@@ -63,7 +63,7 @@ async function main() {
   //     그 자식의 stdin/stdout으로 대화한다.
   // ---------------------------------------------------------------------
   const downstream = new Client({
-    name: "taintguard-proxy-client",
+    name: "icarus-tether-proxy-client",
     version: "0.1.0",
   });
   const downstreamTransport = new StdioClientTransport({
@@ -77,7 +77,7 @@ async function main() {
   //     capabilities.tools를 켜서 "나 도구 기능 있음"을 핸드셰이크 때 알린다.
   // ---------------------------------------------------------------------
   const server = new Server(
-    { name: "taintguard-proxy", version: "0.1.0" },
+    { name: "icarus-tether-proxy", version: "0.1.0" },
     { capabilities: { tools: {} } }
   );
 

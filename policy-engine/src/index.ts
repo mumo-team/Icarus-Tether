@@ -19,7 +19,7 @@ import {
   type TrifectaEvent,
   type SanitizationResult,
   SanitizationMethod,
-} from "@taintguard/types";
+} from "@icarus-tether/types";
 
 // ---------------------------------------------------------------------------
 // 도구 정적 분류 (임시 하드코딩 — 나중에 설정 파일로 뺄 것)
