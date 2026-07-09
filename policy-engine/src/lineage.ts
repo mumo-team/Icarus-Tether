@@ -191,14 +191,17 @@ function isLiveTaintRoot(graph: Map<string, TaintNode>, node: TaintNode): boolea
   return false;
 }
 
-export function createTaintNode(
-  sessionId: string,
-  toolName: string,
-  tags: ToolRiskTag[],
-  input: TaintNodeInput = {}
-): TaintNode {
-  const graph = getOrCreateGraph(sessionId);
+export interface ResolvedParents {
+  linkMethod: LinkMethod;
+  parentLinks: ParentLink[];
+}
 
+/**
+ * 3층 parent 연결의 순수(읽기 전용) 계산 — 그래프를 절대 변형하지 않는다.
+ * createTaintNode(실제 노드 생성)와 previewParentLinks(섀도 판정용 미리보기)가
+ * 같은 로직을 공유하므로, 섀도가 보는 부모와 실제로 연결될 부모가 항상 일치한다.
+ */
+function resolveParents(graph: Map<string, TaintNode>, input: TaintNodeInput): ResolvedParents {
   let linkMethod: LinkMethod = "NONE";
   let parentLinks: ParentLink[] = [];
 
@@ -254,6 +257,28 @@ export function createTaintNode(
       }));
     }
   }
+
+  return { linkMethod, parentLinks };
+}
+
+/**
+ * 섀도 판정용 미리보기 — "지금 이 인자로 노드를 만든다면 어느 부모에 연결될까"를
+ * 그래프 변형 없이 계산한다. 노드 생성·childIndex 등록이 없으므로 아무리 호출해도
+ * 계보에 유령 노드가 생기지 않는다.
+ */
+export function previewParentLinks(sessionId: string, args: unknown): ResolvedParents {
+  const graph = lineageStore.get(sessionId) ?? new Map<string, TaintNode>();
+  return resolveParents(graph, { args });
+}
+
+export function createTaintNode(
+  sessionId: string,
+  toolName: string,
+  tags: ToolRiskTag[],
+  input: TaintNodeInput = {}
+): TaintNode {
+  const graph = getOrCreateGraph(sessionId);
+  const { linkMethod, parentLinks } = resolveParents(graph, input);
 
   // 전파 (요구사항 1): 유효 태그 = 자기자신 태그 ∪ 모든 parent의 tags 합집합.
   // snapshot·live 모두 생성 시점에는 동일하게 복사한다 — live는 이후

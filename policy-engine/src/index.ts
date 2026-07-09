@@ -29,6 +29,7 @@ import { getPolicyConfig, type PolicyConfig } from "./config.js";
 import { detectSecrets } from "./secret-detection.js";
 import { extractStructured, tokenizePII } from "./sanitization.js";
 import { createTaintNode, declassifyNodeTag, type TaintNode } from "./lineage.js";
+import { runShadowEvaluation } from "./shadow.js";
 
 export {
   loadPolicyConfig,
@@ -57,6 +58,7 @@ export {
   type ExtractedRecord,
   type SanitizeOutcome,
 } from "./sanitization.js";
+export { getShadowLog, type ShadowLogEntry, type ShadowEvidence } from "./shadow.js";
 export {
   addNodeTags,
   getSessionLineage,
@@ -284,32 +286,42 @@ export function evaluateToolCall(ctx: ToolCallContext): PolicyDecision {
   const session = getOrCreateSession(ctx.sessionId);
   const sinkClass = classifySink(ctx.toolName);
 
+  // ---- toy 판정 (실제 차단 결정 — 기존 로직 그대로) ----
   // 인자에 실린 태그 + 세션 누적 태그를 합쳐 "전파된 태그"로 본다
   const effectiveTags = new Set<ToolRiskTag>([...session.tags, ...ctx.argTags]);
 
+  let decision: PolicyDecision;
   if (sinkClass !== SinkClass.OUTBOUND_SINK) {
-    return { sessionId: ctx.sessionId, toolName: ctx.toolName, allowed: true, matchedTags: [] };
+    decision = { sessionId: ctx.sessionId, toolName: ctx.toolName, allowed: true, matchedTags: [] };
+  } else {
+    const hasSensitive = effectiveTags.has(ToolRiskTag.SENSITIVE);
+    const hasUntrusted = effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN);
+
+    if (hasSensitive && hasUntrusted) {
+      const matchedTags = [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN];
+      emitTrifectaEvent(ctx, sinkClass, matchedTags);
+      const unclassified = !isClassifiedTool(getPolicyConfig(), ctx.toolName);
+      decision = {
+        sessionId: ctx.sessionId,
+        toolName: ctx.toolName,
+        allowed: false,
+        reason:
+          "lethal trifecta 감지: 민감 데이터 + 비신뢰 입력이 외부 유출 시도와 겹침" +
+          (unclassified ? " (미분류 도구 — default-deny로 OUTBOUND_SINK 취급)" : ""),
+        matchedTags,
+      };
+    } else {
+      decision = { sessionId: ctx.sessionId, toolName: ctx.toolName, allowed: true, matchedTags: [] };
+    }
   }
 
-  const hasSensitive = effectiveTags.has(ToolRiskTag.SENSITIVE);
-  const hasUntrusted = effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN);
+  // ---- real(계보) 섀도 판정 — 로그 전용 ----
+  // toy 결정(decision)은 이 위에서 이미 완성됐다. runShadowEvaluation은 void 반환 +
+  // 내부 전체 try/catch + 읽기 전용이므로, 이 호출이 decision을 바꾸거나 예외로
+  // 판정 흐름을 깨뜨릴 방법이 없다. 실제 차단은 언제나 toy가 결정한다.
+  runShadowEvaluation(ctx, sinkClass, decision.allowed);
 
-  if (hasSensitive && hasUntrusted) {
-    const matchedTags = [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN];
-    emitTrifectaEvent(ctx, sinkClass, matchedTags);
-    const unclassified = !isClassifiedTool(getPolicyConfig(), ctx.toolName);
-    return {
-      sessionId: ctx.sessionId,
-      toolName: ctx.toolName,
-      allowed: false,
-      reason:
-        "lethal trifecta 감지: 민감 데이터 + 비신뢰 입력이 외부 유출 시도와 겹침" +
-        (unclassified ? " (미분류 도구 — default-deny로 OUTBOUND_SINK 취급)" : ""),
-      matchedTags,
-    };
-  }
-
-  return { sessionId: ctx.sessionId, toolName: ctx.toolName, allowed: true, matchedTags: [] };
+  return decision;
 }
 
 function emitTrifectaEvent(
