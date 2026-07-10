@@ -6,6 +6,7 @@
   "unknownToolPolicy": "deny",
   "sensitiveSourcePolicy": "tag_all",
   "propagationMode": "live",
+  "judgmentMode": "shadow",
   "secretDetection": {
     "bySource": true,
     "byEntropy": { "minLength": 20, "entropyThreshold": 3.8 },

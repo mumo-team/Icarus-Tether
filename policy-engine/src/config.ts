@@ -39,6 +39,15 @@ export type SensitiveSourcePolicy = "tag_all";
  */
 export type PropagationMode = "snapshot" | "live";
 
+/**
+ * 실제 차단을 누가 결정하는가:
+ * - "session" (기본): toy — 세션 boolean(sessionStore). 섀도 로그는 계속 남긴다.
+ * - "shadow": session과 동일한 동작 (toy 차단 + real 로그) — 전환 준비 기간용 명시적 이름.
+ * - "lineage": real — 나가려는 값의 계보만 보고 판정. 설정으로 명시해야만 켜진다
+ *   (검증 안 된 채 전 사용자가 real로 바뀌는 사고 방지).
+ */
+export type JudgmentMode = "session" | "lineage" | "shadow";
+
 export interface PatternSpec {
   /** 토큰 이름에 들어가는 식별자 (대문자·숫자·언더스코어) */
   type: string;
@@ -78,6 +87,7 @@ export interface PolicyConfig {
   unknownToolPolicy: UnknownToolPolicy;
   sensitiveSourcePolicy: SensitiveSourcePolicy;
   propagationMode: PropagationMode;
+  judgmentMode: JudgmentMode;
   secretDetection: SecretDetectionConfig | null;
   piiPatterns: PatternSpec[];
   extractionSchema: ExtractionSchemaConfig | null;
@@ -272,6 +282,12 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     fail(`"propagationMode"는 "snapshot" | "live" 중 하나여야 합니다`);
   }
 
+  // 기본은 "session"(toy) — real("lineage")은 설정으로 명시해야만 켜진다
+  const judgmentMode = obj.judgmentMode ?? "session";
+  if (judgmentMode !== "session" && judgmentMode !== "lineage" && judgmentMode !== "shadow") {
+    fail(`"judgmentMode"는 "session" | "lineage" | "shadow" 중 하나여야 합니다`);
+  }
+
   const domain = obj.domain ?? "default";
   if (typeof domain !== "string") fail(`"domain"은 문자열이어야 합니다`);
 
@@ -283,6 +299,7 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     unknownToolPolicy,
     sensitiveSourcePolicy,
     propagationMode,
+    judgmentMode,
     secretDetection: parseSecretDetection(obj.secretDetection),
     piiPatterns: parsePatternList(obj.piiPatterns, "piiPatterns"),
     extractionSchema: parseExtractionSchema(obj.extractionSchema),

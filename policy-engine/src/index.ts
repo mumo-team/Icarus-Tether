@@ -29,7 +29,7 @@ import { getPolicyConfig, type PolicyConfig } from "./config.js";
 import { detectSecrets } from "./secret-detection.js";
 import { extractStructured, tokenizePII } from "./sanitization.js";
 import { createTaintNode, declassifyNodeTag, type TaintNode } from "./lineage.js";
-import { runShadowEvaluation } from "./shadow.js";
+import { collectLineageEvidence, runShadowEvaluation } from "./shadow.js";
 
 export {
   loadPolicyConfig,
@@ -38,6 +38,7 @@ export {
   type PolicyConfig,
   type UnknownToolPolicy,
   type PropagationMode,
+  type JudgmentMode,
   type SecretDetectionConfig,
   type ExtractionSchemaConfig,
   type FieldSpec,
@@ -58,7 +59,12 @@ export {
   type ExtractedRecord,
   type SanitizeOutcome,
 } from "./sanitization.js";
-export { getShadowLog, type ShadowLogEntry, type ShadowEvidence } from "./shadow.js";
+export {
+  getShadowLog,
+  type ShadowLogEntry,
+  type ShadowEvidence,
+  type LineageEvidence,
+} from "./shadow.js";
 export {
   addNodeTags,
   getSessionLineage,
@@ -281,45 +287,116 @@ export function attemptSanitization(
   };
 }
 
-/** 도구 호출 시도 시 트라이펙타 여부를 판정한다. (Image 3 오른쪽 흐름) */
-export function evaluateToolCall(ctx: ToolCallContext): PolicyDecision {
+/** toy 판정 — 세션 boolean(sessionStore) 기준. 순수 계산(이벤트 발행 없음). */
+function computeSessionDecision(ctx: ToolCallContext, sinkClass: SinkClass): PolicyDecision {
   const session = getOrCreateSession(ctx.sessionId);
-  const sinkClass = classifySink(ctx.toolName);
 
-  // ---- toy 판정 (실제 차단 결정 — 기존 로직 그대로) ----
   // 인자에 실린 태그 + 세션 누적 태그를 합쳐 "전파된 태그"로 본다
   const effectiveTags = new Set<ToolRiskTag>([...session.tags, ...ctx.argTags]);
 
-  let decision: PolicyDecision;
   if (sinkClass !== SinkClass.OUTBOUND_SINK) {
-    decision = { sessionId: ctx.sessionId, toolName: ctx.toolName, allowed: true, matchedTags: [] };
-  } else {
-    const hasSensitive = effectiveTags.has(ToolRiskTag.SENSITIVE);
-    const hasUntrusted = effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN);
+    return { sessionId: ctx.sessionId, toolName: ctx.toolName, allowed: true, matchedTags: [] };
+  }
 
-    if (hasSensitive && hasUntrusted) {
-      const matchedTags = [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN];
-      emitTrifectaEvent(ctx, sinkClass, matchedTags);
+  const hasSensitive = effectiveTags.has(ToolRiskTag.SENSITIVE);
+  const hasUntrusted = effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN);
+
+  if (hasSensitive && hasUntrusted) {
+    const unclassified = !isClassifiedTool(getPolicyConfig(), ctx.toolName);
+    return {
+      sessionId: ctx.sessionId,
+      toolName: ctx.toolName,
+      allowed: false,
+      reason:
+        "lethal trifecta 감지: 민감 데이터 + 비신뢰 입력이 외부 유출 시도와 겹침" +
+        (unclassified ? " (미분류 도구 — default-deny로 OUTBOUND_SINK 취급)" : ""),
+      matchedTags: [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN],
+    };
+  }
+
+  return { sessionId: ctx.sessionId, toolName: ctx.toolName, allowed: true, matchedTags: [] };
+}
+
+/** 정화 방법 안내 — 차단 reason에 "뭘 하면 풀리는지"를 담기 위한 역매핑 (HITL 대비) */
+const CLEAR_HINT = `[해제: ${ToolRiskTag.SENSITIVE}→${SanitizationMethod.TOKENIZATION}, ${ToolRiskTag.UNTRUSTED_ORIGIN}→${SanitizationMethod.STRUCTURED_EXTRACTION}]`;
+
+/**
+ * real 판정 — "지금 나가려는 값(호출 인자)의 계보"만 본다.
+ * 세션 전체가 아니라 그 값의 부모 노드들의 태그 합집합 + argTags로 트라이펙타 판정:
+ *  - 정화된 노드는 태그가 없어 자동 제외
+ *  - 나가는 값과 무관한 다른 갈래의 오염은 판정에 영향 없음
+ * 계산 실패 시 fail-safe로 차단한다 — 실전 결정자이므로 조용한 통과는 금지
+ * (로그 전용인 섀도의 실패 처리와 방향이 반대).
+ */
+function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): PolicyDecision {
+  try {
+    if (sinkClass !== SinkClass.OUTBOUND_SINK) {
+      return { sessionId: ctx.sessionId, toolName: ctx.toolName, allowed: true, matchedTags: [] };
+    }
+
+    const evidence = collectLineageEvidence(ctx);
+    const effectiveTags = new Set<ToolRiskTag>([...evidence.unionTags, ...ctx.argTags]);
+
+    if (
+      effectiveTags.has(ToolRiskTag.SENSITIVE) &&
+      effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN)
+    ) {
+      // b안: 어느 노드가 왜 오염인지 + 뭘 정화하면 풀리는지를 reason에 담는다
+      const taintedNodes = evidence.nodes.filter((n) => n.tags.length > 0);
+      const nodeDesc = taintedNodes
+        .map((n) => `${n.nodeId}(${n.toolName}: ${n.tags.join("+")})`)
+        .join(", ");
+      const argDesc = ctx.argTags.length > 0 ? ` (인자 태그: ${ctx.argTags.join("+")})` : "";
       const unclassified = !isClassifiedTool(getPolicyConfig(), ctx.toolName);
-      decision = {
+      return {
         sessionId: ctx.sessionId,
         toolName: ctx.toolName,
         allowed: false,
         reason:
-          "lethal trifecta 감지: 민감 데이터 + 비신뢰 입력이 외부 유출 시도와 겹침" +
+          `lethal trifecta 감지(계보 판정): 이 값의 계보에 정화되지 않은 오염 노드가 남아 있어 외부 유출 차단 — ${nodeDesc || "근거 없음"}${argDesc} ${CLEAR_HINT}` +
           (unclassified ? " (미분류 도구 — default-deny로 OUTBOUND_SINK 취급)" : ""),
-        matchedTags,
+        matchedTags: [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN],
       };
-    } else {
-      decision = { sessionId: ctx.sessionId, toolName: ctx.toolName, allowed: true, matchedTags: [] };
     }
+
+    return { sessionId: ctx.sessionId, toolName: ctx.toolName, allowed: true, matchedTags: [] };
+  } catch (err) {
+    // fail-safe: real이 실전 결정자일 때 계산 실패는 차단이다. 조용한 통과 경로 없음.
+    console.error("[policy-engine] 계보 판정 계산 실패 — fail-safe 차단:", err);
+    return {
+      sessionId: ctx.sessionId,
+      toolName: ctx.toolName,
+      allowed: false,
+      reason: "계보 판정 계산 실패 — fail-safe 차단 (오류 시 통과 금지)",
+      matchedTags: [],
+    };
+  }
+}
+
+/** 도구 호출 시도 시 트라이펙타 여부를 판정한다. (Image 3 오른쪽 흐름) */
+export function evaluateToolCall(ctx: ToolCallContext): PolicyDecision {
+  const sinkClass = classifySink(ctx.toolName);
+  const mode = getPolicyConfig().judgmentMode;
+
+  // 실제 차단 결정자 선택 — 기본 "session"(toy). "lineage"(real)는 설정으로 명시해야 켜진다.
+  const decision =
+    mode === "lineage"
+      ? computeLineageDecision(ctx, sinkClass)
+      : computeSessionDecision(ctx, sinkClass);
+
+  // 실제 차단이 확정된 트라이펙타에만 이벤트 발행
+  // (fail-safe 차단은 탐지가 아니라 운영 오류이므로 matchedTags가 비어 있고, 발행하지 않는다)
+  if (!decision.allowed && decision.matchedTags.length > 0) {
+    emitTrifectaEvent(ctx, sinkClass, decision.matchedTags);
   }
 
-  // ---- real(계보) 섀도 판정 — 로그 전용 ----
-  // toy 결정(decision)은 이 위에서 이미 완성됐다. runShadowEvaluation은 void 반환 +
-  // 내부 전체 try/catch + 읽기 전용이므로, 이 호출이 decision을 바꾸거나 예외로
-  // 판정 흐름을 깨뜨릴 방법이 없다. 실제 차단은 언제나 toy가 결정한다.
-  runShadowEvaluation(ctx, sinkClass, decision.allowed);
+  // session·shadow 모드: real(계보) 섀도 판정을 로그로만 남긴다 (비교 데이터 수집).
+  // runShadowEvaluation은 void + 전체 try/catch + 읽기 전용이라 decision에 관여 불가.
+  // lineage 모드에서는 생략 — "toy가 결정자"라는 비교 로그의 전제가 성립하지 않고,
+  // 판정 근거는 decision.reason에 직접 담긴다.
+  if (mode !== "lineage") {
+    runShadowEvaluation(ctx, sinkClass, decision.allowed);
+  }
 
   return decision;
 }

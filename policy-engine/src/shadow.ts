@@ -56,6 +56,34 @@ export function getShadowLog(sessionId?: string): ReadonlyArray<ShadowLogEntry> 
 }
 
 // ---------------------------------------------------------------------------
+// 계보 근거 수집 — 섀도 로그와 실전 lineage 판정(index.ts)이 공유
+// ---------------------------------------------------------------------------
+
+export interface LineageEvidence {
+  linkMethod: LinkMethod;
+  nodes: Array<{ nodeId: string; toolName: string; tags: ToolRiskTag[]; weak: boolean }>;
+  /** 부모 노드 태그의 합집합 (argTags는 포함하지 않음 — 호출부가 필요 시 합친다) */
+  unionTags: Set<ToolRiskTag>;
+}
+
+/**
+ * "이 호출의 인자가 어느 계보 노드에서 왔고, 그 계보에 어떤 태그가 살아있나"를
+ * 읽기 전용으로 수집한다. 실패 시 예외를 던진다 — 처리 방향은 호출부 책임:
+ * 섀도(로그 전용)는 삼키고 기록만, 실전 lineage 판정은 fail-safe 차단.
+ */
+export function collectLineageEvidence(ctx: ToolCallContext): LineageEvidence {
+  const { linkMethod, parentLinks } = previewParentLinks(ctx.sessionId, ctx.args);
+  const nodes = parentLinks.flatMap((link) => {
+    const node = getTaintNode(ctx.sessionId, link.nodeId);
+    return node
+      ? [{ nodeId: node.id, toolName: node.toolName, tags: [...node.tags], weak: link.weak }]
+      : [];
+  });
+  const unionTags = new Set(nodes.flatMap((n) => n.tags));
+  return { linkMethod, nodes, unionTags };
+}
+
+// ---------------------------------------------------------------------------
 // real 판정 계산 + 비교 로그
 // ---------------------------------------------------------------------------
 
@@ -73,14 +101,7 @@ export function runShadowEvaluation(
     try {
       // real 규칙: 인자가 어느 계보 노드에서 왔는지 3층 로직으로 찾고(읽기 전용),
       // 그 부모들의 태그 합집합이 트라이펙타를 이루며 OUTBOUND_SINK로 나가면 차단.
-      const { linkMethod, parentLinks } = previewParentLinks(ctx.sessionId, ctx.args);
-      const nodes = parentLinks.flatMap((link) => {
-        const node = getTaintNode(ctx.sessionId, link.nodeId);
-        return node
-          ? [{ nodeId: node.id, toolName: node.toolName, tags: [...node.tags], weak: link.weak }]
-          : [];
-      });
-      const unionTags = new Set(nodes.flatMap((n) => n.tags));
+      const { linkMethod, nodes, unionTags } = collectLineageEvidence(ctx);
 
       const realBlocked =
         sinkClass === SinkClass.OUTBOUND_SINK &&

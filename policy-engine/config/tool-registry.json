@@ -10,6 +10,7 @@
   "unknownToolPolicy": "deny",
   "sensitiveSourcePolicy": "tag_all",
   "propagationMode": "snapshot",
+  "judgmentMode": "session",
   "secretDetection": {
     "bySource": true,
     "byEntropy": { "minLength": 20, "entropyThreshold": 3.8 },

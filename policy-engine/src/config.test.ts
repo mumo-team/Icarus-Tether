@@ -92,6 +92,25 @@ test("propagationMode: dev.json은 live, 생략 시 기본 snapshot, 그 외 값
   assert.throws(() => loadPolicyConfig(bad), /"snapshot" \| "live"/);
 });
 
+test("judgmentMode: 생략 시 기본 session(toy), dev.json은 shadow, 잘못된 값은 예외", () => {
+  const legacy = writeTmpConfig("jm-default.json", {
+    sensitiveSources: [],
+    untrustedSources: [],
+    sinks: {},
+  });
+  // 기본값이 session이므로 기존 사용자는 real로 바뀌지 않는다
+  assert.equal(loadPolicyConfig(legacy).judgmentMode, "session");
+  assert.equal(loadPolicyConfig(DEV_JSON).judgmentMode, "shadow");
+
+  const bad = writeTmpConfig("jm-bad.json", {
+    sensitiveSourceTools: [],
+    untrustedSourceTools: [],
+    outboundSinkTools: [],
+    judgmentMode: "real",
+  });
+  assert.throws(() => loadPolicyConfig(bad), /"session" \| "lineage" \| "shadow"/);
+});
+
 test("fail-closed: 잘못된 형식은 전부 예외", () => {
   const base = {
     sensitiveSourceTools: [],
