@@ -58,6 +58,14 @@ export interface PolicyDecision {
   reason?: string;
   /** 이 판정에 이르기까지 겹친 태그들 (트라이펙타 조건 확인용) */
   matchedTags: ToolRiskTag[];
+  /**
+   * [HITL] 이 차단을 사람 승인으로 오버라이드할 수 있는가.
+   * 결정론 규칙(hitlPolicy)이 판정하며, 생략 또는 false = 오버라이드 불가(확정 차단).
+   * true인 경우에만 approvalId로 승인 요청이 가능하다.
+   */
+  canOverride?: boolean;
+  /** [HITL] canOverride=true일 때 requestApproval에 넘길 승인 id */
+  approvalId?: string;
 }
 
 // ---------------------------------------------------------------------------

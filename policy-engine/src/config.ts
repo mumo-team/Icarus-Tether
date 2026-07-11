@@ -48,6 +48,14 @@ export type PropagationMode = "snapshot" | "live";
  */
 export type JudgmentMode = "session" | "lineage" | "shadow";
 
+/**
+ * HITL(사람 승인) 오버라이드 정책 — lineage 판정에만 적용:
+ * - "off" (기본): 기존 동작 그대로 — 트라이펙타는 무조건 차단, 오버라이드 불가.
+ * - "weak-only": 오염이 전부 약한(weak) 연결로만 유입된 트라이펙타에 한해
+ *   사람이 오버라이드를 요청할 수 있다. 판정은 결정론 규칙(hitl.ts) — AI 아님.
+ */
+export type HitlPolicy = "off" | "weak-only";
+
 export interface PatternSpec {
   /** 토큰 이름에 들어가는 식별자 (대문자·숫자·언더스코어) */
   type: string;
@@ -88,6 +96,7 @@ export interface PolicyConfig {
   sensitiveSourcePolicy: SensitiveSourcePolicy;
   propagationMode: PropagationMode;
   judgmentMode: JudgmentMode;
+  hitlPolicy: HitlPolicy;
   secretDetection: SecretDetectionConfig | null;
   piiPatterns: PatternSpec[];
   extractionSchema: ExtractionSchemaConfig | null;
@@ -288,6 +297,12 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     fail(`"judgmentMode"는 "session" | "lineage" | "shadow" 중 하나여야 합니다`);
   }
 
+  // 기본은 "off" — HITL은 설정으로 명시해야만 켜진다 (기존 동작 불변)
+  const hitlPolicy = obj.hitlPolicy ?? "off";
+  if (hitlPolicy !== "off" && hitlPolicy !== "weak-only") {
+    fail(`"hitlPolicy"는 "off" | "weak-only" 중 하나여야 합니다`);
+  }
+
   const domain = obj.domain ?? "default";
   if (typeof domain !== "string") fail(`"domain"은 문자열이어야 합니다`);
 
@@ -300,6 +315,7 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     sensitiveSourcePolicy,
     propagationMode,
     judgmentMode,
+    hitlPolicy,
     secretDetection: parseSecretDetection(obj.secretDetection),
     piiPatterns: parsePatternList(obj.piiPatterns, "piiPatterns"),
     extractionSchema: parseExtractionSchema(obj.extractionSchema),

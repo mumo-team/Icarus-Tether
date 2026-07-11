@@ -111,6 +111,24 @@ test("judgmentMode: 생략 시 기본 session(toy), dev.json은 shadow, 잘못�
   assert.throws(() => loadPolicyConfig(bad), /"session" \| "lineage" \| "shadow"/);
 });
 
+test("hitlPolicy: 생략 시 기본 off(기존 동작 불변), 잘못된 값은 예외", () => {
+  const legacy = writeTmpConfig("hitl-default.json", {
+    sensitiveSources: [],
+    untrustedSources: [],
+    sinks: {},
+  });
+  assert.equal(loadPolicyConfig(legacy).hitlPolicy, "off");
+  assert.equal(loadPolicyConfig(DEV_JSON).hitlPolicy, "off");
+
+  const bad = writeTmpConfig("hitl-bad.json", {
+    sensitiveSourceTools: [],
+    untrustedSourceTools: [],
+    outboundSinkTools: [],
+    hitlPolicy: "always",
+  });
+  assert.throws(() => loadPolicyConfig(bad), /"off" \| "weak-only"/);
+});
+
 test("fail-closed: 잘못된 형식은 전부 예외", () => {
   const base = {
     sensitiveSourceTools: [],

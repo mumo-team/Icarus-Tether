@@ -30,6 +30,14 @@ import { detectSecrets } from "./secret-detection.js";
 import { extractStructured, tokenizePII } from "./sanitization.js";
 import { createTaintNode, declassifyNodeTag, type TaintNode } from "./lineage.js";
 import { collectLineageEvidence, runShadowEvaluation } from "./shadow.js";
+import { consumeApprovalIfMatching, evaluateOverridability, offerOverride } from "./hitl.js";
+
+export {
+  requestApproval,
+  resolveApproval,
+  getOverrideAuditLog,
+  type OverrideAuditEntry,
+} from "./hitl.js";
 
 export {
   loadPolicyConfig,
@@ -39,6 +47,7 @@ export {
   type UnknownToolPolicy,
   type PropagationMode,
   type JudgmentMode,
+  type HitlPolicy,
   type SecretDetectionConfig,
   type ExtractionSchemaConfig,
   type FieldSpec,
@@ -341,6 +350,24 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
       effectiveTags.has(ToolRiskTag.SENSITIVE) &&
       effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN)
     ) {
+      const hitlPolicy = getPolicyConfig().hitlPolicy;
+
+      // HITL 소비: "이 호출"과 지문이 일치하는 APPROVED·미사용 승인이 있으면 1회 통과.
+      // 그 외(OFFERED/PENDING/REJECTED/불일치/이미 사용)는 전부 아래 차단으로 —
+      // "응답 없음 → 통과" 경로가 없다 (fail-safe).
+      if (hitlPolicy === "weak-only") {
+        const consumed = consumeApprovalIfMatching(ctx);
+        if (consumed) {
+          return {
+            sessionId: ctx.sessionId,
+            toolName: ctx.toolName,
+            allowed: true,
+            matchedTags: [],
+            reason: `HITL 오버라이드 승인으로 1회 통과 (approvalId: ${consumed.approvalId}${consumed.resolvedBy ? `, 승인자: ${consumed.resolvedBy}` : ""})`,
+          };
+        }
+      }
+
       // b안: 어느 노드가 왜 오염인지 + 뭘 정화하면 풀리는지를 reason에 담는다
       const taintedNodes = evidence.nodes.filter((n) => n.tags.length > 0);
       const nodeDesc = taintedNodes
@@ -348,7 +375,7 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
         .join(", ");
       const argDesc = ctx.argTags.length > 0 ? ` (인자 태그: ${ctx.argTags.join("+")})` : "";
       const unclassified = !isClassifiedTool(getPolicyConfig(), ctx.toolName);
-      return {
+      const decision: PolicyDecision = {
         sessionId: ctx.sessionId,
         toolName: ctx.toolName,
         allowed: false,
@@ -357,6 +384,20 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
           (unclassified ? " (미분류 도구 — default-deny로 OUTBOUND_SINK 취급)" : ""),
         matchedTags: [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN],
       };
+
+      // HITL 제안: 승인 가능 여부는 결정론 규칙(evaluateOverridability — weak 연결
+      // 판정)이 정한다. AI 판단 없음. 차단(allowed:false)은 그대로 유지된다.
+      if (hitlPolicy === "weak-only") {
+        if (evaluateOverridability(evidence, ctx.argTags)) {
+          const approvalId = offerOverride(ctx);
+          decision.canOverride = true;
+          decision.approvalId = approvalId;
+          decision.reason += ` [HITL: 승인 요청 가능 — ${approvalId}]`;
+        } else {
+          decision.canOverride = false; // strong 연결이 오염을 실음 — 사람도 못 여는 확정 차단
+        }
+      }
+      return decision;
     }
 
     return { sessionId: ctx.sessionId, toolName: ctx.toolName, allowed: true, matchedTags: [] };
