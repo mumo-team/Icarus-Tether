@@ -129,6 +129,24 @@ test("hitlPolicy: 생략 시 기본 off(기존 동작 불변), 잘못된 값은 
   assert.throws(() => loadPolicyConfig(bad), /"off" \| "weak-only"/);
 });
 
+test("pruningPolicy: 생략 시 기본 off(기존 동작 불변), 잘못된 값은 예외", () => {
+  const legacy = writeTmpConfig("prune-default.json", {
+    sensitiveSources: [],
+    untrustedSources: [],
+    sinks: {},
+  });
+  assert.equal(loadPolicyConfig(legacy).pruningPolicy, "off");
+  assert.equal(loadPolicyConfig(DEV_JSON).pruningPolicy, "off");
+
+  const bad = writeTmpConfig("prune-bad.json", {
+    sensitiveSourceTools: [],
+    untrustedSourceTools: [],
+    outboundSinkTools: [],
+    pruningPolicy: "aggressive",
+  });
+  assert.throws(() => loadPolicyConfig(bad), /"off" \| "declassified"/);
+});
+
 test("toolLabels: 생략 시 빈 맵, dev.json 라벨 로드, 잘못된 형식은 예외", () => {
   const legacy = writeTmpConfig("labels-default.json", {
     sensitiveSources: [],

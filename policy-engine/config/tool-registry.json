@@ -12,6 +12,7 @@
   "propagationMode": "snapshot",
   "judgmentMode": "session",
   "hitlPolicy": "off",
+  "pruningPolicy": "off",
   "toolLabels": {
     "query_customer_db": "고객 DB 조회",
     "read_internal_file": "내부 문서 읽기",

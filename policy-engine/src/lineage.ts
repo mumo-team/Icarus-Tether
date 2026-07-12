@@ -100,6 +100,24 @@ const TOKEN_RUN = /[\p{L}\p{N}@._+-]{8,}/gu;
 const lineageStore = new Map<string, Map<string, TaintNode>>();
 
 /**
+ * 묘비(tombstone) 저장소 — 가지치기된 "깨끗한" 노드의 잔상: id → resultTokens만.
+ *
+ * 깨끗한 노드도 판정에 기여한다: 명시 참조(1순위)의 대상이 되거나 결과 토큰이
+ * 값 매칭(2순위)의 근거가 되어, 폴백(오염 frontier)으로 떨어지는 것을 막아준다.
+ * 노드를 통째로 지우면 "통과하던 호출이 차단으로" 바뀔 수 있으므로, 무거운 것
+ * (tags/parents/parentLinks/메타)만 버리고 연결성(id + 결과 토큰)은 남긴다.
+ * 묘비는 태그가 없으므로 부모로 연결돼도 태그 무기여 — 원본(깨끗한 노드)과 판정상 동치.
+ */
+type TombstoneMap = Map<string, ReadonlyMap<string, number>>;
+const tombstoneStore = new Map<string, TombstoneMap>();
+
+const EMPTY_TOMBSTONES: ReadonlyMap<string, ReadonlyMap<string, number>> = new Map();
+
+function tombstonesOf(sessionId: string): ReadonlyMap<string, ReadonlyMap<string, number>> {
+  return tombstoneStore.get(sessionId) ?? EMPTY_TOMBSTONES;
+}
+
+/**
  * 자식 인덱스: sessionId → (parentId → 자식 id 집합).
  * live 전파(cascadeDown)가 따라가는 유일한 방향 — 부모를 거슬러 올라가는
  * 인덱스는 만들지 않아 역류(자식→부모) 전파가 구조적으로 불가능하다 (불변식 1).
@@ -201,37 +219,61 @@ export interface ResolvedParents {
  * createTaintNode(실제 노드 생성)와 previewParentLinks(섀도 판정용 미리보기)가
  * 같은 로직을 공유하므로, 섀도가 보는 부모와 실제로 연결될 부모가 항상 일치한다.
  */
-function resolveParents(graph: Map<string, TaintNode>, input: TaintNodeInput): ResolvedParents {
+function matchValueTokens(
+  argTokens: Map<string, number>,
+  resultTokens: ReadonlyMap<string, number>
+): { matchCount: number; best?: { tokenHash: string; tokenLength: number } } {
+  let matchCount = 0;
+  let best: { tokenHash: string; tokenLength: number } | undefined;
+  for (const [hash, length] of argTokens) {
+    if (!resultTokens.has(hash)) continue;
+    matchCount++;
+    if (!best || length > best.tokenLength) best = { tokenHash: hash, tokenLength: length };
+  }
+  return { matchCount, best };
+}
+
+function resolveParents(
+  graph: Map<string, TaintNode>,
+  tombstones: ReadonlyMap<string, ReadonlyMap<string, number>>,
+  input: TaintNodeInput
+): ResolvedParents {
   let linkMethod: LinkMethod = "NONE";
   let parentLinks: ParentLink[] = [];
 
-  // 1순위 MCP_REF: 인자 어딘가에 세션 그래프의 노드 id가 있으면 명시 참조로 본다
+  // 1순위 MCP_REF: 인자 어딘가에 세션 그래프(또는 묘비)의 노드 id가 있으면 명시 참조.
+  // 묘비 참조도 성립해야 "가지치기 전 통과 → 후에도 통과"가 유지된다 (깨끗한 부모와 동치).
   if (input.args !== undefined) {
     const argStrings: string[] = [];
     collectStrings(input.args, argStrings);
-    const refIds = [...new Set(argStrings.filter((s) => NODE_ID_PATTERN.test(s) && graph.has(s)))];
+    const refIds = [
+      ...new Set(
+        argStrings.filter((s) => NODE_ID_PATTERN.test(s) && (graph.has(s) || tombstones.has(s)))
+      ),
+    ];
     if (refIds.length > 0) {
       linkMethod = "MCP_REF";
       parentLinks = refIds.map((nodeId) => ({ nodeId, method: "MCP_REF" as const, weak: false }));
     }
   }
 
-  // 2순위 VALUE_MATCH: 인자 토큰 해시 ∩ 기존 노드의 결과 토큰 해시
+  // 2순위 VALUE_MATCH: 인자 토큰 해시 ∩ (기존 노드 + 묘비)의 결과 토큰 해시
   if (linkMethod === "NONE" && input.args !== undefined) {
     const argTokens = extractMatchTokens(input.args);
     if (argTokens.size > 0) {
       for (const node of graph.values()) {
-        let matchCount = 0;
-        let best: { tokenHash: string; tokenLength: number } | undefined;
-        for (const [hash, length] of argTokens) {
-          if (!node.resultTokens.has(hash)) continue;
-          matchCount++;
-          if (!best || length > best.tokenLength) best = { tokenHash: hash, tokenLength: length };
-        }
+        const { matchCount, best } = matchValueTokens(argTokens, node.resultTokens);
         if (matchCount > 0 && best) {
           // 근거가 단일 토큰이고 길이도 짧으면 약한 연결로 표시 (튜닝 대상)
           const weak = matchCount < 2 && best.tokenLength < STRONG_TOKEN_MIN_LENGTH;
           parentLinks.push({ nodeId: node.id, method: "VALUE_MATCH", weak, evidence: best });
+        }
+      }
+      for (const [nodeId, resultTokens] of tombstones) {
+        const { matchCount, best } = matchValueTokens(argTokens, resultTokens);
+        if (matchCount > 0 && best) {
+          const weak = matchCount < 2 && best.tokenLength < STRONG_TOKEN_MIN_LENGTH;
+          parentLinks.push({ nodeId, method: "VALUE_MATCH", weak, evidence: best });
         }
       }
       if (parentLinks.length > 0) linkMethod = "VALUE_MATCH";
@@ -268,7 +310,7 @@ function resolveParents(graph: Map<string, TaintNode>, input: TaintNodeInput): R
  */
 export function previewParentLinks(sessionId: string, args: unknown): ResolvedParents {
   const graph = lineageStore.get(sessionId) ?? new Map<string, TaintNode>();
-  return resolveParents(graph, { args });
+  return resolveParents(graph, tombstonesOf(sessionId), { args });
 }
 
 export function createTaintNode(
@@ -278,7 +320,7 @@ export function createTaintNode(
   input: TaintNodeInput = {}
 ): TaintNode {
   const graph = getOrCreateGraph(sessionId);
-  const { linkMethod, parentLinks } = resolveParents(graph, input);
+  const { linkMethod, parentLinks } = resolveParents(graph, tombstonesOf(sessionId), input);
 
   // 전파 (요구사항 1): 유효 태그 = 자기자신 태그 ∪ 모든 parent의 tags 합집합.
   // snapshot·live 모두 생성 시점에는 동일하게 복사한다 — live는 이후
@@ -343,6 +385,61 @@ export function addNodeTags(sessionId: string, nodeId: string, tags: ToolRiskTag
  * "추가"만 하고 제거는 없다 (불변식 2). 부모는 항상 자식보다 먼저 생성되므로
  * 사이클이 있을 수 없지만, visited 집합으로 이중 안전장치를 둔다.
  */
+/**
+ * 계보 가지치기 — 명시 호출 전용 (판정·정화 경로에 자동 트리거 없음, 프록시가 주기 호출).
+ *
+ * 대상: "태그가 전부 없어졌고(정화 완료) 자식이 없는" 노드만. 연쇄(fixpoint) —
+ * 자식이 먼저 정리돼 childless가 된 깨끗한 부모도 같은 패스에서 정리된다.
+ *
+ * 판정 불변 보장 3단:
+ *  1. 오염 노드(tags 비어있지 않음)는 절대 대상 아님 — frontier·전파·차단 기여 노드 불변.
+ *     (ownTags ⊆ tags 이므로 tags가 비면 자체 태그도 없다)
+ *  2. 깨끗한 노드의 판정 기여는 "연결"뿐(태그 기여 0) — 묘비가 1순위 참조와
+ *     2순위 값 매칭 연결을 보존한다. 3순위 frontier에는 깨끗한 노드가 원래 후보 아님.
+ *  3. childless 조건 + 남은 노드의 parents 배열 불변(역사 보존) — 남은 노드의
+ *     isLiveTaintRoot 입력(자기 tags·부모 tags)이 하나도 변하지 않는다.
+ *
+ * fail-safe: 실패하면 그냥 안 지운다. 개별 노드 단위로 위 논증이 성립하므로
+ * 부분 완료 상태도 안전하다.
+ *
+ * 알려진 한계(문서화): 가지치기된 노드에 대한 addNodeTags(사후 재오염)는 예외로
+ * 실패한다(fail-closed) — 조용한 오염 소실보다 안전한 방향.
+ */
+export function pruneSessionLineage(sessionId: string): { pruned: number } {
+  try {
+    if (getPolicyConfig().pruningPolicy !== "declassified") return { pruned: 0 };
+    const graph = lineageStore.get(sessionId);
+    if (!graph || graph.size === 0) return { pruned: 0 };
+
+    const perSession = childIndex.get(sessionId);
+    const tombstones = tombstoneStore.get(sessionId) ?? new Map<string, ReadonlyMap<string, number>>();
+    tombstoneStore.set(sessionId, tombstones);
+
+    let pruned = 0;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const node of [...graph.values()]) {
+        const children = perSession?.get(node.id);
+        if (node.tags.size > 0 || (children !== undefined && children.size > 0)) continue;
+
+        graph.delete(node.id);
+        perSession?.delete(node.id);
+        // 부모의 자식 집합에서 자신을 제거 — 부모가 childless로 승격돼 다음 반복에서 정리될 수 있다
+        for (const pid of node.parents) perSession?.get(pid)?.delete(node.id);
+        tombstones.set(node.id, node.resultTokens); // 연결성 보존용 잔상
+        pruned++;
+        changed = true;
+      }
+    }
+    return { pruned };
+  } catch (err) {
+    // fail-safe: 가지치기 실패 = 안 지움. 판정에는 어떤 영향도 없다.
+    console.error("[lineage] 가지치기 실패 — 아무것도 추가로 지우지 않음 (fail-safe):", err);
+    return { pruned: 0 };
+  }
+}
+
 /**
  * 정화(declassification) 전용 태그 제거 — attemptSanitization(index.ts)만 사용할 것.
  * 의도적으로 index.ts에서 re-export하지 않는다: 엔진 공개 API에 범용 태그 제거

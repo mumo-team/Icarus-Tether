@@ -56,6 +56,14 @@ export type JudgmentMode = "session" | "lineage" | "shadow";
  */
 export type HitlPolicy = "off" | "weak-only";
 
+/**
+ * 계보 가지치기 정책:
+ * - "off" (기본): 아무것도 지우지 않는다 (기존 동작).
+ * - "declassified": 정화돼 태그가 전부 없어진 childless 노드를 묘비(tombstone)로
+ *   압축한다. 묘비가 명시 참조·값 매칭 연결을 보존하므로 판정 결과는 불변.
+ */
+export type PruningPolicy = "off" | "declassified";
+
 export interface PatternSpec {
   /** 토큰 이름에 들어가는 식별자 (대문자·숫자·언더스코어) */
   type: string;
@@ -97,6 +105,7 @@ export interface PolicyConfig {
   propagationMode: PropagationMode;
   judgmentMode: JudgmentMode;
   hitlPolicy: HitlPolicy;
+  pruningPolicy: PruningPolicy;
   /** 사용자용 설명 계층에서 쓰는 도구의 사람 말 라벨 (예: read_secrets → "비밀 파일 읽기") */
   toolLabels: Record<string, string>;
   secretDetection: SecretDetectionConfig | null;
@@ -305,6 +314,12 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     fail(`"hitlPolicy"는 "off" | "weak-only" 중 하나여야 합니다`);
   }
 
+  // 기본은 "off" — 가지치기도 설정으로 명시해야만 켜진다 (기존 동작 불변)
+  const pruningPolicy = obj.pruningPolicy ?? "off";
+  if (pruningPolicy !== "off" && pruningPolicy !== "declassified") {
+    fail(`"pruningPolicy"는 "off" | "declassified" 중 하나여야 합니다`);
+  }
+
   const domain = obj.domain ?? "default";
   if (typeof domain !== "string") fail(`"domain"은 문자열이어야 합니다`);
 
@@ -330,6 +345,7 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     propagationMode,
     judgmentMode,
     hitlPolicy,
+    pruningPolicy,
     toolLabels,
     secretDetection: parseSecretDetection(obj.secretDetection),
     piiPatterns: parsePatternList(obj.piiPatterns, "piiPatterns"),

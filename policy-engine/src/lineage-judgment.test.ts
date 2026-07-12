@@ -31,7 +31,8 @@ writeFileSync(
 );
 process.env.TAINTGUARD_TOOL_REGISTRY = configFile;
 
-const { recordToolResult, attemptSanitization, evaluateToolCall } = await import("./index.js");
+const { recordToolResult, attemptSanitization, evaluateToolCall, pruneSessionLineage, getSessionLineage } =
+  await import("./index.js");
 
 function ctx(
   sessionId: string,
@@ -138,4 +139,15 @@ test("argTags도 계보 합집합에 합쳐져 판정된다 (프록시가 전파
 
 test("깨끗한 값: 세션이 깨끗하면 outbound도 허용 (기본 동작 보존)", () => {
   assert.equal(evaluateToolCall(ctx("j7-clean", "http_post")).allowed, true);
+});
+
+test("pruningPolicy off(기본): pruneSessionLineage는 no-op — 아무것도 지우지 않는다", () => {
+  const sid = "j8-prune-off";
+  recordToolResult(sid, "read_secrets", undefined, { contact: "a@b.co" });
+  attemptSanitization(sid, SanitizationMethod.TOKENIZATION); // 정화돼 깨끗한 childless 노드
+
+  const sizeBefore = getSessionLineage(sid).size;
+  const { pruned } = pruneSessionLineage(sid);
+  assert.equal(pruned, 0); // 이 설정 파일엔 pruningPolicy가 없음 → 기본 off
+  assert.equal(getSessionLineage(sid).size, sizeBefore);
 });

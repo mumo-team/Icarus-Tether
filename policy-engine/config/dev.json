@@ -8,6 +8,7 @@
   "propagationMode": "live",
   "judgmentMode": "shadow",
   "hitlPolicy": "off",
+  "pruningPolicy": "off",
   "toolLabels": {
     "read_env_file": "환경설정 파일 읽기",
     "read_secrets": "비밀 파일 읽기",
