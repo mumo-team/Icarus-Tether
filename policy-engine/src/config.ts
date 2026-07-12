@@ -97,6 +97,8 @@ export interface PolicyConfig {
   propagationMode: PropagationMode;
   judgmentMode: JudgmentMode;
   hitlPolicy: HitlPolicy;
+  /** 사용자용 설명 계층에서 쓰는 도구의 사람 말 라벨 (예: read_secrets → "비밀 파일 읽기") */
+  toolLabels: Record<string, string>;
   secretDetection: SecretDetectionConfig | null;
   piiPatterns: PatternSpec[];
   extractionSchema: ExtractionSchemaConfig | null;
@@ -306,6 +308,18 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
   const domain = obj.domain ?? "default";
   if (typeof domain !== "string") fail(`"domain"은 문자열이어야 합니다`);
 
+  // 사용자용 설명 계층의 도구 라벨 — 생략 시 빈 맵 (도구 이름 그대로 폴백)
+  const toolLabels: Record<string, string> = {};
+  if (obj.toolLabels !== undefined) {
+    if (typeof obj.toolLabels !== "object" || obj.toolLabels === null || Array.isArray(obj.toolLabels)) {
+      fail(`"toolLabels"는 { 도구이름: 라벨 } 객체여야 합니다`);
+    }
+    for (const [tool, label] of Object.entries(obj.toolLabels as Record<string, unknown>)) {
+      if (typeof label !== "string") fail(`toolLabels["${tool}"]는 문자열이어야 합니다`);
+      toolLabels[tool] = label;
+    }
+  }
+
   return {
     domain,
     sensitiveSourceTools,
@@ -316,6 +330,7 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     propagationMode,
     judgmentMode,
     hitlPolicy,
+    toolLabels,
     secretDetection: parseSecretDetection(obj.secretDetection),
     piiPatterns: parsePatternList(obj.piiPatterns, "piiPatterns"),
     extractionSchema: parseExtractionSchema(obj.extractionSchema),

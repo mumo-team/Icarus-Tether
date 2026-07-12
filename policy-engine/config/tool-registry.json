@@ -12,6 +12,15 @@
   "propagationMode": "snapshot",
   "judgmentMode": "session",
   "hitlPolicy": "off",
+  "toolLabels": {
+    "query_customer_db": "고객 DB 조회",
+    "read_internal_file": "내부 문서 읽기",
+    "fetch_web_page": "웹 페이지 가져오기",
+    "read_email": "이메일 읽기",
+    "send_email": "이메일 보내기",
+    "http_post": "외부로 전송",
+    "write_external_file": "외부 파일 쓰기"
+  },
   "secretDetection": {
     "bySource": true,
     "byEntropy": { "minLength": 20, "entropyThreshold": 3.8 },

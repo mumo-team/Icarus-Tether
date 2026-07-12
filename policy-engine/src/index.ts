@@ -31,6 +31,9 @@ import { extractStructured, tokenizePII } from "./sanitization.js";
 import { createTaintNode, declassifyNodeTag, type TaintNode } from "./lineage.js";
 import { collectLineageEvidence, runShadowEvaluation } from "./shadow.js";
 import { consumeApprovalIfMatching, evaluateOverridability, offerOverride } from "./hitl.js";
+import { buildFailSafeExplanation, buildUserExplanation } from "./explain.js";
+
+export { buildUserExplanation, buildFailSafeExplanation, type ExplainInput } from "./explain.js";
 
 export {
   requestApproval,
@@ -397,6 +400,15 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
           decision.canOverride = false; // strong 연결이 오염을 실음 — 사람도 못 여는 확정 차단
         }
       }
+
+      // 사용자용 설명 계층 — 개발자용 reason은 그대로 두고, 사람 말 번역을 별도 필드로.
+      // 결정론 템플릿 매핑(explain.ts)이라 AI 판단 없음.
+      decision.explanation = buildUserExplanation({
+        evidence,
+        argTags: ctx.argTags,
+        canOverride: decision.canOverride ?? false,
+        approvalId: decision.approvalId,
+      });
       return decision;
     }
 
@@ -410,6 +422,7 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
       allowed: false,
       reason: "계보 판정 계산 실패 — fail-safe 차단 (오류 시 통과 금지)",
       matchedTags: [],
+      explanation: buildFailSafeExplanation(),
     };
   }
 }

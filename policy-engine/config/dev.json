@@ -8,6 +8,17 @@
   "propagationMode": "live",
   "judgmentMode": "shadow",
   "hitlPolicy": "off",
+  "toolLabels": {
+    "read_env_file": "환경설정 파일 읽기",
+    "read_secrets": "비밀 파일 읽기",
+    "get_db_credentials": "DB 접속정보 조회",
+    "read_github_issue": "GitHub 이슈 읽기",
+    "read_pr_comment": "PR 코멘트 읽기",
+    "fetch_web_page": "웹 페이지 가져오기",
+    "http_post": "외부로 전송",
+    "push_to_remote": "원격 저장소 푸시",
+    "install_package": "패키지 설치"
+  },
   "secretDetection": {
     "bySource": true,
     "byEntropy": { "minLength": 20, "entropyThreshold": 3.8 },

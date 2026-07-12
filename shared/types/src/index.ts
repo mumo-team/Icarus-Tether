@@ -48,6 +48,34 @@ export interface ToolCallContext {
   timestamp: string;
 }
 
+/**
+ * [사용자용 설명] 차단 시 사용자가 취할 수 있는 선택지.
+ * 결정론 번역 계층(policy-engine explain.ts)이 사실 기반으로만 생성한다 — AI 없음.
+ */
+export interface UserAction {
+  kind: "SANITIZE" | "REQUEST_APPROVAL" | "INSPECT_SOURCE";
+  /** 버튼에 쓸 짧은 말 (예: "민감 정보를 가리고 보내기") */
+  label: string;
+  /** 사람 말 설명 — 기술 용어 없음 */
+  description: string;
+  /** 지금 이 선택지가 실제로 가능한가 (사실로만 결정) */
+  available: boolean;
+  /** 실행에 필요한 기계용 정보 (approvalId·정화 method 등 — 여기만 기술 값 허용) */
+  detail?: string;
+}
+
+/** [사용자용 설명] "왜 위험한지 + 뭘 할 수 있는지"의 구조화 번역. 문자열 파싱 불필요. */
+export interface UserFacingExplanation {
+  /** 한 줄 요약 (예: "민감한 정보가 외부로 나가려 해서 막았어요") */
+  summary: string;
+  /** 무엇이 섞여 있는지 — 사람 말 (도구는 라벨로, 노드 id 노출 없음) */
+  reason: string;
+  /** 왜 위험한지 (사람 말) */
+  risks: string[];
+  /** 뭘 할 수 있는지 (선택지) */
+  actions: UserAction[];
+}
+
 /** 브레인이 ToolCallContext를 검사한 뒤 프록시에 돌려주는 판정 결과. */
 export interface PolicyDecision {
   sessionId: string;
@@ -66,6 +94,11 @@ export interface PolicyDecision {
   canOverride?: boolean;
   /** [HITL] canOverride=true일 때 requestApproval에 넘길 승인 id */
   approvalId?: string;
+  /**
+   * [사용자용 설명] 차단(계보 판정) 시 채워지는 사람 말 번역.
+   * reason(개발자용)은 그대로 유지되고, 이 필드는 UI 표시용 별도 계층이다.
+   */
+  explanation?: UserFacingExplanation;
 }
 
 // ---------------------------------------------------------------------------

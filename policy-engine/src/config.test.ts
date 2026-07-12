@@ -129,6 +129,24 @@ test("hitlPolicy: 생략 시 기본 off(기존 동작 불변), 잘못된 값은 
   assert.throws(() => loadPolicyConfig(bad), /"off" \| "weak-only"/);
 });
 
+test("toolLabels: 생략 시 빈 맵, dev.json 라벨 로드, 잘못된 형식은 예외", () => {
+  const legacy = writeTmpConfig("labels-default.json", {
+    sensitiveSources: [],
+    untrustedSources: [],
+    sinks: {},
+  });
+  assert.deepEqual(loadPolicyConfig(legacy).toolLabels, {});
+  assert.equal(loadPolicyConfig(DEV_JSON).toolLabels.read_secrets, "비밀 파일 읽기");
+
+  const bad = writeTmpConfig("labels-bad.json", {
+    sensitiveSourceTools: [],
+    untrustedSourceTools: [],
+    outboundSinkTools: [],
+    toolLabels: { x: 123 },
+  });
+  assert.throws(() => loadPolicyConfig(bad), /toolLabels/);
+});
+
 test("fail-closed: 잘못된 형식은 전부 예외", () => {
   const base = {
     sensitiveSourceTools: [],
