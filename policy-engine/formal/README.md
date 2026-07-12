@@ -5,18 +5,44 @@
 | 모듈 | 무엇의 모델인가 |
 |---|---|
 | `TaintSafety.tla` | 세션 단위 boolean 판정(toy) — 1주차 최소 모델 |
-| `TaintLineage.tla` | **값 단위 계보 판정(real)** — 전파 + 비대칭 정화 + 차단 규칙 |
+| `TaintLineage.tla` | **값 단위 계보 판정(real)** — snapshot 전파 + 비대칭 정화 + 차단 규칙 |
+| `TaintLineageLive.tla` | **live 전파 확장** — addNodeTags+cascadeDown(사후 오염·하향 전파) + sink 재통과 |
 
 ## 증명된 속성 (TaintLineage)
 
 > **SinkSafety**: 어떤 실행 순서로도, SENSITIVE와 UNTRUSTED를 둘 다 가진 노드가
 > (정화되지 않은 채) sink에 도달하는 것은 불가능하다.
 
-- 검증 결과: 노드 4개 기준 **16,852,481 상태 생성 / 3,637,018 고유 상태 전수 탐색,
-  위반 0** (TLC 2026.05, 76초).
+- 검증 결과 (snapshot, TaintLineage): 노드 4개 기준 **16,852,481 상태 생성 /
+  3,637,018 고유 상태 전수 탐색, 위반 0** (TLC 2026.05, 76초).
 - sanity check: `ReachSink`의 차단 guard(`~Trifecta(tags[n])`)를 제거한 변형에서는
   SinkSafety가 4스텝 반례로 **즉시 깨짐**을 확인 — 불변식이 공허하게 참이 아니라
   실제로 차단 규칙 덕에 성립함을 보인다.
+
+## live 전파 확장 (TaintLineageLive)
+
+snapshot 모델의 "생성 후 태그 불증가" 가정을 깨는 live 전파
+(`addNodeTags` + `cascadeDown`, `propagationMode: "live"`)까지 포함해 같은 속성을 증명:
+
+- **AddTag(n, t) 전이 추가** — n과 n의 모든 "자손"에게 t를 하향 전파.
+  자손 계산(DescendantsOf)이 부모→자식 방향만 따라가므로 역류(조상 오염)는
+  수식상 표현 자체가 불가능 (cascadeDown이 childIndex만 따라가는 코드와 1:1 대응).
+- **"노드당 sink 1회 통과" 단순화 제거** — 태그가 늘 수 있으므로 재통과를 허용해야
+  "깨끗하게 통과 → 사후 오염 → 재통과"라는 live 고유 위험 시나리오가 탐색된다.
+  exfiltrated가 통과 시점 태그 스냅샷을 기록하므로 각 통과는 독립 판정.
+- 보조 불변식 `GrowthReExitSafety`: "태그가 늘어난 재통과가 트라이펙타면 위반" —
+  태그 증가는 AddTag로만 가능하므로 이 불변식의 반례에는 반드시 AddTag가 등장한다.
+- 검증 결과: 노드 3개 기준 **6,958,357 상태 생성 / 828,513 고유 상태 전수 탐색
+  (깊이 22), 위반 0** (18초, 불변식 5종).
+- 노드 4개는 20분 타임박스 초과로 미채택 (AddTag×재통과로 상태 공간이 노드 수에
+  지수적). 3개로 충분한 근거: 새로 추가된 메커니즘(다단 하향 전파)은 3-노드
+  체인(조상→중간→자손)에서 이미 온전히 발현되며, snapshot 공통 부분은
+  TaintLineage.tla가 4-노드로 검증했다.
+- sanity check 2종 (guard 제거 변형, 원본 무손상):
+  1. SinkSafety — 3스텝 반례 즉시 발생.
+  2. GrowthReExitSafety — **5스텝 반례가 정확히 live 고유 경로를 시연**:
+     `생성{SENSITIVE} → 통과({S} 기록) → AddTag(UNTRUSTED) → 재통과(트라이펙타)`.
+     guard가 있는 본 모델에서는 이 재통과가 비활성 = 차단된다.
 
 ## 구현 검증 (fast-check)
 
@@ -62,11 +88,10 @@ TLA+가 "설계"의 SinkSafety를 증명했다면, `src/property.test.ts`는 같
 
 - **session/shadow 판정 모드** (`judgmentMode: "session" | "shadow"`): toy 판정은
   `TaintSafety.tla`가 다루고, 이 모델은 real(lineage) 판정만 다룬다.
-- **live 전파** (`addNodeTags` + `cascadeDown`): 생성 후 태그가 "늘어나는" 유일한
-  경로. 이 모델은 snapshot 의미론(생성 시 1회 상속)만 다룬다. live를 추가하면
-  `AddTag` 전이(자손 하향 전파)가 필요하다 — 다음 확장 후보.
-  주의: 그 경우 "노드당 1회 sink 통과" 단순화의 정당화(태그가 절대 안 늘어남)를
-  재검토해야 한다 (통과 후 태그가 늘 수 있으므로 재통과를 허용해야 함).
+- ~~live 전파~~ → **TaintLineageLive.tla로 증명 완료** (위 섹션). snapshot 모델
+  (TaintLineage.tla)은 여전히 "생성 후 태그 불증가" 가정 + 1회 통과 단순화를
+  유지하지만, live 모델이 그 가정을 해제한 상태에서도 SinkSafety가 성립함을
+  보였으므로 경고가 해소됐다.
 - **정화의 검증 로직** (스키마 추출·토큰화·재스캔): 모델은 "정화가 일어난다"만 보고
   "올바른 값만 정화된다"는 sanitization.ts의 단위 테스트가 보증한다. 역할 분담:
   TLA+는 순서·동시성의 전수 탐색, 테스트는 개별 변환의 정확성.
@@ -79,6 +104,7 @@ TLA+가 "설계"의 SinkSafety를 증명했다면, `src/property.test.ts`는 같
 ```bash
 cd policy-engine/formal
 java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintLineage.tla
+java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintLineageLive.tla
 ```
 
 - `tla2tools.jar`는 VS Code TLA+ 확장에 번들됨:
