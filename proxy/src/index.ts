@@ -21,6 +21,8 @@ import type {
   ToolCallContext,
   PolicyDecision,
   AuditLogEntry,
+  ApprovalRequest,
+  ApprovalStatus,
 } from "@icarus-tether/types";
 
 // ESM엔 __dirname이 없어 import.meta.url로 계산 (실행 위치와 무관하게 경로 고정)
@@ -39,7 +41,7 @@ interface SessionState {
 const sessions = new Map<string, SessionState>();
 
 // 기록 내용의 sha256 해시 = 위변조 방지 서명. 나중에 다시 계산해 비교하면 변조를 탐지.
-function signEntry(entry: Omit<AuditLogEntry, "signature">): string {
+function signEntry(entry: unknown): string {
   return createHash("sha256").update(JSON.stringify(entry)).digest("hex");
 }
 
@@ -47,6 +49,44 @@ function signEntry(entry: Omit<AuditLogEntry, "signature">): string {
 function writeAuditLog(entry: Omit<AuditLogEntry, "signature">): void {
   const signed: AuditLogEntry = { ...entry, signature: signEntry(entry) };
   appendFileSync(AUDIT_LOG_PATH, JSON.stringify(signed) + "\n");
+}
+
+// 승인 요청의 최종 결과(누가·언제·승인/거부)를 서명 붙여 audit.log에 남긴다.
+function writeApprovalLog(req: ApprovalRequest): void {
+  appendFileSync(
+    AUDIT_LOG_PATH,
+    JSON.stringify({ ...req, signature: signEntry(req) }) + "\n"
+  );
+}
+
+// 승인 대기 중인 요청들: id → "그 요청을 깨울 resolve 함수"를 보관.
+const pendingApprovals = new Map<string, (status: ApprovalStatus) => void>();
+
+// 승인을 요청하고, 사람이 결정할 때까지 기다리는 Promise를 돌려준다. (deferred 패턴)
+function requestApproval(req: ApprovalRequest): Promise<ApprovalStatus> {
+  return new Promise((resolve) => {
+    pendingApprovals.set(req.id, resolve); // resolve를 보관만 하고 Promise는 아직 안 끝남
+    console.error(`[proxy] 승인 대기  id=${req.id}  tool=${req.toolName}`);
+  });
+}
+
+// 사람(또는 C)이 결정을 내리면 호출된다. 보관된 resolve를 불러 대기 중인 요청을 깨운다.
+function resolveApproval(id: string, status: ApprovalStatus): void {
+  const resolve = pendingApprovals.get(id);
+  if (!resolve) return; // 이미 처리됐거나 없는 id
+  pendingApprovals.delete(id);
+  resolve(status);
+}
+
+// [C 자리 스텁] 사람 심사 시뮬레이션. 실제로는 C의 승인 큐에서 사람이 누른다.
+// env APPROVAL_DECISION="approve"일 때만 승인, 아니면 거부(안전 기본값).
+function simulateHumanReview(req: ApprovalRequest): void {
+  const status: ApprovalStatus =
+    process.env.APPROVAL_DECISION === "approve" ? "APPROVED" : "REJECTED";
+  setTimeout(() => {
+    console.error(`[proxy] (스텁) 사람 결정: ${status}  id=${req.id}`);
+    resolveApproval(req.id, status);
+  }, 500); // 사람이 잠깐 고민하는 시간을 흉내
 }
 
 // 도메인 파트의 정책 엔진이 꽂힐 자리. 지금은 스텁이며, 이 함수 본문만 실제 엔진 호출로 교체하면 된다.
@@ -151,16 +191,42 @@ async function main() {
 
     const decision = await requestPolicyCheck(ctx, session?.tags ?? new Set());
 
+    // 정책상 막힐 케이스(트라이펙타)면 즉시 차단하지 않고 사람 승인을 받는다.
+    let allowed = decision.allowed;
+    let resolvedBy: string | undefined;
+    if (!decision.allowed) {
+      const req: ApprovalRequest = {
+        id: randomUUID(),
+        sessionId,
+        toolName: name,
+        args: ctx.args,
+        status: "PENDING",
+        requestedAt: new Date().toISOString(),
+      };
+      const pending = requestApproval(req); // 대기 등록
+      simulateHumanReview(req); // C 자리: 심사 시작
+      const status = await pending; // 사람 결정 대기
+
+      req.status = status;
+      req.resolvedAt = new Date().toISOString();
+      req.resolvedBy = "stub-reviewer"; // 실제로는 승인한 사람 ID
+      writeApprovalLog(req); // 누가 승인/거부했는지 영구 기록
+
+      allowed = status === "APPROVED";
+      resolvedBy = req.resolvedBy;
+    }
+
     writeAuditLog({
       id: randomUUID(),
       sessionId,
       toolName: name,
-      decision: decision.allowed ? "ALLOWED" : "BLOCKED",
+      decision: allowed ? "ALLOWED" : "BLOCKED",
       matchedTags: decision.matchedTags,
       timestamp: new Date().toISOString(),
     });
-    if (!decision.allowed) {
-      console.error(`[proxy] 차단  ${name}  reason=${decision.reason}`);
+
+    if (!allowed) {
+      console.error(`[proxy] 차단  ${name}  (by=${resolvedBy ?? "정책"})`);
       return {
         isError: true,
         content: [
@@ -168,6 +234,7 @@ async function main() {
         ],
       };
     }
+    if (resolvedBy) console.error(`[proxy] 승인됨 → 진행  ${name}  (by=${resolvedBy})`);
 
     const result = await downstream.callTool(request.params);
 

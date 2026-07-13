@@ -16,6 +16,7 @@ async function main() {
   const transport = new StdioClientTransport({
     command: "npx",
     args: ["tsx", PROXY_PATH],
+    env: process.env as Record<string, string>, // APPROVAL_DECISION 등을 프록시로 전달
   });
   await client.connect(transport);
   console.error("[mock-client] 프록시에 연결됨.\n");
