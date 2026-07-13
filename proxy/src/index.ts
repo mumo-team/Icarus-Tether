@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
+import { z } from "zod";
 import { ToolRiskTag, SinkClass } from "@icarus-tether/types";
 import type {
   ToolCallContext,
@@ -154,9 +155,10 @@ async function main() {
   await downstream.connect(downstreamTransport);
 
   // 저수준 Server를 쓰는 이유: 프록시는 도구를 미리 모르므로 임의 요청을 그대로 중계해야 한다.
+  // capabilities는 다운스트림이 노출하는 것을 그대로 신고 → 클라이언트가 그 기능들을 쓸 수 있게.
   const server = new Server(
     { name: "icarus-tether-proxy", version: "0.1.0" },
-    { capabilities: { tools: {} } }
+    { capabilities: downstream.getServerCapabilities() ?? { tools: {} } }
   );
 
   // 클라이언트가 stdin을 닫으면(EOF) 대화가 끝난 것 → 세션 정리.
@@ -247,6 +249,17 @@ async function main() {
   });
 
   // stdout은 에이전트와의 JSON-RPC 전용선이므로, 로그는 반드시 stderr(console.error)로.
+  // [투명성] tools 외 모든 요청·알림은 손대지 않고 그대로 중계한다.
+  // 임의 메서드를 통과시키므로 타입 유니온을 우회(any)하고, 결과는 관대한 스키마로 받는다.
+  server.fallbackRequestHandler = async (req) =>
+    downstream.request({ method: req.method, params: req.params } as any, z.any());
+  server.fallbackNotificationHandler = async (n) =>
+    downstream.notification(n as any);
+  // 역방향(서버→클라, 예: sampling/roots)도 통과.
+  downstream.fallbackRequestHandler = async (req) =>
+    server.request({ method: req.method, params: req.params } as any, z.any());
+  downstream.fallbackNotificationHandler = async (n) => server.notification(n as any);
+
   const upstreamTransport = new StdioServerTransport();
   await server.connect(upstreamTransport);
   console.error(`[proxy] 기동됨. session=${sessionId}`);

@@ -71,6 +71,16 @@ server.registerTool(
   }
 );
 
+// tools가 아닌 리소스 — #9(프로토콜 전체 중계) 통과 확인용.
+server.registerResource(
+  "company-readme",
+  "file:///company/readme.txt",
+  { title: "회사 안내", description: "데모용 리소스", mimeType: "text/plain" },
+  async (uri) => ({
+    contents: [{ uri: uri.href, text: "프록시를 통해 읽은 데모 리소스 내용입니다." }],
+  })
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

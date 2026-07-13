@@ -28,6 +28,16 @@ async function main() {
   }
   console.error("");
 
+  // tools가 아닌 요청(resources)도 프록시를 그대로 통과하는지 확인 (#9)
+  const resources = await client.listResources();
+  console.error(
+    "[mock-client] resources/list:",
+    resources.resources.map((r) => r.uri).join(", ")
+  );
+  const readme = await client.readResource({ uri: "file:///company/readme.txt" });
+  console.error("[mock-client] resources/read:", JSON.stringify(readme.contents));
+  console.error("");
+
   const dbResult = await client.callTool({
     name: "query_customer_db",
     arguments: { customerId: "12345" },
