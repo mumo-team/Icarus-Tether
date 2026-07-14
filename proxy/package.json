@@ -8,13 +8,16 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "dependencies": {
+    "dependencies": {
     "@icarus-tether/types": "*",
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ws": "^8.18.0",
+    "@huggingface/transformers": "^3.0.0"
   },
-  "devDependencies": {
+ "devDependencies": {
     "typescript": "^5.6.0",
     "tsx": "^4.19.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0"
   }
 }

@@ -2,7 +2,7 @@ import type { ApprovalRequest } from "@icarus-tether/types";
 
 interface ApprovalQueueProps {
   approvals: ApprovalRequest[];
-  onDecide: (id: string, status: "APPROVED" | "REJECTED") => void;
+  onDecide: (id: string, status: "APPROVED" | "REJECTED", resolvedBy: string) => void;
 }
 
 export default function ApprovalQueue({ approvals, onDecide }: ApprovalQueueProps) {
@@ -18,8 +18,8 @@ export default function ApprovalQueue({ approvals, onDecide }: ApprovalQueueProp
               {a.toolName} ({a.status})
               {a.status === "PENDING" && (
                 <span style={{ marginLeft: "8px" }}>
-                  <button onClick={() => onDecide(a.id, "APPROVED")}>승인</button>{" "}
-                  <button onClick={() => onDecide(a.id, "REJECTED")}>거부</button>
+                  <button onClick={() => onDecide(a.id, "APPROVED", "demo-reviewer")}>승인</button>{" "}
+                  <button onClick={() => onDecide(a.id, "REJECTED", "demo-reviewer")}>거부</button>
                 </span>
               )}
             </li>

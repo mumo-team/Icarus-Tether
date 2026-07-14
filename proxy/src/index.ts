@@ -22,12 +22,61 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 // 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
 import type { ToolCallContext, PolicyDecision } from "@icarus-tether/types";
+import { WebSocketServer, type WebSocket } from "ws";
+import { pipeline } from "@huggingface/transformers";
 
 // ESM에는 __dirname이 없다. import.meta.url(이 파일의 위치)로 직접 계산한다.
 // 이렇게 해두면 어디서 프록시를 실행하든 mock-server 경로가 안 깨진다.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MOCK_SERVER_PATH = resolve(__dirname, "../test/mock-server.ts");
 
+// ── 대시보드용 웹소켓 서버 (개념 증명) ──────────────────────────────
+// proxy는 판정 데이터를 이미 갖고 있으니, 별도 서버 없이 여기서 바로 방송한다.
+const WS_PORT = 7331;
+const wss = new WebSocketServer({ port: WS_PORT });
+const dashboardClients = new Set<WebSocket>();
+
+wss.on("connection", (socket) => {
+  dashboardClients.add(socket);
+  console.error(`[proxy] 대시보드 연결됨 (현재 ${dashboardClients.size}개)`);
+  socket.on("close", () => dashboardClients.delete(socket));
+});
+
+function broadcastToDashboard(event: Record<string, unknown>): void {
+  const payload = JSON.stringify(event);
+  for (const client of dashboardClients) {
+    if (client.readyState === client.OPEN) client.send(payload);
+  }
+}
+
+// ── 인젝션 탐지 (개념 증명 — 원래는 dashboard/server 소유, 지금은 임시로 여기 복제) ──
+// ⚠️ 비신뢰 콘텐츠(fetch_web_page 등) 전용. 사용자 명령문에는 쓰지 말 것(오탐 확인됨).
+const INJECTION_THRESHOLD = 0.95;
+let injectionClassifierPromise: ReturnType<typeof pipeline> | null = null;
+function getInjectionClassifier() {
+  if (!injectionClassifierPromise) {
+    injectionClassifierPromise = pipeline(
+      "text-classification",
+      "protectai/deberta-v3-base-prompt-injection-v2"
+    );
+  }
+  return injectionClassifierPromise;
+}
+
+async function detectInjection(text: string): Promise<{ isInjection: boolean; score: number }> {
+  try {
+    const classifier = await getInjectionClassifier();
+    const result = (await classifier(text.slice(0, 2000), { top_k: null })) as Array<{
+      label: string;
+      score: number;
+    }>;
+    const score = result.find((r) => r.label === "INJECTION")?.score ?? 0;
+    return { isInjection: score > INJECTION_THRESHOLD, score };
+  } catch (err) {
+    console.error("[proxy] 인젝션 탐지 실패 — fail-safe로 의심 처리:", err);
+    return { isInjection: true, score: 1 };
+  }
+}
 /**
  * [2단계] 검사 소켓 — B의 정책 엔진이 나중에 꽂힐 자리.
  *
@@ -109,6 +158,15 @@ async function main() {
 
     // [2단계] 검사 소켓 호출. 여기 반환값(allowed)이 통과/차단을 가른다.
     const decision = await requestPolicyCheck(ctx);
+    broadcastToDashboard({
+      type: "decision",
+      sessionId: decision.sessionId,
+      toolName: decision.toolName,
+      allowed: decision.allowed,
+      reason: decision.reason,
+      matchedTags: decision.matchedTags,
+      timestamp: ctx.timestamp,
+    });
 
     // [3단계] 차단 결정이면 다운스트림에 넘기지 않고 여기서 끊는다.
     // → send_email이면 진짜 서버는 호출조차 되지 않는다(=실제 차단).
@@ -126,6 +184,27 @@ async function main() {
     // [통과] 0/1단계와 동일하게 중계한다.
     const result = await downstream.callTool(request.params);
     console.error(`[proxy] ⬅ 응답 통과  name=${name}`);
+
+    // 비신뢰 콘텐츠 도구 결과만 인젝션 탐지 (사용자 명령문엔 절대 적용 금지 — 오탐 확인됨)
+    if (name === "fetch_web_page") {
+      const textContent =
+        (result as { content?: Array<{ type: string; text?: string }> }).content?.find(
+          (c) => c.type === "text"
+        )?.text ?? "";
+      const injectionResult = await detectInjection(textContent);
+      console.error(
+        `[proxy] 🔍 인젝션 탐지  score=${injectionResult.score.toFixed(4)}  isInjection=${injectionResult.isInjection}`
+      );
+      broadcastToDashboard({
+        type: "injection_check",
+        sessionId: ctx.sessionId,
+        toolName: name,
+        isInjection: injectionResult.isInjection,
+        score: injectionResult.score,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     return result;
   });
 
