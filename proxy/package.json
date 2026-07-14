@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@icarus-tether/policy-engine": "*",
     "@icarus-tether/types": "*",
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
