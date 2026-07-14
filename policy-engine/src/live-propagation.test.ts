@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ToolRiskTag } from "@taintguard/types";
+import { ToolRiskTag } from "@icarus-tether/types";
 
 const dir = mkdtempSync(path.join(tmpdir(), "taintguard-live-"));
 const configFile = path.join(dir, "live.json");

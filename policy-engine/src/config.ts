@@ -19,7 +19,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { SinkClass } from "@taintguard/types";
+import { SinkClass } from "@icarus-tether/types";
 
 // ---------------------------------------------------------------------------
 // 타입

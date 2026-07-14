@@ -9,7 +9,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ToolRiskTag, SanitizationMethod, type ToolCallContext } from "@taintguard/types";
+import { ToolRiskTag, SanitizationMethod, type ToolCallContext } from "@icarus-tether/types";
 import { recordToolResult, attemptSanitization, evaluateToolCall, getTaintNode } from "./index.js";
 
 function ctx(sessionId: string, toolName: string): ToolCallContext {

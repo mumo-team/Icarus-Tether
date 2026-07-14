@@ -11,7 +11,7 @@
  * 수집한 일치/불일치 데이터는 toy → real 판정 전환 여부를 결정할 근거가 된다.
  */
 
-import { SinkClass, ToolRiskTag, type ToolCallContext } from "@taintguard/types";
+import { SinkClass, ToolRiskTag, type ToolCallContext } from "@icarus-tether/types";
 import { getTaintNode, previewParentLinks, type LinkMethod } from "./lineage.js";
 
 // ---------------------------------------------------------------------------

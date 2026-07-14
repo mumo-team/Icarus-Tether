@@ -8,7 +8,7 @@ import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { SinkClass } from "@taintguard/types";
+import { SinkClass } from "@icarus-tether/types";
 import { loadPolicyConfig } from "./config.js";
 
 const DEV_JSON = path.resolve(

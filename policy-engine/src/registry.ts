@@ -6,7 +6,7 @@
  * thin wrapper다. 새 코드는 getPolicyConfig()를 직접 쓰는 것을 권장.
  */
 
-import { SinkClass } from "@taintguard/types";
+import { SinkClass } from "@icarus-tether/types";
 import { getPolicyConfig, loadPolicyConfig } from "./config.js";
 
 export interface ToolRegistry {

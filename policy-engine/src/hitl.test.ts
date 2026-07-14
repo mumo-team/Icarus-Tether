@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ToolRiskTag, type ToolCallContext } from "@taintguard/types";
+import { ToolRiskTag, type ToolCallContext } from "@icarus-tether/types";
 
 const dir = mkdtempSync(path.join(tmpdir(), "taintguard-hitl-"));
 const configFile = path.join(dir, "hitl.json");

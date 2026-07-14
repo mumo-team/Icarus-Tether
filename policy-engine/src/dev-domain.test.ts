@@ -8,7 +8,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ToolRiskTag, SanitizationMethod, type ToolCallContext } from "@taintguard/types";
+import { ToolRiskTag, SanitizationMethod, type ToolCallContext } from "@icarus-tether/types";
 
 process.env.TAINTGUARD_DOMAIN = "dev";
 const { tagToolResult, recordToolPayload, attemptSanitization, evaluateToolCall } = await import(

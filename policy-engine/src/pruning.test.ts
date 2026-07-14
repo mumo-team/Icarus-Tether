@@ -11,7 +11,7 @@ import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import fc from "fast-check";
-import { ToolRiskTag, SanitizationMethod, type ToolCallContext } from "@taintguard/types";
+import { ToolRiskTag, SanitizationMethod, type ToolCallContext } from "@icarus-tether/types";
 
 const dir = mkdtempSync(path.join(tmpdir(), "taintguard-pruning-"));
 const configFile = path.join(dir, "pruning.json");

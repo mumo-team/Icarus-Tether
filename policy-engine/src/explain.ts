@@ -18,7 +18,7 @@ import {
   SanitizationMethod,
   type UserAction,
   type UserFacingExplanation,
-} from "@taintguard/types";
+} from "@icarus-tether/types";
 import { getPolicyConfig } from "./config.js";
 import type { LineageEvidence } from "./shadow.js";
 

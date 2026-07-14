@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ToolRiskTag, SanitizationMethod, type ToolCallContext, type UserFacingExplanation } from "@taintguard/types";
+import { ToolRiskTag, SanitizationMethod, type ToolCallContext, type UserFacingExplanation } from "@icarus-tether/types";
 
 const dir = mkdtempSync(path.join(tmpdir(), "taintguard-explain-"));
 const configFile = path.join(dir, "explain.json");

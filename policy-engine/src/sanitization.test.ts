@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { SinkClass } from "@taintguard/types";
+import { SinkClass } from "@icarus-tether/types";
 import { extractStructured, tokenizePII, resolveToken } from "./sanitization.js";
 import { loadToolRegistry } from "./registry.js";
 

@@ -67,7 +67,7 @@ TLA+가 "설계"의 SinkSafety를 증명했다면, `src/property.test.ts`는 같
   fail-safe)를 집계하고 **전부 > 0을 assert** — 안전한 시퀀스만 생성되면 테스트
   자체가 실패한다. 실측: 트라이펙타 11,732 생성, 차단 11,867, 통과 8,706.
 - 반례 발생 시 fast-check가 자동 shrinking으로 최소 재현 시퀀스 + seed를 출력한다.
-- 실행: `npm test --workspace=@taintguard/policy-engine` (전체 스위트에 포함),
+- 실행: `npm test --workspace=@icarus-tether/policy-engine` (전체 스위트에 포함),
   실행 횟수는 `FC_NUM_RUNS` 환경변수로 조절.
 
 ## 모델 ↔ 실제 코드 대응표

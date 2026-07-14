@@ -31,7 +31,7 @@ import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import fc from "fast-check";
-import { ToolRiskTag, SanitizationMethod, type ToolCallContext } from "@taintguard/types";
+import { ToolRiskTag, SanitizationMethod, type ToolCallContext } from "@icarus-tether/types";
 
 // --- lineage 모드 테스트 설정 (warn/live 테스트와 같은 패턴) ---
 const dir = mkdtempSync(path.join(tmpdir(), "taintguard-property-"));

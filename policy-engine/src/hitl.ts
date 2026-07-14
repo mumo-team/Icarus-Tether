@@ -21,7 +21,7 @@ import {
   ToolRiskTag,
   type ApprovalRequest,
   type ToolCallContext,
-} from "@taintguard/types";
+} from "@icarus-tether/types";
 import type { LineageEvidence } from "./shadow.js";
 
 // ---------------------------------------------------------------------------

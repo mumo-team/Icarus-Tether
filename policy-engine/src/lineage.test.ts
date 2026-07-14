@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ToolRiskTag, type ToolCallContext } from "@taintguard/types";
+import { ToolRiskTag, type ToolCallContext } from "@icarus-tether/types";
 import {
   recordToolResult,
   tagToolResult,

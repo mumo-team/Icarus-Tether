@@ -27,7 +27,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import type { ToolRiskTag } from "@taintguard/types";
+import type { ToolRiskTag } from "@icarus-tether/types";
 import { getPolicyConfig } from "./config.js";
 
 // ---------------------------------------------------------------------------

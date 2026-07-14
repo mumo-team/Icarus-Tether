@@ -1,59 +1,145 @@
 /**
- * ② 프록시 — A 담당
+ * ② 프록시 — A 담당 / 0단계: 통짜 통과 프록시
  *
- * 역할: AI 에이전트와 실제 MCP 서버 사이에 끼어, 모든 tool call을 가로챈다.
- * 에이전트한테는 "내가 서버다"라고, 실제 서버한테는 "내가 클라이언트다"라고
- * 행동하는 투명 프록시 패턴이다 (자세한 설명은 docs/architecture.md 참고).
+ * 역할: AI 에이전트와 진짜 MCP 서버 사이에 끼어, 모든 요청을 그대로 중계한다.
+ *   - 에이전트한테는 "내가 서버다"  → 저수준 Server + StdioServerTransport
+ *   - 진짜 서버한테는 "내가 클라이언트다" → Client + StdioClientTransport
  *
- * TODO(A): @modelcontextprotocol/sdk로 실제 initialize 핸드셰이크 구현
- * TODO(A): tools/call 수신 시 policy-engine(B)에 검사 요청하는 부분 연동
+ * 0단계 목표: 검사 없이, tools/list·tools/call을 진짜 서버로 넘기고
+ * 결과를 그대로 돌려줘서 "사슬이 이어지는지"만 확인한다.
+ * (로깅=1단계, 스텁검사=2단계, 실제차단=3단계에서 붙인다.)
  */
 
-import type { ToolCallContext, PolicyDecision, ToolRiskTag } from "@taintguard/types";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+// 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
+import type { ToolCallContext, PolicyDecision } from "@icarus-tether/types";
+
+// ESM에는 __dirname이 없다. import.meta.url(이 파일의 위치)로 직접 계산한다.
+// 이렇게 해두면 어디서 프록시를 실행하든 mock-server 경로가 안 깨진다.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const MOCK_SERVER_PATH = resolve(__dirname, "../test/mock-server.ts");
 
 /**
- * 임시 스텁: 실제로는 policy-engine 워크스페이스를 HTTP/IPC로 호출해야 한다.
- * B가 policy-engine을 완성하기 전까지, A는 이 함수만 교체하면
- * 나머지 프록시 로직을 독립적으로 개발/테스트할 수 있다.
+ * [2단계] 검사 소켓 — B의 정책 엔진이 나중에 꽂힐 자리.
+ *
+ * 지금은 A 혼자 차단을 시연하려는 임시 스텁이다.
+ * 이 함수의 "본문"만 나중에 B의 진짜 엔진 호출(HTTP/IPC)로 통째로 바꾸면,
+ * 프록시의 나머지 배선은 손대지 않아도 된다. (그게 소켓을 만드는 이유)
+ *
+ * [3단계] 규칙 한 개: 외부 유출 도구 send_email은 차단한다.
  */
 async function requestPolicyCheck(ctx: ToolCallContext): Promise<PolicyDecision> {
-  // 1주차 스텁: 항상 통과시킴. B의 실제 판정 로직으로 교체 예정.
+  if (ctx.toolName === "send_email") {
+    return {
+      sessionId: ctx.sessionId,
+      toolName: ctx.toolName,
+      allowed: false, // <- 차단
+      reason: "send_email은 외부로 데이터가 나가는 싱크라 데모 정책상 차단됨",
+      matchedTags: [],
+    };
+  }
+  // 그 외에는 통과 (2단계의 '항상 통과' 기본값)
   return {
     sessionId: ctx.sessionId,
     toolName: ctx.toolName,
     allowed: true,
-    matchedTags: [] as ToolRiskTag[],
+    matchedTags: [],
   };
-}
-
-async function handleToolCall(ctx: ToolCallContext) {
-  const decision = await requestPolicyCheck(ctx);
-
-  if (!decision.allowed) {
-    console.log(`[proxy] 차단됨: ${ctx.toolName} (session=${ctx.sessionId})`, decision.reason);
-    return { blocked: true, reason: decision.reason };
-  }
-
-  console.log(`[proxy] 통과: ${ctx.toolName} (session=${ctx.sessionId}) -> 다운스트림 서버로 전달`);
-  // TODO(A): 실제 다운스트림 MCP 서버로 전달하고 결과 수신
-  return { blocked: false };
 }
 
 async function main() {
-  console.log("TaintGuard proxy 기동 (1주차 스텁 버전)");
+  // ---------------------------------------------------------------------
+  // (1) 클라이언트 얼굴: 진짜(다운스트림) 서버에 붙는다.
+  //     StdioClientTransport가 진짜 서버를 "자식 프로세스로 실행(spawn)"하고
+  //     그 자식의 stdin/stdout으로 대화한다.
+  // ---------------------------------------------------------------------
+  const downstream = new Client({
+    name: "icarus-tether-proxy-client",
+    version: "0.1.0",
+  });
+  const downstreamTransport = new StdioClientTransport({
+    command: "npx",
+    args: ["tsx", MOCK_SERVER_PATH],
+  });
+  await downstream.connect(downstreamTransport); // 여기서 진짜 서버와 initialize 핸드셰이크가 일어난다.
 
-  // 데모용 임시 호출 예시 — 실제 MCP 연결 붙기 전까지 로직 확인용
-  const sample: ToolCallContext = {
-    sessionId: "demo-session-1",
-    toolName: "query_customer_db",
-    args: { customerId: "12345" },
-    argTags: [],
-    timestamp: new Date().toISOString(),
-  };
-  await handleToolCall(sample);
+  // ---------------------------------------------------------------------
+  // (2) 서버 얼굴: 에이전트에게 "내가 서버다"라고 행세한다.
+  //     capabilities.tools를 켜서 "나 도구 기능 있음"을 핸드셰이크 때 알린다.
+  // ---------------------------------------------------------------------
+  const server = new Server(
+    { name: "icarus-tether-proxy", version: "0.1.0" },
+    { capabilities: { tools: {} } }
+  );
+
+  // tools/list 요청이 오면 → 진짜 서버에 그대로 물어서, 그 목록을 그대로 돌려준다.
+  // (프록시는 도구를 미리 모른다. "뭐가 있든 그대로 비춰준다"가 투명 프록시의 핵심.)
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return await downstream.listTools();
+  });
+
+  // tools/call 요청이 오면 → 인자를 그대로 진짜 서버로 넘기고, 결과를 그대로 돌려준다.
+  // request.params 안에 { name, arguments }가 들어있고, 그게 곧 callTool의 입력이다.
+  // ★ 나중에 여기(넘기기 직전)에 B의 검사함수가 끼어들 자리다.
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+
+    // [1단계] 가로챈 호출을 눈으로 확인한다. (반드시 stderr로!)
+    console.error(
+      `[proxy] ⮕ 가로챔 tools/call  name=${name}  args=${JSON.stringify(args ?? {})}`
+    );
+
+    // [2단계] 가로챈 정보를 검사함수가 이해하는 표준 모양(ToolCallContext)으로 포장한다.
+    const ctx: ToolCallContext = {
+      sessionId: "demo-session-1", // 세션 관리는 나중에. 지금은 고정값.
+      toolName: name,
+      args: (args ?? {}) as Record<string, unknown>,
+      argTags: [], // 태그 전파(propagation)는 B의 몫. 지금은 빈 값.
+      timestamp: new Date().toISOString(),
+    };
+
+    // [2단계] 검사 소켓 호출. 여기 반환값(allowed)이 통과/차단을 가른다.
+    const decision = await requestPolicyCheck(ctx);
+
+    // [3단계] 차단 결정이면 다운스트림에 넘기지 않고 여기서 끊는다.
+    // → send_email이면 진짜 서버는 호출조차 되지 않는다(=실제 차단).
+    if (!decision.allowed) {
+      console.error(`[proxy] ⛔ 차단  name=${name}  reason=${decision.reason}`);
+      // 에이전트에게는 프로토콜 에러가 아니라 '도구 실행 결과가 에러'인 형태로 알린다.
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: `🛑 정책 차단: ${decision.reason ?? "정책 위반"}` },
+        ],
+      };
+    }
+
+    // [통과] 0/1단계와 동일하게 중계한다.
+    const result = await downstream.callTool(request.params);
+    console.error(`[proxy] ⬅ 응답 통과  name=${name}`);
+    return result;
+  });
+
+  // ---------------------------------------------------------------------
+  // (3) 서버 얼굴을 켠다: 에이전트가 우리를 spawn하면서 연결된 stdio에 붙는다.
+  // ---------------------------------------------------------------------
+  const upstreamTransport = new StdioServerTransport();
+  await server.connect(upstreamTransport);
+
+  // stdout은 에이전트와의 통신 전용이므로, 로그는 반드시 stderr로.
+  console.error("[proxy] 기동됨. 에이전트 <-> 프록시 <-> 진짜 서버 사슬 준비 완료.");
 }
 
 main().catch((err) => {
-  console.error("proxy 기동 실패:", err);
+  console.error("[proxy] 기동 실패:", err);
   process.exit(1);
 });

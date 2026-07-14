@@ -24,7 +24,8 @@ import {
   type TrifectaEvent,
   type SanitizationResult,
   SanitizationMethod,
-} from "@taintguard/types";
+
+} from "@icarus-tether/types";
 import { getPolicyConfig, type PolicyConfig } from "./config.js";
 import { detectSecrets } from "./secret-detection.js";
 import { extractStructured, tokenizePII } from "./sanitization.js";
