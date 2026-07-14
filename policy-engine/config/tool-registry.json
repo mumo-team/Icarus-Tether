@@ -1,0 +1,45 @@
+{
+  "domain": "default",
+  "sensitiveSources": ["query_customer_db", "read_internal_file"],
+  "untrustedSources": ["fetch_web_page", "read_email"],
+  "sinks": {
+    "send_email": "OUTBOUND_SINK",
+    "http_post": "OUTBOUND_SINK",
+    "write_external_file": "OUTBOUND_SINK"
+  },
+  "unknownToolPolicy": "deny",
+  "sensitiveSourcePolicy": "tag_all",
+  "propagationMode": "snapshot",
+  "judgmentMode": "session",
+  "hitlPolicy": "off",
+  "pruningPolicy": "off",
+  "toolLabels": {
+    "query_customer_db": "고객 DB 조회",
+    "read_internal_file": "내부 문서 읽기",
+    "fetch_web_page": "웹 페이지 가져오기",
+    "read_email": "이메일 읽기",
+    "send_email": "이메일 보내기",
+    "http_post": "외부로 전송",
+    "write_external_file": "외부 파일 쓰기"
+  },
+  "secretDetection": {
+    "bySource": true,
+    "byEntropy": { "minLength": 20, "entropyThreshold": 3.8 },
+    "byRegex": [
+      { "type": "AWS_KEY", "pattern": "\\bAKIA[0-9A-Z]{16}\\b" },
+      { "type": "GITHUB_TOKEN", "pattern": "\\bgh[pousr]_[A-Za-z0-9]{36,255}\\b" }
+    ]
+  },
+  "piiPatterns": [
+    { "type": "RRN", "pattern": "\\b\\d{6}-[1-4]\\d{6}\\b" },
+    { "type": "CARD", "pattern": "\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b" },
+    { "type": "PHONE", "pattern": "\\b01[016789]-?\\d{3,4}-?\\d{4}\\b" },
+    { "type": "EMAIL", "pattern": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}" }
+  ],
+  "extractionSchema": {
+    "fields": {
+      "type": { "kind": "enum", "values": ["order", "invoice", "ticket", "note"] },
+      "name": { "kind": "string", "maxLength": 20, "charset": "safe-text" }
+    }
+  }
+}
