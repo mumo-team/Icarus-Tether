@@ -22,6 +22,14 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 // 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
 import type { ToolCallContext, PolicyDecision } from "@icarus-tether/types";
+// ① 정책 엔진(B) — 판정과 오염 기록의 실제 구현.
+import { evaluateToolCall, recordToolResult } from "@icarus-tether/policy-engine";
+
+// ★ stdout 보호: stdio MCP에서 stdout은 JSON-RPC 전용 채널이다.
+// 정책 엔진은 TrifectaEvent·[SHADOW] 로그를 console.log(stdout)로 찍으므로,
+// 그대로 두면 첫 차단 로그가 프로토콜 스트림을 깨뜨린다. 이 프로세스의
+// console.log를 전부 stderr로 우회시킨다 (프록시 자신도 stderr만 쓰는 규칙).
+console.log = (...args: unknown[]) => console.error(...args);
 
 // ESM에는 __dirname이 없다. import.meta.url(이 파일의 위치)로 직접 계산한다.
 // 이렇게 해두면 어디서 프록시를 실행하든 mock-server 경로가 안 깨진다.
@@ -29,31 +37,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const MOCK_SERVER_PATH = resolve(__dirname, "../test/mock-server.ts");
 
 /**
- * [2단계] 검사 소켓 — B의 정책 엔진이 나중에 꽂힐 자리.
+ * [연결 완료] 검사 소켓 — B의 정책 엔진(①)이 꽂힌 자리.
  *
- * 지금은 A 혼자 차단을 시연하려는 임시 스텁이다.
- * 이 함수의 "본문"만 나중에 B의 진짜 엔진 호출(HTTP/IPC)로 통째로 바꾸면,
- * 프록시의 나머지 배선은 손대지 않아도 된다. (그게 소켓을 만드는 이유)
+ * 스텁(send_email "이름" 무조건 차단)과 달리, 엔진은 "데이터 흐름"으로 판정한다:
+ * 같은 send_email이라도 세션에 민감(SENSITIVE)+비신뢰(UNTRUSTED_ORIGIN) 오염이
+ * 겹쳐 있을 때(lethal trifecta)만 차단된다. 판정 규칙·도구 분류는 전부
+ * policy-engine/config/*.json에서 온다 (기본: tool-registry.json, session 모드).
  *
- * [3단계] 규칙 한 개: 외부 유출 도구 send_email은 차단한다.
+ * evaluateToolCall은 동기 함수지만 async 시그니처 안에서 그대로 반환하면 된다 —
+ * 프록시 배선(핸들러 구조)은 그대로다.
  */
 async function requestPolicyCheck(ctx: ToolCallContext): Promise<PolicyDecision> {
-  if (ctx.toolName === "send_email") {
-    return {
-      sessionId: ctx.sessionId,
-      toolName: ctx.toolName,
-      allowed: false, // <- 차단
-      reason: "send_email은 외부로 데이터가 나가는 싱크라 데모 정책상 차단됨",
-      matchedTags: [],
-    };
-  }
-  // 그 외에는 통과 (2단계의 '항상 통과' 기본값)
-  return {
-    sessionId: ctx.sessionId,
-    toolName: ctx.toolName,
-    allowed: true,
-    matchedTags: [],
-  };
+  return evaluateToolCall(ctx);
 }
 
 async function main() {
@@ -100,7 +95,10 @@ async function main() {
 
     // [2단계] 가로챈 정보를 검사함수가 이해하는 표준 모양(ToolCallContext)으로 포장한다.
     const ctx: ToolCallContext = {
-      sessionId: "demo-session-1", // 세션 관리는 나중에. 지금은 고정값.
+      // 데모용 고정 세션. 실전에서는 MCP 연결(에이전트 세션) 단위로 발급해야
+      // 세션 간 오염이 섞이지 않는다. 긴 세션에서는 주기적으로
+      // pruneSessionLineage(sessionId) 호출로 계보를 압축할 것 (선택 계약).
+      sessionId: "demo-session-1",
       toolName: name,
       args: (args ?? {}) as Record<string, unknown>,
       argTags: [], // 태그 전파(propagation)는 B의 몫. 지금은 빈 값.
@@ -125,6 +123,25 @@ async function main() {
 
     // [통과] 0/1단계와 동일하게 중계한다.
     const result = await downstream.callTool(request.params);
+
+    // ★★ 오염 기록 — 이게 없으면 엔진이 무력화된다(fail-open).
+    // 엔진의 계보·세션 태그는 "기록된 도구 결과"에서만 자란다. 결과를 에이전트에
+    // 돌려주기 전에 반드시 기록한다. isError 결과도 기록 — 에러 텍스트에도
+    // 민감정보가 실릴 수 있다. (차단 경로는 downstream 미호출이라 기록할 결과 없음)
+    try {
+      recordToolResult(ctx.sessionId, name, ctx.args, result);
+    } catch (err) {
+      // 기록 실패 = 오염 추적이 안 된 결과. 그대로 넘기면 이후 판정이 이 데이터를
+      // 못 보는 fail-open이 되므로, 결과를 보류하고 에러로 알린다 (fail-safe).
+      console.error(`[proxy] ⚠ 오염 기록 실패 — 결과 전달 보류  name=${name}`, err);
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: "🛑 안전장치: 도구 결과의 오염 추적에 실패해 결과 전달을 보류합니다." },
+        ],
+      };
+    }
+
     console.error(`[proxy] ⬅ 응답 통과  name=${name}`);
     return result;
   });
