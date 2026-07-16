@@ -54,7 +54,7 @@ server.registerTool(
 // 외부·비신뢰 콘텐츠 소스 (UNTRUSTED_ORIGIN 태그가 붙을 도구).
 // 반환값에 "숨은 지시"를 심어, 프롬프트 인젝션 상황을 흉내낸다.
 server.registerTool(
-  "read_webpage",
+  "fetch_web_page",
   {
     description: "URL의 웹페이지 내용을 읽어온다 (외부·비신뢰 소스)",
     inputSchema: { url: z.string() },

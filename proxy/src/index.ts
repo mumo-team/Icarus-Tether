@@ -1,7 +1,7 @@
 /**
  * 프록시 — 에이전트와 실제 MCP 서버 사이에 끼는 투명 프록시.
  * 에이전트에겐 서버로(저수준 Server), 실제 서버에겐 클라이언트로(Client) 행세하며
- * tools/call을 가로채 검사·차단한다.
+ * tools/call을 가로채 정책 엔진의 판정대로 통과·차단한다.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -17,14 +17,18 @@ import { dirname, resolve } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { z } from "zod";
-import { ToolRiskTag, SinkClass } from "@icarus-tether/types";
-import type {
-  ToolCallContext,
-  PolicyDecision,
-  AuditLogEntry,
-  ApprovalRequest,
-  ApprovalStatus,
-} from "@icarus-tether/types";
+import {
+  evaluateToolCall,
+  recordToolResult,
+  requestApproval,
+  resolveApproval,
+} from "@icarus-tether/policy-engine";
+import type { ToolCallContext, AuditLogEntry } from "@icarus-tether/types";
+
+// ★ stdout 보호: stdio에서 stdout은 JSON-RPC 전용 채널인데, 정책 엔진은 로그를
+// console.log(stdout)로 찍는다. 그대로 두면 첫 로그가 프로토콜 스트림을 깨뜨리므로
+// 이 프로세스의 console.log를 전부 stderr로 우회시킨다.
+console.log = (...args: unknown[]) => console.error(...args);
 
 // ESM엔 __dirname이 없어 import.meta.url로 계산 (실행 위치와 무관하게 경로 고정)
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -35,10 +39,10 @@ interface SessionState {
   id: string;
   createdAt: string;
   toolCalls: number;
-  tags: Set<ToolRiskTag>; // 이 세션이 지금까지 결과에서 본 오염 태그
 }
 
-// 세션 저장소. stdio에선 세션 1개지만, 다중 클라이언트(HTTP)로 확장되면 여기에 여러 개가 쌓인다.
+// 세션 저장소. stdio에선 세션 1개지만, 다중 클라이언트(HTTP)로 확장되면 여러 개가 쌓인다.
+// (오염 태그는 정책 엔진이 sessionId로 내부 추적하므로 여기서 들고 있지 않는다.)
 const sessions = new Map<string, SessionState>();
 
 // 기록 내용의 sha256 해시 = 위변조 방지 서명. 나중에 다시 계산해 비교하면 변조를 탐지.
@@ -52,85 +56,18 @@ function writeAuditLog(entry: Omit<AuditLogEntry, "signature">): void {
   appendFileSync(AUDIT_LOG_PATH, JSON.stringify(signed) + "\n");
 }
 
-// 승인 요청의 최종 결과(누가·언제·승인/거부)를 서명 붙여 audit.log에 남긴다.
-function writeApprovalLog(req: ApprovalRequest): void {
-  appendFileSync(
-    AUDIT_LOG_PATH,
-    JSON.stringify({ ...req, signature: signEntry(req) }) + "\n"
-  );
-}
-
-// 승인 대기 중인 요청들: id → "그 요청을 깨울 resolve 함수"를 보관.
-const pendingApprovals = new Map<string, (status: ApprovalStatus) => void>();
-
-// 승인을 요청하고, 사람이 결정할 때까지 기다리는 Promise를 돌려준다. (deferred 패턴)
-function requestApproval(req: ApprovalRequest): Promise<ApprovalStatus> {
-  return new Promise((resolve) => {
-    pendingApprovals.set(req.id, resolve); // resolve를 보관만 하고 Promise는 아직 안 끝남
-    console.error(`[proxy] 승인 대기  id=${req.id}  tool=${req.toolName}`);
-  });
-}
-
-// 사람(또는 C)이 결정을 내리면 호출된다. 보관된 resolve를 불러 대기 중인 요청을 깨운다.
-function resolveApproval(id: string, status: ApprovalStatus): void {
-  const resolve = pendingApprovals.get(id);
-  if (!resolve) return; // 이미 처리됐거나 없는 id
-  pendingApprovals.delete(id);
-  resolve(status);
-}
-
-// [C 자리 스텁] 사람 심사 시뮬레이션. 실제로는 C의 승인 큐에서 사람이 누른다.
-// env APPROVAL_DECISION="approve"일 때만 승인, 아니면 거부(안전 기본값).
-function simulateHumanReview(req: ApprovalRequest): void {
-  const status: ApprovalStatus =
-    process.env.APPROVAL_DECISION === "approve" ? "APPROVED" : "REJECTED";
-  setTimeout(() => {
-    console.error(`[proxy] (스텁) 사람 결정: ${status}  id=${req.id}`);
-    resolveApproval(req.id, status);
-  }, 500); // 사람이 잠깐 고민하는 시간을 흉내
-}
-
-// 도메인 파트의 정책 엔진이 꽂힐 자리. 지금은 스텁이며, 이 함수 본문만 실제 엔진 호출로 교체하면 된다.
-async function requestPolicyCheck(
-  ctx: ToolCallContext,
-  sessionTags: Set<ToolRiskTag>
-): Promise<PolicyDecision> {
-  const isOutbound = getToolInfo(ctx.toolName).sinkClass === SinkClass.OUTBOUND_SINK;
-  const hasSensitive = sessionTags.has(ToolRiskTag.SENSITIVE);
-  const hasUntrusted = sessionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN);
-
-  // 트라이펙타: 외부 유출 싱크 + 민감데이터 + 비신뢰입력이 한 세션에 겹칠 때만 차단.
-  if (isOutbound && hasSensitive && hasUntrusted) {
-    return {
-      sessionId: ctx.sessionId,
-      toolName: ctx.toolName,
-      allowed: false,
-      reason: "트라이펙타: 민감데이터+비신뢰입력이 쌓인 세션에서 외부 유출 시도",
-      matchedTags: [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN],
-    };
+// [C 자리 스텁] 대시보드에서 사람이 승인하는 것을 흉내낸다.
+// 실전에선 C가 엔진의 requestApproval/resolveApproval을 호출한다.
+// 승인이 등록되면 에이전트가 같은 호출을 재시도할 때 엔진이 승인을 소비해 통과시킨다.
+function simulateDashboardApproval(sessionId: string, approvalId: string): void {
+  if (process.env.APPROVAL_DECISION !== "approve") return;
+  try {
+    requestApproval(sessionId, approvalId);
+    resolveApproval(approvalId, true, "stub-dashboard");
+    console.error(`[proxy] (스텁) 대시보드 승인됨  approvalId=${approvalId} — 재시도하면 통과`);
+  } catch (err) {
+    console.error("[proxy] (스텁) 승인 실패:", err);
   }
-  return {
-    sessionId: ctx.sessionId,
-    toolName: ctx.toolName,
-    allowed: true,
-    matchedTags: [],
-  };
-}
-
-// 도메인 파트의 ToolRegistry가 꽂힐 자리. 도구 하나의 메타데이터를 한 표에 모은다.
-interface ToolInfo {
-  sourceTags: ToolRiskTag[]; // 이 도구 결과에 붙는 오염 태그
-  sinkClass: SinkClass; // 이 도구가 데이터를 어디로 보내는지
-}
-
-const TOOL_REGISTRY: Record<string, ToolInfo> = {
-  query_customer_db: { sourceTags: [ToolRiskTag.SENSITIVE], sinkClass: SinkClass.READ },
-  read_webpage: { sourceTags: [ToolRiskTag.UNTRUSTED_ORIGIN], sinkClass: SinkClass.READ },
-  send_email: { sourceTags: [], sinkClass: SinkClass.OUTBOUND_SINK },
-};
-
-function getToolInfo(toolName: string): ToolInfo {
-  return TOOL_REGISTRY[toolName] ?? { sourceTags: [], sinkClass: SinkClass.READ };
 }
 
 async function main() {
@@ -140,7 +77,6 @@ async function main() {
     id: sessionId,
     createdAt: new Date().toISOString(),
     toolCalls: 0,
-    tags: new Set(),
   });
   console.error(`[proxy] 세션 시작  session=${sessionId}`);
 
@@ -191,75 +127,70 @@ async function main() {
       timestamp: new Date().toISOString(),
     };
 
-    const decision = await requestPolicyCheck(ctx, session?.tags ?? new Set());
-
-    // 정책상 막힐 케이스(트라이펙타)면 즉시 차단하지 않고 사람 승인을 받는다.
-    let allowed = decision.allowed;
-    let resolvedBy: string | undefined;
-    if (!decision.allowed) {
-      const req: ApprovalRequest = {
-        id: randomUUID(),
-        sessionId,
-        toolName: name,
-        args: ctx.args,
-        status: "PENDING",
-        requestedAt: new Date().toISOString(),
-      };
-      const pending = requestApproval(req); // 대기 등록
-      simulateHumanReview(req); // C 자리: 심사 시작
-      const status = await pending; // 사람 결정 대기
-
-      req.status = status;
-      req.resolvedAt = new Date().toISOString();
-      req.resolvedBy = "stub-reviewer"; // 실제로는 승인한 사람 ID
-      writeApprovalLog(req); // 누가 승인/거부했는지 영구 기록
-
-      allowed = status === "APPROVED";
-      resolvedBy = req.resolvedBy;
-    }
+    // 정책 엔진의 판정. 엔진이 세션 오염을 내부 추적하므로 태그를 따로 넘기지 않는다.
+    const decision = evaluateToolCall(ctx);
 
     writeAuditLog({
       id: randomUUID(),
       sessionId,
       toolName: name,
-      decision: allowed ? "ALLOWED" : "BLOCKED",
+      decision: decision.allowed ? "ALLOWED" : "BLOCKED",
       matchedTags: decision.matchedTags,
       timestamp: new Date().toISOString(),
     });
 
-    if (!allowed) {
-      console.error(`[proxy] 차단  ${name}  (by=${resolvedBy ?? "정책"})`);
-      return {
-        isError: true,
-        content: [
-          { type: "text", text: `정책 차단: ${decision.reason ?? "정책 위반"}` },
-        ],
-      };
+    if (!decision.allowed) {
+      console.error(`[proxy] 차단  ${name}  reason=${decision.reason}`);
+      // 오버라이드 가능한 차단이면 승인 id를 알려준다 — 사람이 승인 후 재시도하면 통과.
+      if (decision.canOverride && decision.approvalId) {
+        console.error(`[proxy] 오버라이드 가능  approvalId=${decision.approvalId}`);
+        simulateDashboardApproval(sessionId, decision.approvalId); // C 자리 스텁
+      }
+      const text = [
+        `정책 차단: ${decision.explanation?.summary ?? decision.reason ?? "정책 위반"}`,
+        decision.canOverride && decision.approvalId
+          ? `승인 후 같은 호출을 재시도하면 진행됩니다 (approvalId=${decision.approvalId})`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      return { isError: true, content: [{ type: "text", text }] };
     }
-    if (resolvedBy) console.error(`[proxy] 승인됨 → 진행  ${name}  (by=${resolvedBy})`);
 
     const result = await downstream.callTool(request.params);
 
-    // 결과에 실린 태그를 분류(스텁)해 세션에 누적한다.
-    for (const tag of getToolInfo(name).sourceTags) session?.tags.add(tag);
-    console.error(
-      `[proxy] ⬅ 통과  ${name}  세션태그=[${[...(session?.tags ?? [])].join(", ")}]`
-    );
+    // ★ 오염 기록 — 엔진의 세션 오염은 '기록된 결과'에서만 자란다. 빠뜨리면 fail-open.
+    // 기록 실패 시엔 추적 안 된 데이터를 넘기지 않고 막는다 (fail-safe).
+    try {
+      recordToolResult(sessionId, name, ctx.args, result);
+    } catch (err) {
+      console.error(`[proxy] 오염 기록 실패 — 결과 전달 보류  ${name}`, err);
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "안전장치: 도구 결과의 오염 추적에 실패해 결과 전달을 보류합니다.",
+          },
+        ],
+      };
+    }
+
+    console.error(`[proxy] ⬅ 통과  ${name}`);
     return result;
   });
 
-  // stdout은 에이전트와의 JSON-RPC 전용선이므로, 로그는 반드시 stderr(console.error)로.
   // [투명성] tools 외 모든 요청·알림은 손대지 않고 그대로 중계한다.
   // 임의 메서드를 통과시키므로 타입 유니온을 우회(any)하고, 결과는 관대한 스키마로 받는다.
   server.fallbackRequestHandler = async (req) =>
     downstream.request({ method: req.method, params: req.params } as any, z.any());
-  server.fallbackNotificationHandler = async (n) =>
-    downstream.notification(n as any);
+  server.fallbackNotificationHandler = async (n) => downstream.notification(n as any);
   // 역방향(서버→클라, 예: sampling/roots)도 통과.
   downstream.fallbackRequestHandler = async (req) =>
     server.request({ method: req.method, params: req.params } as any, z.any());
   downstream.fallbackNotificationHandler = async (n) => server.notification(n as any);
 
+  // stdout은 에이전트와의 JSON-RPC 전용선이므로, 로그는 반드시 stderr(console.error)로.
   const upstreamTransport = new StdioServerTransport();
   await server.connect(upstreamTransport);
   console.error(`[proxy] 기동됨. session=${sessionId}`);

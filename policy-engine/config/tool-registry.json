@@ -10,8 +10,8 @@
   "unknownToolPolicy": "deny",
   "sensitiveSourcePolicy": "tag_all",
   "propagationMode": "snapshot",
-  "judgmentMode": "session",
-  "hitlPolicy": "off",
+  "judgmentMode": "lineage",
+  "hitlPolicy": "weak-only",
   "pruningPolicy": "off",
   "toolLabels": {
     "query_customer_db": "고객 DB 조회",

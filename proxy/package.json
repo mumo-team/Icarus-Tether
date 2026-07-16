@@ -11,6 +11,7 @@
   "dependencies": {
     "@icarus-tether/policy-engine": "*",
     "@icarus-tether/types": "*",
+    "@icarus-tether/policy-engine": "*",
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "devDependencies": {
