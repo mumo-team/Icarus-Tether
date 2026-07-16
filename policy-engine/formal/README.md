@@ -7,6 +7,7 @@
 | `TaintSafety.tla` | 세션 단위 boolean 판정(toy) — 1주차 최소 모델 |
 | `TaintLineage.tla` | **값 단위 계보 판정(real)** — snapshot 전파 + 비대칭 정화 + 차단 규칙 |
 | `TaintLineageLive.tla` | **live 전파 확장** — addNodeTags+cascadeDown(사후 오염·하향 전파) + sink 재통과 |
+| `TaintHITL.tla` | **HITL 오버라이드 — TOCTOU 재현** ★ 통과가 아니라 "반례가 나와야 정상"인 버그 재현 모델 |
 
 ## 증명된 속성 (TaintLineage)
 
@@ -43,6 +44,70 @@ snapshot 모델의 "생성 후 태그 불증가" 가정을 깨는 live 전파
   2. GrowthReExitSafety — **5스텝 반례가 정확히 live 고유 경로를 시연**:
      `생성{SENSITIVE} → 통과({S} 기록) → AddTag(UNTRUSTED) → 재통과(트라이펙타)`.
      guard가 있는 본 모델에서는 이 재통과가 비활성 = 차단된다.
+
+## HITL 오버라이드 TOCTOU — 형식검증이 실제 버그를 발견 (TaintHITL)
+
+앞의 두 모델과 목적이 반대다: 안전 속성의 성립을 증명하는 게 아니라, **지금 코드의
+승인 재검증 누락(TOCTOU)을 그대로 모델링해 TLC가 위반 반례를 내놓는지** 확인한다.
+반례가 나오는 것 자체가 "버그가 설계 수준에서 실재한다"는 증거다.
+
+### 문제 (코드 근거)
+
+- `consumeApprovalIfMatching`(hitl.ts)은 지문 `sha256(sessionId|toolName|args)`
+  일치 + APPROVED + 미사용, 이 셋만 보고 승인을 소비한다. **소비 직전에
+  `evaluateOverridability`(지금도 weak인지)를 재호출하지 않는다** (index.ts의
+  소비 분기에는 재확인이 없고, overridability는 차단 후 "제안 여부"에만 쓰인다).
+- 지문은 args만 고정할 뿐 계보 상태를 인코딩하지 않는데, evidence(연결의
+  weak/strong)는 `previewParentLinks`가 판정 때마다 현재 스토어 기준으로
+  재계산한다. → 승인~소비 사이에 `recordToolResult`로 새 노드가 생겨 같은 값이
+  strong으로 재분류되면(긴 토큰 VALUE_MATCH/MCP_REF), "확정 차단이어야 할
+  strong 트라이펙타"가 낡은 승인으로 통과한다.
+
+### 모델 (전이 ↔ 코드)
+
+| TLA+ 전이 | 실제 코드 | 비고 |
+|---|---|---|
+| `CreateNode(n, own, st)` | `recordToolResult` + `resolveParents`의 연결 분류 | 태그·신뢰도 비결정 = 과근사 |
+| `Offer(n)` | `evaluateOverridability`=true → `offerOverride` | guard `strength="weak"` = "오염 실은 노드 전부 weak" |
+| `Approve/Reject(n)` | `requestApproval` + `resolveApproval` | PENDING은 OFFERED에 접음(부기 전이) |
+| ★ `Escalate(n)` | 승인 후 `recordToolResult` → 같은 args가 strong 재분류 | hitl 상태 무관하게 발생 가능 — TOCTOU의 심장 |
+| ★ `ConsumeSink(n)` | `consumeApprovalIfMatching` + index.ts 소비 분기 | **guard에 weak 재확인이 의도적으로 없음 = 지금 코드** |
+| `ReachSinkClean(n)` | 트라이펙타 아님 → 통과 | |
+
+단순화: 호출↔노드 1:1(지문 고정 ↔ 노드 식별자 고정), evidence 단일 노드
+(`evaluateOverridability`의 단일 노드 환원), parents/정화 제외(기존 모델이 증명한
+직교 축). 상세는 TaintHITL.tla 머리 주석.
+
+### 결과: HITLSafety 위반 — 예측한 TOCTOU 경로 그대로 (5스텝 최단 반례)
+
+> **HITLSafety**: strong 연결로 오염을 실은 트라이펙타는 어떤 승인으로도 sink에
+> 도달할 수 없다 (`Trifecta(tagsAtExit) ⇒ strengthAtExit="weak"`).
+
+TLC 실행 결과 (노드 3개, TLC 2026.07): **위반. 최단 반례 5스텝** —
+
+```text
+1. CreateNode(n1, {SENSITIVE,UNTRUSTED}, "weak")   weak 트라이펙타 차단 발생
+2. Offer(n1)          evaluateOverridability=true → offerOverride (승인 가능 제안)
+3. Approve(n1)        사람이 승인 (이 시점엔 weak — 승인이 정당했다)
+4. Escalate(n1)       recordToolResult로 같은 값이 strong 재분류 (승인은 그대로 유효)
+5. ConsumeSink(n1)    consumeApprovalIfMatching: 지문 일치+APPROVED+미사용 → 통과
+   ⇒ exfiltrated에 [tags={S,U}, strengthAtExit="strong"] — HITLSafety 위반
+```
+
+반례가 "우연히" TOCTOU인 게 아니라 **구조적으로 다른 경로가 불가능**하다:
+strong 트라이펙타 유출은 ConsumeSink뿐(Clean은 ¬Trifecta guard) → APPROVED 필요
+→ Offer 필요 → Offer는 weak guard → strength 변경은 Escalate뿐. 즉 어떤 반례든
+반드시 Offer→Approve→Escalate→Consume 순서를 포함한다.
+
+- 모델 건전성(반례가 모델 오류가 아님): HITLSafety를 뺀 실행에서 나머지 불변식
+  (TypeOK / TrifectaExitOnlyViaOverride / Unborn)은 **18,974,173 상태 생성 /
+  4,173,281 고유 상태 전수 탐색(깊이 37), 위반 0** (34초). 특히
+  TrifectaExitOnlyViaOverride = "트라이펙타의 유일한 탈출구는 HITL" — 기본 차단
+  guard는 온전하고, 구멍은 정확히 오버라이드 소비 경로 하나다.
+- **다음 단계 (미착수)**: 소비 시점에 overridability 재검증을 추가
+  (`consumeApprovalIfMatching` 또는 index.ts 소비 분기에서 재확인) 후, 같은
+  모델에 재확인 guard를 넣은 변형으로 위반 0을 재검증. 현재 hitl.ts/index.ts는
+  무수정 — 이 단계는 "문제 재현"까지다.
 
 ## 구현 검증 (fast-check)
 
@@ -105,7 +170,13 @@ TLA+가 "설계"의 SinkSafety를 증명했다면, `src/property.test.ts`는 같
 cd policy-engine/formal
 java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintLineage.tla
 java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintLineageLive.tla
+java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintHITL.tla
 ```
+
+- TaintHITL은 **HITLSafety 위반 + 반례 트레이스가 출력되어야 정상** (버그 재현
+  모델 — 위 섹션). 최단 반례를 보려면 `-workers 1`로 (병렬 BFS는 같은 깊이의
+  다른 반례를 먼저 보고할 수 있다). TLC가 남기는 `*_TTrace_*.tla/.bin`과
+  `states/`의 새 타임스탬프 디렉토리는 생성물이니 커밋하지 말 것.
 
 - `tla2tools.jar`는 VS Code TLA+ 확장에 번들됨:
   `~/.vscode/extensions/tlaplus.vscode-ide-*/tools/tla2tools.jar`
