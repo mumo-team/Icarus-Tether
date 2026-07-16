@@ -13,15 +13,17 @@ import type { ModeResult, EvalRecord } from "./harness.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RUN_MODE = path.join(__dirname, "run-mode.ts");
 
-function runMode(mode: "session" | "lineage"): ModeResult {
+type BenchSet = "boundary" | "realistic";
+
+function runMode(mode: "session" | "lineage", set: BenchSet): ModeResult {
   const proc = spawnSync("npx", ["tsx", RUN_MODE], {
-    env: { ...process.env, BENCH_MODE: mode },
+    env: { ...process.env, BENCH_MODE: mode, BENCH_SET: set },
     encoding: "utf8",
     shell: process.platform === "win32", // Windows에서 npx 해석
     maxBuffer: 64 * 1024 * 1024, // 자식 로그가 많아도 버퍼 넘치지 않게
   });
   if (proc.status !== 0) {
-    console.error(`[bench] ${mode} 모드 실행 실패 (exit ${proc.status})`);
+    console.error(`[bench] ${set}/${mode} 실행 실패 (exit ${proc.status})`);
     console.error(proc.stderr);
     process.exit(1);
   }
@@ -30,7 +32,7 @@ function runMode(mode: "session" | "lineage"): ModeResult {
   try {
     return JSON.parse(line) as ModeResult;
   } catch {
-    console.error(`[bench] ${mode} 결과 파싱 실패. stdout:\n${proc.stdout}\nstderr:\n${proc.stderr}`);
+    console.error(`[bench] ${set}/${mode} 결과 파싱 실패. stdout:\n${proc.stdout}\nstderr:\n${proc.stderr}`);
     process.exit(1);
   }
 }
@@ -48,10 +50,42 @@ function line(cols: string[], widths: number[]): string {
   return "│ " + cols.map((c, i) => pad(c, widths[i])).join(" │ ") + " │";
 }
 
-function main(): void {
-  console.log("dev 도메인 정확도 벤치마크 실행 중... (모드별 하위 프로세스)\n");
-  const session = runMode("session");
-  const lineage = runMode("lineage");
+const SET_LABEL: Record<BenchSet, string> = {
+  boundary: "경계 케이스 세트 (모드 차이 증명용 — 절대 수치 아님)",
+  realistic: "현실 분포 세트 (실운영 근사 — 절대 오탐률 추정용)",
+};
+
+/**
+ * tier별 분해 — 현실 분포 세트 전용. "낮아진 오탐률이 쉬운 것만 넣어서가
+ * 아니라 현실 분포라서"임을 계층 수치로 입증한다: easy(일상)와
+ * boundary(아슬아슬)의 오탐, obvious(명백)와 subtle(교묘)의 미탐을 분리 표기.
+ */
+function printTierBreakdown(session: ModeResult, lineage: ModeResult): void {
+  const W = [22, 22, 22];
+  const tierRows: Array<{ label: string; tier: string; kind: "FP" | "FN" }> = [
+    { label: "easy 정상 오탐", tier: "easy", kind: "FP" },
+    { label: "boundary 정상 오탐", tier: "boundary", kind: "FP" },
+    { label: "obvious 공격 미탐", tier: "obvious", kind: "FN" },
+    { label: "subtle 공격 미탐", tier: "subtle", kind: "FN" },
+  ];
+  const cell = (r: ModeResult, tier: string, kind: "FP" | "FN"): string => {
+    const inTier = r.records.filter((x) => x.tier === tier);
+    const miss = inTier.filter((x) => x.outcome === kind).length;
+    return inTier.length ? `${miss}/${inTier.length} (${((miss / inTier.length) * 100).toFixed(1)}%)` : "-";
+  };
+  console.log("═══ tier별 분해 (분포 정직성 — 어려운 계층이 실제로 포함돼 있고 거기서 틀린다) ═══");
+  console.log(line(["계층", "session", "lineage"], W));
+  console.log(line(["─".repeat(22), "─".repeat(22), "─".repeat(22)], W));
+  for (const { label, tier, kind } of tierRows) {
+    console.log(line([label, cell(session, tier, kind), cell(lineage, tier, kind)], W));
+  }
+  console.log("");
+}
+
+function runSet(set: BenchSet): void {
+  console.log(`\n████ ${SET_LABEL[set]} ████\n`);
+  const session = runMode("session", set);
+  const lineage = runMode("lineage", set);
 
   const totalNormals = session.records.filter((r) => r.category === "normal").length;
   const totalAttacks = session.records.filter((r) => r.category === "attack").length;
@@ -59,7 +93,16 @@ function main(): void {
   // ---- 요약 표 ----
   const W = [14, 26, 26];
   console.log("═══ 정확도 요약 (같은 정답 대비 두 모드 채점) ═══");
-  console.log(`정상 판정 지점 ${totalNormals}개 · 공격 판정 지점 ${totalAttacks}개\n`);
+  console.log(`정상 판정 지점 ${totalNormals}개 · 공격 판정 지점 ${totalAttacks}개`);
+  if (set === "realistic") {
+    // 분포 요약 — 어려운 계층이 실제로 몇 개 들어있는지 투명하게 공개 (조작 방지)
+    const count = (tier: string): number => session.records.filter((r) => r.tier === tier).length;
+    console.log(
+      `분포: 정상 = easy ${count("easy")} + boundary ${count("boundary")} · ` +
+        `공격 = obvious ${count("obvious")} + subtle ${count("subtle")}`
+    );
+  }
+  console.log("");
   console.log(line(["지표", "session (toy)", "lineage (real)"], W));
   console.log(line(["─".repeat(14), "─".repeat(26), "─".repeat(26)], W));
   const row = (label: string, s: string, l: string): void => console.log(line([label, s, l], W));
@@ -97,19 +140,46 @@ function main(): void {
   if (!anyDiff) console.log("  (없음)");
   console.log("");
 
+  if (set === "realistic") printTierBreakdown(session, lineage);
+
   // ---- 정직성 체크 ----
   console.log("═══ 정직성 체크 ═══");
   const warn: string[] = [];
   for (const r of [session, lineage]) {
-    if (r.confusion.fp === 0) warn.push(`⚠ ${r.mode}: 오탐 0 — 정상 시나리오가 너무 쉬웠을 수 있음`);
-    if (r.confusion.fn === 0) warn.push(`⚠ ${r.mode}: 미탐 0 — 공격 시나리오가 너무 쉬웠을 수 있음(또는 모두 잡음)`);
+    if (r.confusion.fp === 0)
+      warn.push(`⚠ ${r.mode}: 오탐 0 — 분포에 어려운 정상(경계급)이 충분한지 의심할 것`);
+    if (r.confusion.fn === 0)
+      warn.push(`⚠ ${r.mode}: 미탐 0 — 분포에 교묘한 공격이 충분한지 의심할 것(또는 모두 잡음)`);
+  }
+  if (set === "realistic") {
+    // 분포 자체의 조작 방지: 어려운 계층이 아예 빠졌으면 결과를 신뢰하면 안 된다
+    if (!session.records.some((r) => r.tier === "boundary"))
+      warn.push("⚠ 분포에 boundary 정상이 0개 — '쉬운 것만 넣은' 조작된 분포");
+    if (!session.records.some((r) => r.tier === "subtle"))
+      warn.push("⚠ 분포에 subtle 공격이 0개 — 미탐률이 공허함");
   }
   warn.forEach((w) => console.log("  " + w));
   console.log("  ⓘ 한계1: lineage의 오탐 감소는 sink 인자가 상류 데이터 내용을 담을 때만 발현된다");
-  console.log("           (VALUE_MATCH). N6은 그 조건 미충족 시 lineage도 보수적으로 막는 것을 보여준다.");
+  console.log("           (VALUE_MATCH). 그 근거가 없으면 lineage도 폴백으로 보수적으로 막는다.");
   console.log("  ⓘ 한계2: 미분류 도구는 default-deny로 보수적 처리 → 잠재 오탐원.");
-  console.log("  ⓘ 한계3: 합성 시나리오 10여 개 — 실트래픽 분포와 다르다. 절대 수치보다 모드 간 상대 비교로 해석.");
+  if (set === "boundary") {
+    console.log("  ⓘ 한계3: 경계 케이스 고비중 합성 세트 — 절대 수치가 아니라 모드 간 상대 비교로 해석.");
+  } else {
+    console.log("  ⓘ 한계3: 합성 분포 — 비율은 코딩 에이전트 워크플로 추정이지 실측 트래픽이 아니다.");
+    console.log("           절대 수치는 '추정'이며, 분포 가정은 README의 근거와 tier 분해로 검증할 것.");
+  }
   console.log("  ⓘ 참고: session 모드의 오버헤드에는 섀도 로그용 계보 계산이 포함된다(mode!==lineage일 때).");
+}
+
+function main(): void {
+  const setEnv = process.env.BENCH_SET ?? "both";
+  if (setEnv !== "both" && setEnv !== "boundary" && setEnv !== "realistic") {
+    console.error(`[bench] 알 수 없는 BENCH_SET: ${setEnv} (boundary | realistic | both)`);
+    process.exit(2);
+  }
+  const sets: BenchSet[] = setEnv === "both" ? ["boundary", "realistic"] : [setEnv as BenchSet];
+  console.log("dev 도메인 정확도 벤치마크 실행 중... (세트×모드별 하위 프로세스)");
+  for (const set of sets) runSet(set);
 }
 
 main();

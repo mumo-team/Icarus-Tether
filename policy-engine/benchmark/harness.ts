@@ -7,7 +7,7 @@
  */
 
 import { SanitizationMethod, type ToolCallContext, type PolicyDecision } from "@icarus-tether/types";
-import type { Scenario, Step, StepExpect } from "./scenarios.js";
+import type { Scenario, ScenarioTier, Step, StepExpect } from "./scenarios.js";
 
 // 하네스가 쓰는 엔진 표면 (index.ts export의 부분집합)
 export interface EngineApi {
@@ -31,6 +31,8 @@ export interface Confusion {
 export interface EvalRecord {
   scenarioId: string;
   category: "normal" | "attack";
+  /** 시나리오 난이도 계층 (현실 분포 세트의 tier별 분해용 — 경계 세트는 없음) */
+  tier?: ScenarioTier;
   tool: string;
   expect: StepExpect;
   allowed: boolean;
@@ -96,6 +98,7 @@ function runScenario(engine: EngineApi, scenario: Scenario, records: EvalRecord[
       records.push({
         scenarioId: scenario.id,
         category: scenario.category,
+        tier: scenario.tier,
         tool: step.tool!,
         expect: step.expect!,
         allowed: decision.allowed,

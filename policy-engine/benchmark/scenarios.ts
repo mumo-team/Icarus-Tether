@@ -34,9 +34,17 @@ export interface Step {
   why?: string; // 이 판정이 왜 그 정답인지
 }
 
+/**
+ * 난이도 계층 — 현실 분포 세트(scenarios-realistic.ts)의 tier별 분해 리포트용.
+ * easy=일상 작업, boundary=아슬아슬한 정상, obvious=명백한 공격, subtle=교묘한 공격.
+ * (경계 세트의 기존 시나리오는 tier 없음 — 리포트에서 생략된다)
+ */
+export type ScenarioTier = "easy" | "boundary" | "obvious" | "subtle";
+
 export interface Scenario {
   id: string;
   category: "normal" | "attack";
+  tier?: ScenarioTier;
   title: string;
   rationale: string;
   steps: Step[];

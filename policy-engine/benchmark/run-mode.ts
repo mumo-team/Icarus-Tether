@@ -37,15 +37,25 @@ process.env.TAINTGUARD_TOOL_REGISTRY = tmpConfig;
 const realStdoutWrite = process.stdout.write.bind(process.stdout);
 console.log = () => {};
 
+// 시나리오 세트 선택: boundary(기존 경계 케이스 세트, 기본) | realistic(현실 분포 세트)
+const benchSet = process.env.BENCH_SET ?? "boundary";
+if (benchSet !== "boundary" && benchSet !== "realistic") {
+  console.error(`[bench] 알 수 없는 BENCH_SET: ${benchSet} (boundary | realistic)`);
+  process.exit(2);
+}
+
 // env 세팅 후 엔진·하네스·시나리오 로드 (config는 첫 evaluate에서 로드됨)
 const engine = await import("../src/index.js");
 const { runAll } = await import("./harness.js");
-const { SCENARIOS } = await import("./scenarios.js");
+const scenarios =
+  benchSet === "realistic"
+    ? (await import("./scenarios-realistic.js")).REALISTIC_SCENARIOS
+    : (await import("./scenarios.js")).SCENARIOS;
 
 const warmup = Number(process.env.BENCH_WARMUP ?? 1000);
 const iters = Number(process.env.BENCH_ITERS ?? 10000);
 
-const result = runAll(engine, SCENARIOS, mode, { warmup, iters });
+const result = runAll(engine, scenarios, mode, { warmup, iters });
 
 // 결과 JSON은 진짜 stdout으로 딱 한 줄
 realStdoutWrite(JSON.stringify(result) + "\n");

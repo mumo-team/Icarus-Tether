@@ -5,7 +5,15 @@
   "outboundSinkTools": ["http_post", "push_to_remote", "install_package"],
   "sinks": {
     "write_local_file": "WRITE_INTERNAL",
-    "read_source_file": "READ"
+    "read_source_file": "READ",
+    "run_tests": "READ",
+    "run_build": "READ",
+    "run_lint": "READ",
+    "git_diff": "READ",
+    "git_status": "READ",
+    "list_dir": "READ",
+    "format_code": "WRITE_INTERNAL",
+    "save_cache": "WRITE_INTERNAL"
   },
   "unknownToolPolicy": "deny",
   "sensitiveSourcePolicy": "tag_all",
