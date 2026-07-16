@@ -6,12 +6,13 @@
 (* offerOverride / resolveApproval / consumeApprovalIfMatching)과          *)
 (* index.ts computeLineageDecision의 HITL 통합부(소비→차단→제안 순서).     *)
 (*                                                                         *)
-(* ★ 이 모델은 "지금 코드"를 그대로 옮긴다 — ConsumeSink에 소비 시점       *)
-(* weak 재확인 guard가 의도적으로 없다(consumeApprovalIfMatching이 지문    *)
-(* 일치+APPROVED+미사용만 보는 코드 그대로). 따라서 HITLSafety 불변식은    *)
-(* 이 모델에서 "깨져야 정상"이다: TLC의 반례가 곧 TOCTOU의 형식적 증거.    *)
-(* 예상 최단 반례: Create(weak 트라이펙타) → Offer → Approve →             *)
-(* Escalate(weak→strong) → ConsumeSink(재확인 없이 통과) → 위반.           *)
+(* ★ 2단계(수정 후): 1단계 모델은 소비 시점 재확인이 없는 "버그 그대로"    *)
+(* 였고 TLC가 HITLSafety 위반 반례(Offer→Approve→Escalate→Consume, 5스텝) *)
+(* 를 내놓았다 (git 이력 참조). 이 버전은 수정된 코드를 옮긴 것이다:       *)
+(* Offer가 제안 시점 계보 지문(snap)을 저장하고, ConsumeSink는 현재 상태가 *)
+(* snap과 일치할 때만 통과(consumeApprovalIfMatching의 lineageFingerprint  *)
+(* 대조). 불일치면 ConsumeStale이 승인을 영구 무효화(used=true)하고 차단을 *)
+(* 유지한다. 이제 HITLSafety는 전 상태 탐색에서 위반 0이어야 한다.         *)
 (*                                                                         *)
 (* 단순화 (기존 모델과의 관계):                                            *)
 (*  - 호출 ↔ 노드 1:1: "노드 n의 값을 내보내는 sink 호출"을 호출 n으로     *)
@@ -45,15 +46,17 @@ VARIABLES
     tags,        \* [Nodes -> SUBSET Tags]              <-> TaintNode.tags
     strength,    \* [Nodes -> Strengths] 연결 신뢰도    <-> previewParentLinks의 link.weak (매 판정 재계산 = 가변)
     hitl,        \* [Nodes -> HitlStatus] 승인 상태     <-> hitl.ts offers Map (지문 키)
+    snap,        \* [Nodes -> {"none"} ∪ Strengths]     <-> ★offer.lineageFingerprint (제안 시점 계보 지문)
     exfiltrated  \* {[node, tagsAtExit, strengthAtExit, via]} — 통과 "시점" 스냅샷
 
-vars == <<created, tags, strength, hitl, exfiltrated>>
+vars == <<created, tags, strength, hitl, snap, exfiltrated>>
 
 Init ==
     /\ created = {}
     /\ tags = [n \in Nodes |-> {}]
     /\ strength = [n \in Nodes |-> "weak"]
     /\ hitl = [n \in Nodes |-> "NONE"]
+    /\ snap = [n \in Nodes |-> "none"]
     /\ exfiltrated = {}
 
 (***************************************************************************)
@@ -66,7 +69,7 @@ CreateNode(n, own, st) ==
     /\ created' = created \cup {n}
     /\ tags' = [tags EXCEPT ![n] = own]
     /\ strength' = [strength EXCEPT ![n] = st]
-    /\ UNCHANGED <<hitl, exfiltrated>>
+    /\ UNCHANGED <<hitl, snap, exfiltrated>>
 
 (***************************************************************************)
 (* AddTag  <->  lineage.ts addNodeTags (사후 태그 추가).                   *)
@@ -77,7 +80,7 @@ AddTag(n, t) ==
     /\ n \in created
     /\ t \notin tags[n]
     /\ tags' = [tags EXCEPT ![n] = @ \cup {t}]
-    /\ UNCHANGED <<created, strength, hitl, exfiltrated>>
+    /\ UNCHANGED <<created, strength, hitl, snap, exfiltrated>>
 
 (***************************************************************************)
 (* Offer  <->  computeLineageDecision의 차단 분기(index.ts:396-401):       *)
@@ -87,6 +90,13 @@ AddTag(n, t) ==
 (* 차단(트라이펙타) 시점에만 일어나는 코드 구조.                           *)
 (* REJECTED/USED 후 재제안 허용 = offerOverride가 진행 중(OFFERED/PENDING) *)
 (* 제안이 없으면 새 제안을 만드는 것과 대응 (approvalId 갱신은 추상화).    *)
+(*                                                                         *)
+(* ★수정: snap' = strength[n] — offer.lineageFingerprint 저장(제안 시점    *)
+(* 계보 지문). guard가 weak이므로 snap은 항상 "weak"로 기록되지만, 코드의  *)
+(* "지문 저장 → 소비 시 대조" 형태를 1:1로 유지하기 위해 대입으로 쓴다.    *)
+(* 코드의 SUPERSEDED(OFFERED 중 계보 변화 → 새 제안 대체)는 이 상태공간에  *)
+(* 선 비활성 — 제안 자격이 weak뿐이고 태그는 offer 시점에 이미 가득({S,U}) *)
+(* 이라 "제안 가능한 두 시점 사이"에 지문이 달라질 수 없다 (환원 주석 참조).*)
 (***************************************************************************)
 Offer(n) ==
     /\ n \in created
@@ -94,6 +104,7 @@ Offer(n) ==
     /\ strength[n] = "weak"
     /\ hitl[n] \in {"NONE", "REJECTED", "USED"}
     /\ hitl' = [hitl EXCEPT ![n] = "OFFERED"]
+    /\ snap' = [snap EXCEPT ![n] = strength[n]]
     /\ UNCHANGED <<created, tags, strength, exfiltrated>>
 
 (***************************************************************************)
@@ -104,12 +115,12 @@ Offer(n) ==
 Approve(n) ==
     /\ hitl[n] = "OFFERED"
     /\ hitl' = [hitl EXCEPT ![n] = "APPROVED"]
-    /\ UNCHANGED <<created, tags, strength, exfiltrated>>
+    /\ UNCHANGED <<created, tags, strength, snap, exfiltrated>>
 
 Reject(n) ==
     /\ hitl[n] = "OFFERED"
     /\ hitl' = [hitl EXCEPT ![n] = "REJECTED"]
-    /\ UNCHANGED <<created, tags, strength, exfiltrated>>
+    /\ UNCHANGED <<created, tags, strength, snap, exfiltrated>>
 
 (***************************************************************************)
 (* ★ Escalate — TOCTOU의 심장. 승인과 소비 "사이"에 끼어들 수 있는 전이.  *)
@@ -127,32 +138,48 @@ Escalate(n) ==
     /\ n \in created
     /\ strength[n] = "weak"
     /\ strength' = [strength EXCEPT ![n] = "strong"]
-    /\ UNCHANGED <<created, tags, hitl, exfiltrated>>
+    /\ UNCHANGED <<created, tags, hitl, snap, exfiltrated>>
 
 (***************************************************************************)
-(* ★ ConsumeSink  <->  consumeApprovalIfMatching(hitl.ts:184) + index.ts   *)
-(* 364-375의 소비 분기: 트라이펙타 차단 분기에 들어가자마자 지문 일치 +    *)
-(* APPROVED + 미사용이면 1회 소비하고 통과.                                *)
+(* ★ ConsumeSink  <->  consumeApprovalIfMatching(hitl.ts) + index.ts의     *)
+(* 소비 분기: 트라이펙타 차단 분기에 들어가자마자 지문 일치 + APPROVED +   *)
+(* 미사용 + ★계보 지문 일치면 1회 소비하고 통과.                           *)
 (*                                                                         *)
-(* ★★ guard에 strength[n]="weak" 재확인이 "의도적으로 없다" — 지금 코드가  *)
-(* 소비 직전에 evaluateOverridability를 재호출하지 않는 버그를 그대로      *)
-(* 모델링한 것. 이 줄이 없어서 HITLSafety 반례가 나오면, 그것이 곧         *)
-(* "형식검증이 실제 TOCTOU를 발견했다"는 증거다.                           *)
+(* ★★ 수정된 guard: strength[n] = snap[n] — 1단계에서 의도적으로 뺐던      *)
+(* 재검증. 코드의 offer.lineageFingerprint === 현재 지문 대조와 1:1.       *)
+(* Offer guard가 weak이므로 snap="weak" — 일치 ⇔ 소비 시점에도 weak ⇔      *)
+(* 승인 시점과 계보 상태가 그대로. 이 한 줄이 1단계 반례                   *)
+(* (Offer→Approve→Escalate→Consume)의 마지막 스텝을 비활성화한다.          *)
 (*                                                                         *)
 (* Trifecta는 guard에 있다 — 소비가 트라이펙타 차단 분기 "안"에서만        *)
-(* 일어나는 코드 구조(index.ts:355-364). 즉 태그는 소비 시점에 재확인되지  *)
-(* 만 연결 신뢰도(weak)는 재확인되지 않는다 — 비대칭이 곧 구멍.            *)
-(* hitl'="USED" = offer.used=true (single-use).                            *)
+(* 일어나는 코드 구조. hitl'="USED" = offer.used=true (single-use).        *)
 (***************************************************************************)
 ConsumeSink(n) ==
     /\ n \in created
     /\ Trifecta(tags[n])
     /\ hitl[n] = "APPROVED"
+    /\ strength[n] = snap[n]    \* ★TOCTOU 재검증 — 계보 지문 대조
     /\ hitl' = [hitl EXCEPT ![n] = "USED"]
     /\ exfiltrated' = exfiltrated \cup
          {[node |-> n, tagsAtExit |-> tags[n],
            strengthAtExit |-> strength[n], via |-> "OVERRIDE"]}
-    /\ UNCHANGED <<created, tags, strength>>
+    /\ UNCHANGED <<created, tags, strength, snap>>
+
+(***************************************************************************)
+(* ★ ConsumeStale  <->  consumeApprovalIfMatching의 불일치 분기: 계보      *)
+(* 지문이 다르면 승인을 영구 무효화(used=true, audit OVERRIDE_STALE)하고   *)
+(* null 반환 = 차단 유지(exfiltrated 불변 — 아무것도 안 나간다).           *)
+(* 무효화 후에도 여전히 weak면 Offer가 USED에서 재제안 가능 — 재평가 시    *)
+(* 새 제안 자동 발급과 대응. 이 전이 덕에 "낡은 승인이 남아 영원히         *)
+(* 대기하는" 상태가 아니라 코드처럼 명시적으로 소거되는 수명주기가 된다.   *)
+(***************************************************************************)
+ConsumeStale(n) ==
+    /\ n \in created
+    /\ Trifecta(tags[n])
+    /\ hitl[n] = "APPROVED"
+    /\ strength[n] # snap[n]    \* 승인~소비 사이에 계보가 달라졌다
+    /\ hitl' = [hitl EXCEPT ![n] = "USED"]
+    /\ UNCHANGED <<created, tags, strength, snap, exfiltrated>>
 
 (***************************************************************************)
 (* ReachSinkClean  <->  computeLineageDecision의 정상 통과 경로            *)
@@ -164,7 +191,7 @@ ReachSinkClean(n) ==
     /\ exfiltrated' = exfiltrated \cup
          {[node |-> n, tagsAtExit |-> tags[n],
            strengthAtExit |-> strength[n], via |-> "CLEAN"]}
-    /\ UNCHANGED <<created, tags, strength, hitl>>
+    /\ UNCHANGED <<created, tags, strength, hitl, snap>>
 
 Next ==
     \/ \E n \in Nodes : \E own \in SUBSET Tags : \E st \in Strengths :
@@ -175,6 +202,7 @@ Next ==
     \/ \E n \in Nodes : Reject(n)
     \/ \E n \in Nodes : Escalate(n)
     \/ \E n \in Nodes : ConsumeSink(n)
+    \/ \E n \in Nodes : ConsumeStale(n)
     \/ \E n \in Nodes : ReachSinkClean(n)
 
 Spec == Init /\ [][Next]_vars
@@ -188,6 +216,7 @@ TypeOK ==
     /\ tags \in [Nodes -> SUBSET Tags]
     /\ strength \in [Nodes -> Strengths]
     /\ hitl \in [Nodes -> HitlStatus]
+    /\ snap \in [Nodes -> {"none"} \cup Strengths]
     /\ \A e \in exfiltrated :
          /\ e.node \in created
          /\ e.tagsAtExit \subseteq Tags
@@ -195,15 +224,19 @@ TypeOK ==
          /\ e.via \in {"CLEAN", "OVERRIDE"}
 
 \* ★ 핵심 안전 속성: strong 연결로 오염을 실은 트라이펙타는 어떤 승인으로도
-\*   sink에 도달할 수 없어야 한다 (strong = 사람도 못 여는 확정 차단이어야 함).
-\*   이 모델(= 지금 코드)에서는 깨진다 — 반례가 TOCTOU의 형식적 증거.
+\*   sink에 도달할 수 없다 (strong = 사람도 못 여는 확정 차단).
+\*   1단계(재검증 없는 모델)에선 5스텝 반례로 깨졌다. 수정 후 성립 논증:
+\*   트라이펙타 유출은 ConsumeSink뿐이고, 그 guard가 strength[n]=snap[n]을
+\*   요구하는데 snap은 Offer가 "weak"일 때만 기록되므로, 통과 시점 strength도
+\*   반드시 "weak" — strengthAtExit="strong"인 트라이펙타 기록은 도달 불가능.
+\*   (TLC 전 상태 탐색으로 확인 — 아래 환원 주석도 참조.)
 \*
-\*   반례는 구조적으로 반드시 Offer→Approve→Escalate→ConsumeSink 순서를 포함한다:
-\*   (1) strong 트라이펙타 유출은 ConsumeSink로만 가능(ReachSinkClean은 ¬Trifecta),
-\*   (2) ConsumeSink는 APPROVED 필요 → Approve → Offer 필요,
-\*   (3) Offer는 strength="weak" guard → 제안 시점엔 weak였고,
-\*   (4) strength 변경은 Escalate뿐(단조) → 소비 시점 strong이려면 Offer 이후
-\*       Escalate가 반드시 개입. 즉 다른 경로의 위반은 표현 자체가 불가능.
+\*   ★환원 주석(정직성): 단일 노드 evidence + 태그 2종에선 offer 시점 태그가
+\*   항상 {S,U}(가득)라 승인~소비 사이에 변할 수 있는 것이 strength뿐이다.
+\*   따라서 코드의 지문 대조(방법 B: "계보 상태 그대로")는 이 상태공간에서
+\*   "여전히 weak"(방법 A) 재확인과 동치로 접힌다. B가 A보다 엄격해지는 경우
+\*   (변경됐지만 여전히 weak — 승인 이식)는 모델 밖이며, 코드 테스트
+\*   (hitl.toctou.test.ts T3)가 커버한다.
 HITLSafety ==
     \A e \in exfiltrated :
         Trifecta(e.tagsAtExit) => e.strengthAtExit = "weak"
@@ -214,9 +247,15 @@ TrifectaExitOnlyViaOverride ==
     \A e \in exfiltrated :
         Trifecta(e.tagsAtExit) => e.via = "OVERRIDE"
 
-\* 미생성 노드는 태그·연결·승인 상태가 없다 (전이들이 created 밖으로 새지 않음)
+\* 미생성 노드는 태그·연결·승인 상태·지문이 없다 (전이들이 created 밖으로 새지 않음)
 Unborn ==
     \A n \in Nodes \ created :
-        tags[n] = {} /\ strength[n] = "weak" /\ hitl[n] = "NONE"
+        tags[n] = {} /\ strength[n] = "weak" /\ hitl[n] = "NONE" /\ snap[n] = "none"
+
+\* 승인 진행 중(OFFERED/APPROVED)이면 제안 시점 지문이 반드시 "weak"로 저장돼
+\* 있다 — Offer의 weak guard와 snap 기록이 어긋나지 않음 (지문 저장의 건전성)
+SnapConsistency ==
+    \A n \in Nodes :
+        hitl[n] \in {"OFFERED", "APPROVED"} => snap[n] = "weak"
 
 =================================================================================

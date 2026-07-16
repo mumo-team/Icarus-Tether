@@ -7,7 +7,7 @@
 | `TaintSafety.tla` | 세션 단위 boolean 판정(toy) — 1주차 최소 모델 |
 | `TaintLineage.tla` | **값 단위 계보 판정(real)** — snapshot 전파 + 비대칭 정화 + 차단 규칙 |
 | `TaintLineageLive.tla` | **live 전파 확장** — addNodeTags+cascadeDown(사후 오염·하향 전파) + sink 재통과 |
-| `TaintHITL.tla` | **HITL 오버라이드 — TOCTOU 재현** ★ 통과가 아니라 "반례가 나와야 정상"인 버그 재현 모델 |
+| `TaintHITL.tla` | **HITL 오버라이드 — TOCTOU 발견→수정 검증** ★ 1단계: 버그 재현(반례 5스텝) → 2단계: 소비 시점 계보 지문 대조 추가 후 위반 0 |
 
 ## 증명된 속성 (TaintLineage)
 
@@ -45,18 +45,19 @@ snapshot 모델의 "생성 후 태그 불증가" 가정을 깨는 live 전파
      `생성{SENSITIVE} → 통과({S} 기록) → AddTag(UNTRUSTED) → 재통과(트라이펙타)`.
      guard가 있는 본 모델에서는 이 재통과가 비활성 = 차단된다.
 
-## HITL 오버라이드 TOCTOU — 형식검증이 실제 버그를 발견 (TaintHITL)
+## HITL 오버라이드 TOCTOU — 발견(1단계) → 수정 + 재증명(2단계) (TaintHITL)
 
-앞의 두 모델과 목적이 반대다: 안전 속성의 성립을 증명하는 게 아니라, **지금 코드의
-승인 재검증 누락(TOCTOU)을 그대로 모델링해 TLC가 위반 반례를 내놓는지** 확인한다.
-반례가 나오는 것 자체가 "버그가 설계 수준에서 실재한다"는 증거다.
+두 단계로 진행했다: **1단계**는 승인 재검증 누락(TOCTOU)을 그대로 모델링해
+TLC가 위반 반례를 내놓음을 확인 — "버그가 설계 수준에서 실재한다"는 증거.
+**2단계**는 코드를 고치고(소비 시점 계보 지문 대조) 모델에도 같은 재검증
+guard를 넣어 **HITLSafety 위반 0을 전 상태 탐색으로 재증명** + 비공허성
+witness("정상 weak 승인은 여전히 통과")까지 확인.
 
-### 문제 (코드 근거)
+### 문제 (1단계에서 발견한 코드 근거)
 
-- `consumeApprovalIfMatching`(hitl.ts)은 지문 `sha256(sessionId|toolName|args)`
-  일치 + APPROVED + 미사용, 이 셋만 보고 승인을 소비한다. **소비 직전에
-  `evaluateOverridability`(지금도 weak인지)를 재호출하지 않는다** (index.ts의
-  소비 분기에는 재확인이 없고, overridability는 차단 후 "제안 여부"에만 쓰인다).
+- 당시 `consumeApprovalIfMatching`(hitl.ts)은 지문 `sha256(sessionId|toolName|args)`
+  일치 + APPROVED + 미사용, 이 셋만 보고 승인을 소비했다. **소비 직전에
+  overridability(지금도 weak인지)를 재확인하지 않았다.**
 - 지문은 args만 고정할 뿐 계보 상태를 인코딩하지 않는데, evidence(연결의
   weak/strong)는 `previewParentLinks`가 판정 때마다 현재 스토어 기준으로
   재계산한다. → 승인~소비 사이에 `recordToolResult`로 새 노드가 생겨 같은 값이
@@ -71,14 +72,16 @@ snapshot 모델의 "생성 후 태그 불증가" 가정을 깨는 live 전파
 | `Offer(n)` | `evaluateOverridability`=true → `offerOverride` | guard `strength="weak"` = "오염 실은 노드 전부 weak" |
 | `Approve/Reject(n)` | `requestApproval` + `resolveApproval` | PENDING은 OFFERED에 접음(부기 전이) |
 | ★ `Escalate(n)` | 승인 후 `recordToolResult` → 같은 args가 strong 재분류 | hitl 상태 무관하게 발생 가능 — TOCTOU의 심장 |
-| ★ `ConsumeSink(n)` | `consumeApprovalIfMatching` + index.ts 소비 분기 | **guard에 weak 재확인이 의도적으로 없음 = 지금 코드** |
+| ★ `ConsumeSink(n)` | `consumeApprovalIfMatching` + index.ts 소비 분기 | 1단계: **weak 재확인 의도적 부재(당시 코드)** → 2단계: `strength[n] = snap[n]` guard 추가(지문 대조) |
+| ★ `ConsumeStale(n)` (2단계 신규) | 소비 시 지문 불일치 → `used=true` 영구 무효 + null(차단 유지) | exfiltrated 불변 — 아무것도 안 나감. 이후 재평가에서 새 제안 자동 발급과 대응 |
+| `Offer(n)`의 `snap` 기록 (2단계) | `offer.lineageFingerprint` 저장 | 제안 시점 계보 지문의 모델판 |
 | `ReachSinkClean(n)` | 트라이펙타 아님 → 통과 | |
 
 단순화: 호출↔노드 1:1(지문 고정 ↔ 노드 식별자 고정), evidence 단일 노드
 (`evaluateOverridability`의 단일 노드 환원), parents/정화 제외(기존 모델이 증명한
 직교 축). 상세는 TaintHITL.tla 머리 주석.
 
-### 결과: HITLSafety 위반 — 예측한 TOCTOU 경로 그대로 (5스텝 최단 반례)
+### 1단계 결과: HITLSafety 위반 — 예측한 TOCTOU 경로 그대로 (5스텝 최단 반례)
 
 > **HITLSafety**: strong 연결로 오염을 실은 트라이펙타는 어떤 승인으로도 sink에
 > 도달할 수 없다 (`Trifecta(tagsAtExit) ⇒ strengthAtExit="weak"`).
@@ -104,10 +107,59 @@ strong 트라이펙타 유출은 ConsumeSink뿐(Clean은 ¬Trifecta guard) → A
   4,173,281 고유 상태 전수 탐색(깊이 37), 위반 0** (34초). 특히
   TrifectaExitOnlyViaOverride = "트라이펙타의 유일한 탈출구는 HITL" — 기본 차단
   guard는 온전하고, 구멍은 정확히 오버라이드 소비 경로 하나다.
-- **다음 단계 (미착수)**: 소비 시점에 overridability 재검증을 추가
-  (`consumeApprovalIfMatching` 또는 index.ts 소비 분기에서 재확인) 후, 같은
-  모델에 재확인 guard를 넣은 변형으로 위반 0을 재검증. 현재 hitl.ts/index.ts는
-  무수정 — 이 단계는 "문제 재현"까지다.
+- 1단계 시점의 버그 재현 모델(ConsumeSink에 재확인 guard 없는 버전)은 git
+  이력에 있다 — 현재 TaintHITL.tla는 아래 2단계 수정을 반영한 버전.
+
+### 2단계 수정: 방법 B — 승인 시점 계보 지문 저장·대조 (hitl.ts)
+
+두 후보 중 **더 견고한 B를 채택** (견고함 > 복잡도):
+
+- **A(소비 시 overridability 재계산)**: strong 승격은 막지만, evidence가 승인
+  시점과 완전히 달라져도 "여전히 weak 클래스"면 통과 — **승인 이식**(사람이 본
+  것과 다른 위험 그림을 낡은 승인이 커버)을 못 막는다.
+- **B(계보 지문 대조)**: 제안 시점 evidence의 canonical hash(노드 id·weak·
+  tags 정렬 + argTags + linkMethod, sha256 32hex)를 `offer.lineageFingerprint`
+  로 저장, 소비 시점에 현재 evidence로 재계산해 **일치할 때만** 통과. B ⇒ A
+  (제안 guard가 weak이므로 "일치" ⇒ "여전히 weak"). 지문의 완전성 = 방어의
+  완전성이므로 판정 입력 전부를 넣었다.
+
+수정 동작 (전부 결정론, AI 호출 0, fail-safe는 기존 try/catch가 흡수):
+
+- 소비 시 지문 불일치 → 승인 **영구 무효**(used=true, audit `OVERRIDE_STALE`)
+  + 차단 유지. 한 번이라도 다른 상태를 거친 승인은 상태가 되돌아와도 재사용 불가.
+- 제안 재사용(approvalId 안정성)도 지문 일치일 때만 — 제안 후 계보가 달라지면
+  낡은 제안을 `SUPERSEDED`로 봉인하고 새 제안 발급 (낡은 그림의 승인 자체를 차단).
+- 여전히 weak면 재평가에서 새 제안이 자동 발급 — 정상 HITL 흐름은 유지된다.
+- ★팀 공지(시그니처 변경): `offerOverride(ctx, evidence)` /
+  `consumeApprovalIfMatching(ctx, evidence)` — evidence 인자 추가. 호출처는
+  index.ts `computeLineageDecision` 각 1곳뿐.
+
+### 2단계 결과: 위반 0 (안전 증명) + 비공허성 witness (HITL 여전히 동작)
+
+모델에 같은 재검증을 반영(ConsumeSink guard `strength[n] = snap[n]` +
+ConsumeStale 전이)한 뒤:
+
+1. **본 실행 (위반 0)**: 불변식 5종(TypeOK / ★HITLSafety /
+   TrifectaExitOnlyViaOverride / Unborn / SnapConsistency) —
+   **17,586,301 상태 생성 / 3,723,875 고유 상태 전수 탐색(깊이 34), 위반 0**
+   (35초, TLC 2026.07, 노드 3개). 1단계 반례의 마지막 스텝(Consume)이 지문
+   대조 guard로 비활성화됨을 전수 탐색이 확인.
+2. **비공허성 witness ("다 막아서 0"이 아님)**: `NoOverrideExit`(오버라이드
+   유출이 하나도 없다) 불변식을 넣은 witness 변형(스크래치패드, 원본 무수정)에서
+   TLC가 4스텝 "반례" = **정상 승인 통과 witness**를 즉시 내놓는다:
+   `CreateNode(weak {S,U}) → Offer → Approve → ConsumeSink` —
+   `strengthAtExit="weak"`, `via="OVERRIDE"`. 계보가 안 변한 weak 승인은
+   여전히 통과한다 = HITL은 무용지물이 아니다. TrifectaExitOnlyViaOverride는
+   본 실행에서 전 상태 성립(트라이펙타의 유일한 출구는 여전히 HITL뿐).
+3. **구현 테스트**: 기존 123개 무수정 통과 + 신규 4개
+   (`src/hitl.toctou.test.ts`) = **127 pass / 0 fail**:
+   - ★T1 TOCTOU 회귀: 승인 후 strong 재분류(≥16자 토큰 VALUE_MATCH) → 낡은
+     승인 미소비 + `canOverride:false` 확정 차단 + audit `OVERRIDE_STALE` —
+     1단계 반례 시나리오의 코드판이 막힘.
+   - T2 영구 무효: 무효화된 승인은 이후 어떤 재평가에서도 소비 불가.
+   - T3 B의 엄격함: 변경됐지만 여전히 weak(승인 이식 시도) → 낡은 승인 무효,
+     단 새 제안 발급 → 재승인하면 통과 (A였다면 낡은 승인이 그대로 통과했을 케이스).
+   - T4 정상 케이스: 계보 무변화 → 승인 그대로 1회 통과.
 
 ## 구현 검증 (fast-check)
 
@@ -173,10 +225,11 @@ java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintLineageLiv
 java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintHITL.tla
 ```
 
-- TaintHITL은 **HITLSafety 위반 + 반례 트레이스가 출력되어야 정상** (버그 재현
-  모델 — 위 섹션). 최단 반례를 보려면 `-workers 1`로 (병렬 BFS는 같은 깊이의
-  다른 반례를 먼저 보고할 수 있다). TLC가 남기는 `*_TTrace_*.tla/.bin`과
-  `states/`의 새 타임스탬프 디렉토리는 생성물이니 커밋하지 말 것.
+- TaintHITL은 **위반 0이 정상** (2단계 수정 반영판 — 위 섹션). 1단계 버그
+  재현판(반례 5스텝)은 git 이력 참조. 반례/witness의 최단 트레이스를 보려면
+  `-workers 1`로 (병렬 BFS는 같은 깊이의 다른 반례를 먼저 보고할 수 있다).
+  TLC가 남기는 `*_TTrace_*.tla/.bin`과 `states/`의 새 타임스탬프 디렉토리는
+  생성물이니 커밋하지 말 것.
 
 - `tla2tools.jar`는 VS Code TLA+ 확장에 번들됨:
   `~/.vscode/extensions/tlaplus.vscode-ide-*/tools/tla2tools.jar`
