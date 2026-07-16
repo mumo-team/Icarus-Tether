@@ -6,11 +6,20 @@
  * 계보의 weak 플래그(결정론적으로 계산된 연결 신뢰도)만으로 판정한다.
  *
  * 수명주기 (전이 조건 전부 명시적 — "응답 없음 → 통과" 경로가 존재하지 않는다):
- *   차단 + canOverride  →  OFFERED   (엔진이 제안 등록, approvalId 발급)
+ *   차단 + canOverride  →  OFFERED   (엔진이 제안 등록, approvalId 발급,
+ *                                     ★승인 시점 계보 지문 저장)
  *   requestApproval     →  PENDING   (사람/대시보드가 승인 대기 등록)
  *   resolveApproval     →  APPROVED | REJECTED
- *   APPROVED + 같은 호출(지문 일치) + 미사용  →  1회 소비(OVERRIDE_USED) → 통과
- *   그 외 전부(OFFERED/PENDING/REJECTED/지문 불일치/이미 사용)  →  차단 유지
+ *   APPROVED + 같은 호출(지문 일치) + 미사용 + ★계보 지문 일치(제안 시점과
+ *   계보 상태가 그대로)  →  1회 소비(OVERRIDE_USED) → 통과
+ *   그 외 전부(OFFERED/PENDING/REJECTED/SUPERSEDED/지문 불일치/이미 사용/
+ *   계보 지문 불일치)  →  차단 유지
+ *
+ * ★ TOCTOU 방어 (TaintHITL.tla가 반례로 확인한 구멍의 수정): 승인은 "그
+ * 호출"뿐 아니라 "그 계보 상태"에도 묶인다. 승인~소비 사이에 recordToolResult
+ * 등으로 evidence가 조금이라도 달라지면(노드 교체·추가, weak→strong 재분류,
+ * 태그 변화, argTags 변화) 낡은 승인은 영구 무효(OVERRIDE_STALE)가 되고 차단이
+ * 유지된다. 여전히 승인 가능한 상태면 재평가에서 새 제안이 자동 발급된다.
  *
  * fail-safe: 여기서 던진 예외는 computeLineageDecision의 try/catch가 흡수해
  * 차단으로 귀결된다. 잘못된 id·세션 불일치는 예외(fail-closed).
@@ -53,7 +62,8 @@ export function evaluateOverridability(
 // 승인 저장소 (인메모리 — 기존 sessionStore 패턴)
 // ---------------------------------------------------------------------------
 
-type OfferStatus = "OFFERED" | "PENDING" | "APPROVED" | "REJECTED";
+/** SUPERSEDED: 제안 후 계보가 달라져 새 제안으로 대체됨 — 낡은 그림의 승인 차단 */
+type OfferStatus = "OFFERED" | "PENDING" | "APPROVED" | "REJECTED" | "SUPERSEDED";
 
 interface OverrideOffer {
   approvalId: string;
@@ -62,6 +72,13 @@ interface OverrideOffer {
   args: Record<string, unknown>;
   /** 승인은 "그 호출"에만 유효 — sessionId|toolName|args의 결정론적 지문 */
   fingerprint: string;
+  /**
+   * ★ 승인은 "그 계보 상태"에만 유효 — 제안 시점 evidence의 결정론적 지문
+   * (노드 id·weak·tags 정렬 + argTags + linkMethod). 소비 시점에 현재 계보로
+   * 재계산한 지문과 일치해야만 통과 — 승인~소비 사이의 어떤 계보 변화도
+   * (weak→strong 승격, 승인 이식용 노드 끼워넣기 포함) 낡은 승인을 무효화한다.
+   */
+  lineageFingerprint: string;
   status: OfferStatus;
   requestedAt?: string;
   resolvedAt?: string;
@@ -79,6 +96,23 @@ function fingerprintOf(sessionId: string, toolName: string, args: Record<string,
     .slice(0, 32);
 }
 
+/**
+ * 계보 지문 — "소비 시점 판정이 쓰는 입력 전부"를 canonical 형태로 해시한다:
+ * evidence.nodes 각각의 {nodeId, weak, tags(정렬)} (nodeId로 정렬해 순회 순서
+ * 비결정 제거) + linkMethod + argTags(정렬). unionTags는 nodes에서 파생되므로
+ * 별도 포함 불필요. 여기 안 들어간 결정 요인이 생기면 지문도 함께 확장할 것 —
+ * 지문의 완전성이 곧 TOCTOU 방어의 완전성이다.
+ */
+function lineageFingerprintOf(evidence: LineageEvidence, argTags: ToolRiskTag[]): string {
+  const nodes = evidence.nodes
+    .map((n) => ({ nodeId: n.nodeId, weak: n.weak, tags: [...n.tags].sort() }))
+    .sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0));
+  return createHash("sha256")
+    .update(JSON.stringify({ linkMethod: evidence.linkMethod, nodes, argTags: [...argTags].sort() }))
+    .digest("hex")
+    .slice(0, 32);
+}
+
 // ---------------------------------------------------------------------------
 // 감사 로그 — "누가 언제 뭘 승인했나" (대시보드 C 파트 연동 대비, 섀도 로그 패턴)
 // ---------------------------------------------------------------------------
@@ -87,7 +121,16 @@ export interface OverrideAuditEntry {
   approvalId: string;
   sessionId: string;
   toolName: string;
-  action: "OFFERED" | "REQUESTED" | "APPROVED" | "REJECTED" | "OVERRIDE_USED";
+  action:
+    | "OFFERED"
+    | "REQUESTED"
+    | "APPROVED"
+    | "REJECTED"
+    | "OVERRIDE_USED"
+    /** 제안 후 계보가 달라져 새 제안으로 대체 (offer 시점 감지) */
+    | "SUPERSEDED"
+    /** 승인 소비 시도 시 계보 지문 불일치 → 낡은 승인 영구 무효 (소비 시점 감지) */
+    | "OVERRIDE_STALE";
   /** 승인/거부한 사람 (resolveApproval의 resolvedBy) */
   actor?: string;
   timestamp: string;
@@ -117,14 +160,26 @@ export function getOverrideAuditLog(sessionId?: string): ReadonlyArray<OverrideA
 
 /**
  * 차단 시점에 엔진(computeLineageDecision)이 호출 — 오버라이드 제안을 등록하고
- * approvalId를 돌려준다. 같은 호출(지문 동일)의 미해결 제안이 있으면 그 id를
- * 재사용한다 — 재평가 때마다 id가 바뀌면 사람이 승인 중인 id가 무효화되므로.
+ * approvalId를 돌려준다. 같은 호출(지문 동일)이고 ★계보 지문도 같은 미해결
+ * 제안이 있으면 그 id를 재사용한다 — 재평가 때마다 id가 바뀌면 사람이 승인
+ * 중인 id가 무효화되므로. 계보 지문이 달라졌으면 낡은 제안을 SUPERSEDED로
+ * 마킹하고 새 제안을 발급한다 — 사람이 이미 낡아버린 위험 그림을 승인하는 것
+ * 자체를 차단 (superseded id의 requestApproval/resolveApproval은 상태 검사에서
+ * 예외 = fail-closed).
+ *
+ * ★팀 공지(시그니처 변경): evidence 인자 추가 — 제안 시점 계보 지문 저장용.
+ * 호출처는 index.ts computeLineageDecision 한 곳.
  */
-export function offerOverride(ctx: ToolCallContext): string {
+export function offerOverride(ctx: ToolCallContext, evidence: LineageEvidence): string {
   const fingerprint = fingerprintOf(ctx.sessionId, ctx.toolName, ctx.args);
+  const lineageFingerprint = lineageFingerprintOf(evidence, ctx.argTags);
   for (const offer of offers.values()) {
     if (offer.fingerprint === fingerprint && (offer.status === "OFFERED" || offer.status === "PENDING")) {
-      return offer.approvalId; // 진행 중인 제안 재사용 (id 안정성)
+      if (offer.lineageFingerprint === lineageFingerprint) {
+        return offer.approvalId; // 진행 중인 제안 재사용 (id 안정성)
+      }
+      offer.status = "SUPERSEDED"; // 계보가 달라짐 — 낡은 그림은 승인 불가로 봉인
+      audit(offer, "SUPERSEDED");
     }
   }
   const offer: OverrideOffer = {
@@ -133,6 +188,7 @@ export function offerOverride(ctx: ToolCallContext): string {
     toolName: ctx.toolName,
     args: ctx.args,
     fingerprint,
+    lineageFingerprint,
     status: "OFFERED",
     used: false,
   };
@@ -177,16 +233,37 @@ export function resolveApproval(
 }
 
 /**
- * 판정 시 엔진이 호출 — "이 호출"과 지문이 일치하는 APPROVED·미사용 승인이 있으면
- * 1회 소비하고 승인 정보를 돌려준다. 그 외 전부 null (= 차단 유지, fail-safe).
+ * 판정 시 엔진이 호출 — "이 호출"과 지문이 일치하는 APPROVED·미사용 승인이
+ * 있고, ★제안 시점 계보 지문이 현재 계보와 여전히 일치하면 1회 소비하고 승인
+ * 정보를 돌려준다. 그 외 전부 null (= 차단 유지, fail-safe).
+ *
+ * ★ TOCTOU 재검증 (소비 시점): 계보 지문이 불일치하면 — 승인~소비 사이에
+ * evidence가 달라졌으면(weak→strong 승격, 노드 끼워넣기, 태그 변화 전부) —
+ * 그 승인을 영구 무효화(used=true, OVERRIDE_STALE)하고 null을 돌려준다.
+ * "한 번이라도 다른 상태를 거친" 승인은 상태가 되돌아와도 재사용 불가.
+ * 여전히 승인 가능(weak)한 상황이면 이어지는 차단 분기에서 새 제안이 자동
+ * 발급되므로 정상 HITL 흐름은 죽지 않는다.
+ *
+ * fail-safe: 지문 재계산이 예외를 던지면 그대로 전파 —
+ * computeLineageDecision의 try/catch가 차단으로 흡수한다 (조용한 통과 없음).
+ *
+ * ★팀 공지(시그니처 변경): evidence 인자 추가 — 소비 시점 계보 지문 재계산용.
+ * 호출처는 index.ts computeLineageDecision 한 곳.
  * index.ts 밖으로 re-export하지 않는다 — 소비 경로는 판정 하나뿐.
  */
 export function consumeApprovalIfMatching(
-  ctx: ToolCallContext
+  ctx: ToolCallContext,
+  evidence: LineageEvidence
 ): { approvalId: string; resolvedBy?: string } | null {
   const fingerprint = fingerprintOf(ctx.sessionId, ctx.toolName, ctx.args);
+  const lineageFingerprint = lineageFingerprintOf(evidence, ctx.argTags);
   for (const offer of offers.values()) {
     if (offer.fingerprint === fingerprint && offer.status === "APPROVED" && !offer.used) {
+      if (offer.lineageFingerprint !== lineageFingerprint) {
+        offer.used = true; // 낡은 승인 영구 무효 — 상태가 되돌아와도 재사용 불가
+        audit(offer, "OVERRIDE_STALE", offer.resolvedBy);
+        continue; // 통과 아님 — 차단 유지
+      }
       offer.used = true; // single-use
       audit(offer, "OVERRIDE_USED", offer.resolvedBy);
       return { approvalId: offer.approvalId, resolvedBy: offer.resolvedBy };

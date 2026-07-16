@@ -358,11 +358,12 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
     ) {
       const hitlPolicy = getPolicyConfig().hitlPolicy;
 
-      // HITL 소비: "이 호출"과 지문이 일치하는 APPROVED·미사용 승인이 있으면 1회 통과.
-      // 그 외(OFFERED/PENDING/REJECTED/불일치/이미 사용)는 전부 아래 차단으로 —
-      // "응답 없음 → 통과" 경로가 없다 (fail-safe).
+      // HITL 소비: "이 호출"과 지문이 일치하는 APPROVED·미사용 승인이 있고,
+      // ★제안 시점 계보 지문이 현재 evidence와 여전히 일치하면(TOCTOU 재검증)
+      // 1회 통과. 그 외(OFFERED/PENDING/REJECTED/불일치/이미 사용/계보 변화)는
+      // 전부 아래 차단으로 — "응답 없음 → 통과" 경로가 없다 (fail-safe).
       if (hitlPolicy === "weak-only") {
-        const consumed = consumeApprovalIfMatching(ctx);
+        const consumed = consumeApprovalIfMatching(ctx, evidence);
         if (consumed) {
           return {
             sessionId: ctx.sessionId,
@@ -395,7 +396,7 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
       // 판정)이 정한다. AI 판단 없음. 차단(allowed:false)은 그대로 유지된다.
       if (hitlPolicy === "weak-only") {
         if (evaluateOverridability(evidence, ctx.argTags)) {
-          const approvalId = offerOverride(ctx);
+          const approvalId = offerOverride(ctx, evidence); // 제안 시점 계보 지문 저장
           decision.canOverride = true;
           decision.approvalId = approvalId;
           decision.reason += ` [HITL: 승인 요청 가능 — ${approvalId}]`;
