@@ -93,6 +93,11 @@ export default function App() {
   const [injectionChecks, setInjectionChecks] = useState<InjectionCheckEntry[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const [auditIntegrity, setAuditIntegrity] = useState<{
+    ok: boolean;
+    total: number;
+    problems: { line: number; kind: string; detail: string }[];
+  } | null>(null);
 
     useEffect(() => {
     let disposed = false; // 언마운트 후 재연결 타이머가 되살아나는 것 방지
@@ -151,6 +156,9 @@ export default function App() {
             timestamp: data.timestamp,
           };
           setInjectionChecks((prev) => [...prev, entry]);
+        }
+        if (data.type === "audit_integrity") {
+          setAuditIntegrity({ ok: data.ok, total: data.total, problems: data.problems ?? [] });
         }
       };
 
@@ -225,6 +233,36 @@ export default function App() {
       <MetricCards logs={logs} approvals={approvals} />
       <EventLogTimeline logs={logs} />
       <AuditTimeline logs={logs} hitlLog={SAMPLE_HITL_LOG} />
+      <section
+        style={{
+          margin: "12px 0",
+          padding: "12px 16px",
+          borderRadius: "8px",
+          border: "2px solid",
+          borderColor: !auditIntegrity ? "#9e9e9e" : auditIntegrity.ok ? "#2e7d32" : "#d32f2f",
+          background: !auditIntegrity ? "#f5f5f5" : auditIntegrity.ok ? "#e8f5e9" : "#ffebee",
+        }}
+      >
+        <strong>🛡️ 감사 로그 무결성</strong>{" "}
+        {!auditIntegrity ? (
+          <span style={{ color: "#616161" }}>세션 종료 시 검증됩니다</span>
+        ) : auditIntegrity.ok ? (
+          <span style={{ color: "#2e7d32" }}>
+            ✅ 무결 — {auditIntegrity.total}줄 전부 서명·체인 정상
+          </span>
+        ) : (
+          <span style={{ color: "#d32f2f" }}>
+            ⛔ 위변조 감지 — {auditIntegrity.problems.length}건 (전체 {auditIntegrity.total}줄)
+            <ul style={{ margin: "6px 0 0" }}>
+              {auditIntegrity.problems.map((p, i) => (
+                <li key={i}>
+                  {p.line}번째 줄 [{p.kind}] {p.detail}
+                </li>
+              ))}
+            </ul>
+          </span>
+        )}
+      </section>
       <section>
         <h2>인젝션 탐지 결과</h2>
         {injectionChecks.length === 0 ? (

@@ -181,4 +181,9 @@ export interface AuditLogEntry {
   timestamp: string;
   /** 위변조 방지용 서명 (해시 등). MVP에서는 비워둬도 됨 */
   signature?: string;
+    /**
+   * 직전 로그 항목의 signature. 각 줄을 사슬로 엮어, 나중에 줄을 지우거나
+   * 순서를 바꾸면 체인이 끊겨 탐지된다. 첫 줄은 제네시스라 값이 없다(선택).
+   */
+  prevHash?: string;
 }

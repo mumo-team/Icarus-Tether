@@ -12,10 +12,119 @@
  */
 
 import { WebSocketServer, type WebSocket } from "ws";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { requestApproval, resolveApproval } from "@icarus-tether/policy-engine";
-import type { PolicyDecision } from "@icarus-tether/types";
+import type { PolicyDecision, AuditLogEntry, ToolRiskTag } from "@icarus-tether/types";
 
 const WS_PORT = 7331;
+
+
+// ── 감사 로그: 해시 체인 (C 담당, 책임 3) ─────────────────────────────
+// 각 줄에 직전 줄의 signature(prevHash)를 심어 사슬로 엮는다. 나중에 줄을
+// 지우거나 순서를 바꾸면 체인이 끊겨 verify-audit-log가 잡아낸다.
+// (키 없는 SHA-256이라 "사후 편집·삭제 탐지"까지가 목표 — HMAC 서명은 향후 과제.)
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const AUDIT_LOG_PATH = resolve(__dirname, "../audit.log");
+
+// 이 프로세스가 마지막으로 쓴 줄의 signature. 다음 줄의 prevHash가 된다.
+// 첫 줄은 제네시스라 undefined (체인의 시작점).
+let lastSignature: string | undefined;
+
+// signature 계산 시 signature/prevHash 자신은 빼고, prevHash는 항상 포함한다 —
+// 그래야 "앞 줄이 무엇이었나"까지 서명에 묶여 재정렬·삭제가 탐지된다.
+function signAuditEntry(entry: Omit<AuditLogEntry, "signature">): string {
+  return createHash("sha256").update(JSON.stringify(entry)).digest("hex");
+}
+
+/**
+ * 판정 하나를 해시 체인으로 엮어 audit.log에 JSON 한 줄로 append.
+ * index.ts에서 writeAuditLog를 대신해 이 함수를 부른다.
+ */
+export function recordAudit(input: {
+  sessionId: string;
+  toolName: string;
+  decision: "ALLOWED" | "BLOCKED";
+  matchedTags: ToolRiskTag[];
+}): void {
+  const unsigned: Omit<AuditLogEntry, "signature"> = {
+    id: randomUUID(),
+    sessionId: input.sessionId,
+    toolName: input.toolName,
+    decision: input.decision,
+    matchedTags: input.matchedTags,
+    timestamp: new Date().toISOString(),
+    prevHash: lastSignature, // 첫 줄이면 undefined → JSON에서 생략됨(제네시스)
+  };
+  const signature = signAuditEntry(unsigned);
+  const signed: AuditLogEntry = { ...unsigned, signature };
+  appendFileSync(AUDIT_LOG_PATH, JSON.stringify(signed) + "\n");
+  lastSignature = signature; // 다음 줄이 이 값을 prevHash로 물고 이어간다
+}
+
+// ── 감사 로그 무결성 검증 (책임 3의 "검사" 쪽) ────────────────────────
+// ⚠️ 이 검증 로직은 dashboard/server/src/verify-audit-log.ts(CLI)와 같은 규칙이다.
+// 워크스페이스가 달라 공유 import가 지저분해 의도적으로 중복했다 — 한쪽 규칙을
+// 바꾸면 반드시 다른 쪽도 함께 고칠 것. (signAuditEntry와 동일한 해시 규칙)
+export interface AuditIntegrityResult {
+  ok: boolean;
+  total: number;
+  problems: { line: number; kind: string; detail: string }[];
+}
+
+export function verifyAuditChain(): AuditIntegrityResult {
+  let raw: string;
+  try {
+    raw = readFileSync(AUDIT_LOG_PATH, "utf8");
+  } catch {
+    return { ok: true, total: 0, problems: [] }; // 로그가 아직 없으면 위반 아님
+  }
+
+  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+  const problems: AuditIntegrityResult["problems"] = [];
+  let expectedPrevHash: string | undefined;
+
+  lines.forEach((line, i) => {
+    const lineNo = i + 1;
+    let entry: AuditLogEntry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      problems.push({ line: lineNo, kind: "PARSE_ERROR", detail: "JSON 파싱 실패" });
+      expectedPrevHash = undefined;
+      return;
+    }
+    const { signature, ...unsigned } = entry;
+    if (signAuditEntry(unsigned) !== signature) {
+      problems.push({ line: lineNo, kind: "SIGNATURE_MISMATCH", detail: "줄 내용 변조 의심" });
+    }
+    if (entry.prevHash !== expectedPrevHash) {
+      problems.push({ line: lineNo, kind: "CHAIN_BREAK", detail: "줄 삭제·재정렬 의심" });
+    }
+    expectedPrevHash = signature; // 저장된 값 기준 (재계산값 쓰면 이후 전줄 연쇄 오탐)
+  });
+
+  return { ok: problems.length === 0, total: lines.length, problems };
+}
+
+/** 로그 전체를 검증해 무결성 결과를 대시보드에 방송한다. (세션 종료 직전 호출) */
+export function broadcastAuditIntegrity(): void {
+  const result = verifyAuditChain();
+  broadcastToDashboard({
+    type: "audit_integrity",
+    ok: result.ok,
+    total: result.total,
+    problems: result.problems,
+    timestamp: new Date().toISOString(),
+  });
+  console.error(
+    result.ok
+      ? `[bridge] 감사로그 무결성 ✅ (${result.total}줄)`
+      : `[bridge] 감사로그 무결성 ⛔ 위반 ${result.problems.length}건`
+  );
+}
 
 let wss: WebSocketServer | null = null;
 const clients = new Set<WebSocket>();
