@@ -1,13 +1,7 @@
 /**
- * ② 프록시 — A 담당 / 0단계: 통짜 통과 프록시
- *
- * 역할: AI 에이전트와 진짜 MCP 서버 사이에 끼어, 모든 요청을 그대로 중계한다.
- *   - 에이전트한테는 "내가 서버다"  → 저수준 Server + StdioServerTransport
- *   - 진짜 서버한테는 "내가 클라이언트다" → Client + StdioClientTransport
- *
- * 0단계 목표: 검사 없이, tools/list·tools/call을 진짜 서버로 넘기고
- * 결과를 그대로 돌려줘서 "사슬이 이어지는지"만 확인한다.
- * (로깅=1단계, 스텁검사=2단계, 실제차단=3단계에서 붙인다.)
+ * 프록시 — 에이전트와 실제 MCP 서버 사이에 끼는 투명 프록시.
+ * 에이전트에겐 서버로(저수준 Server), 실제 서버에겐 클라이언트로(Client) 행세하며
+ * tools/call을 가로채 정책 엔진의 판정대로 통과·차단한다.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -20,23 +14,33 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-// 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
-import type { ToolCallContext, PolicyDecision } from "@icarus-tether/types";
+import { randomUUID, createHash } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { WebSocketServer, type WebSocket } from "ws";
 import { pipeline } from "@huggingface/transformers";
+import { z } from "zod";
+// 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
+import type { ToolCallContext, AuditLogEntry } from "@icarus-tether/types";
 // ① 정책 엔진(B) — 판정과 오염 기록의 실제 구현.
-import { evaluateToolCall, recordToolResult } from "@icarus-tether/policy-engine";
+import {
+  evaluateToolCall,
+  recordToolResult,
+  requestApproval,
+  resolveApproval,
+} from "@icarus-tether/policy-engine";
 
-// ★ stdout 보호: stdio MCP에서 stdout은 JSON-RPC 전용 채널이다.
-// 정책 엔진은 TrifectaEvent·[SHADOW] 로그를 console.log(stdout)로 찍으므로,
-// 그대로 두면 첫 차단 로그가 프로토콜 스트림을 깨뜨린다. 이 프로세스의
-// console.log를 전부 stderr로 우회시킨다 (프록시 자신도 stderr만 쓰는 규칙).
+// ★ stdout 보호: stdio에서 stdout은 JSON-RPC 전용 채널인데, 정책 엔진은 로그를
+// console.log(stdout)로 찍는다. 그대로 두면 첫 로그가 프로토콜 스트림을 깨뜨리므로
+// 이 프로세스의 console.log를 전부 stderr로 우회시킨다.
 console.log = (...args: unknown[]) => console.error(...args);
 
-// ESM에는 __dirname이 없다. import.meta.url(이 파일의 위치)로 직접 계산한다.
-// 이렇게 해두면 어디서 프록시를 실행하든 mock-server 경로가 안 깨진다.
+// ESM엔 __dirname이 없어 import.meta.url로 계산 (실행 위치와 무관하게 경로 고정)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MOCK_SERVER_PATH = resolve(__dirname, "../test/mock-server.ts");
+// npx 대신 로컬 tsx를 절대경로로 직접 실행한다. npx는 cwd 기준으로 tsx를 찾기 때문에,
+// 에이전트가 임의의 cwd에서 프록시를 띄우면 tsx를 인터넷에서 새로 받으려 한다(느리고 오프라인 실패).
+const TSX_CLI = resolve(__dirname, "../../node_modules/tsx/dist/cli.mjs");
+const AUDIT_LOG_PATH = resolve(__dirname, "../audit.log");
 
 // ── 대시보드용 웹소켓 서버 (개념 증명) ──────────────────────────────
 // proxy는 판정 데이터를 이미 갖고 있으니, 별도 서버 없이 여기서 바로 방송한다.
@@ -85,122 +89,159 @@ async function detectInjection(text: string): Promise<{ isInjection: boolean; sc
     return { isInjection: true, score: 1 };
   }
 }
-/**
- * [연결 완료] 검사 소켓 — B의 정책 엔진(①)이 꽂힌 자리.
- *
- * 스텁(send_email "이름" 무조건 차단)과 달리, 엔진은 "데이터 흐름"으로 판정한다:
- * 같은 send_email이라도 세션에 민감(SENSITIVE)+비신뢰(UNTRUSTED_ORIGIN) 오염이
- * 겹쳐 있을 때(lethal trifecta)만 차단된다. 판정 규칙·도구 분류는 전부
- * policy-engine/config/*.json에서 온다 (기본: tool-registry.json, session 모드).
- *
- * evaluateToolCall은 동기 함수지만 async 시그니처 안에서 그대로 반환하면 된다 —
- * 프록시 배선(핸들러 구조)은 그대로다.
- */
-async function requestPolicyCheck(ctx: ToolCallContext): Promise<PolicyDecision> {
-  return evaluateToolCall(ctx);
+
+interface SessionState {
+  id: string;
+  createdAt: string;
+  toolCalls: number;
+}
+
+// 세션 저장소. stdio에선 세션 1개지만, 다중 클라이언트(HTTP)로 확장되면 여러 개가 쌓인다.
+// (오염 태그는 정책 엔진이 sessionId로 내부 추적하므로 여기서 들고 있지 않는다.)
+const sessions = new Map<string, SessionState>();
+
+// 기록 내용의 sha256 해시 = 위변조 방지 서명. 나중에 다시 계산해 비교하면 변조를 탐지.
+function signEntry(entry: unknown): string {
+  return createHash("sha256").update(JSON.stringify(entry)).digest("hex");
+}
+
+// 판정 하나를 서명 붙여 audit.log에 JSON 한 줄로 append. (C가 나중에 이 기록을 전시)
+function writeAuditLog(entry: Omit<AuditLogEntry, "signature">): void {
+  const signed: AuditLogEntry = { ...entry, signature: signEntry(entry) };
+  appendFileSync(AUDIT_LOG_PATH, JSON.stringify(signed) + "\n");
+}
+
+// [C 자리 스텁] 대시보드에서 사람이 승인하는 것을 흉내낸다.
+// 실전에선 C가 엔진의 requestApproval/resolveApproval을 호출한다.
+// 승인이 등록되면 에이전트가 같은 호출을 재시도할 때 엔진이 승인을 소비해 통과시킨다.
+function simulateDashboardApproval(sessionId: string, approvalId: string): void {
+  if (process.env.APPROVAL_DECISION !== "approve") return;
+  try {
+    requestApproval(sessionId, approvalId);
+    resolveApproval(approvalId, true, "stub-dashboard");
+    console.error(`[proxy] (스텁) 대시보드 승인됨  approvalId=${approvalId} — 재시도하면 통과`);
+  } catch (err) {
+    console.error("[proxy] (스텁) 승인 실패:", err);
+  }
 }
 
 async function main() {
-  // ---------------------------------------------------------------------
-  // (1) 클라이언트 얼굴: 진짜(다운스트림) 서버에 붙는다.
-  //     StdioClientTransport가 진짜 서버를 "자식 프로세스로 실행(spawn)"하고
-  //     그 자식의 stdin/stdout으로 대화한다.
-  // ---------------------------------------------------------------------
+  // stdio에선 이 프록시 프로세스 하나가 클라이언트 하나를 상대한다 = 세션 하나.
+  const sessionId = randomUUID();
+  sessions.set(sessionId, {
+    id: sessionId,
+    createdAt: new Date().toISOString(),
+    toolCalls: 0,
+  });
+  console.error(`[proxy] 세션 시작  session=${sessionId}`);
+
   const downstream = new Client({
     name: "icarus-tether-proxy-client",
     version: "0.1.0",
   });
   const downstreamTransport = new StdioClientTransport({
-    command: "npx",
-    args: ["tsx", MOCK_SERVER_PATH],
+    command: process.execPath, // 지금 프록시를 돌리는 node 실행파일 (절대경로라 cwd 무관)
+    args: [TSX_CLI, MOCK_SERVER_PATH],
   });
-  await downstream.connect(downstreamTransport); // 여기서 진짜 서버와 initialize 핸드셰이크가 일어난다.
+  await downstream.connect(downstreamTransport);
 
-  // ---------------------------------------------------------------------
-  // (2) 서버 얼굴: 에이전트에게 "내가 서버다"라고 행세한다.
-  //     capabilities.tools를 켜서 "나 도구 기능 있음"을 핸드셰이크 때 알린다.
-  // ---------------------------------------------------------------------
+  // 저수준 Server를 쓰는 이유: 프록시는 도구를 미리 모르므로 임의 요청을 그대로 중계해야 한다.
+  // capabilities는 다운스트림이 노출하는 것을 그대로 신고 → 클라이언트가 그 기능들을 쓸 수 있게.
   const server = new Server(
     { name: "icarus-tether-proxy", version: "0.1.0" },
-    { capabilities: { tools: {} } }
+    { capabilities: downstream.getServerCapabilities() ?? { tools: {} } }
   );
 
-  // tools/list 요청이 오면 → 진짜 서버에 그대로 물어서, 그 목록을 그대로 돌려준다.
-  // (프록시는 도구를 미리 모른다. "뭐가 있든 그대로 비춰준다"가 투명 프록시의 핵심.)
+  // 클라이언트가 stdin을 닫으면(EOF) 대화가 끝난 것 → 세션 정리.
+  // (StdioServerTransport는 stdin EOF에 onclose를 부르지 않으므로 'end'를 직접 듣는다.)
+  process.stdin.on("end", () => {
+    const s = sessions.get(sessionId);
+    console.error(
+      `[proxy] 세션 종료  session=${sessionId}  (도구호출 ${s?.toolCalls ?? 0}건)`
+    );
+    sessions.delete(sessionId);
+  });
+
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return await downstream.listTools();
   });
 
-  // tools/call 요청이 오면 → 인자를 그대로 진짜 서버로 넘기고, 결과를 그대로 돌려준다.
-  // request.params 안에 { name, arguments }가 들어있고, 그게 곧 callTool의 입력이다.
-  // ★ 나중에 여기(넘기기 직전)에 B의 검사함수가 끼어들 자리다.
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-
-    // [1단계] 가로챈 호출을 눈으로 확인한다. (반드시 stderr로!)
+    const session = sessions.get(sessionId);
+    if (session) session.toolCalls += 1;
     console.error(
-      `[proxy] ⮕ 가로챔 tools/call  name=${name}  args=${JSON.stringify(args ?? {})}`
+      `[proxy] ⮕ ${name}  args=${JSON.stringify(args ?? {})}  session=${sessionId}`
     );
 
-    // [2단계] 가로챈 정보를 검사함수가 이해하는 표준 모양(ToolCallContext)으로 포장한다.
     const ctx: ToolCallContext = {
-      // 데모용 고정 세션. 실전에서는 MCP 연결(에이전트 세션) 단위로 발급해야
-      // 세션 간 오염이 섞이지 않는다. 긴 세션에서는 주기적으로
-      // pruneSessionLineage(sessionId) 호출로 계보를 압축할 것 (선택 계약).
-      sessionId: "demo-session-1",
+      sessionId,
       toolName: name,
       args: (args ?? {}) as Record<string, unknown>,
-      argTags: [], // 태그 전파(propagation)는 B의 몫. 지금은 빈 값.
+      argTags: [],
       timestamp: new Date().toISOString(),
     };
 
-    // [2단계] 검사 소켓 호출. 여기 반환값(allowed)이 통과/차단을 가른다.
-    const decision = await requestPolicyCheck(ctx);
+    // 정책 엔진의 판정. 엔진이 세션 오염을 내부 추적하므로 태그를 따로 넘기지 않는다.
+    const decision = evaluateToolCall(ctx);
+
+    writeAuditLog({
+      id: randomUUID(),
+      sessionId,
+      toolName: name,
+      decision: decision.allowed ? "ALLOWED" : "BLOCKED",
+      matchedTags: decision.matchedTags,
+      timestamp: new Date().toISOString(),
+    });
+
     broadcastToDashboard({
       type: "decision",
-      sessionId: decision.sessionId,
-      toolName: decision.toolName,
+      sessionId,
+      toolName: name,
       allowed: decision.allowed,
       reason: decision.reason,
       matchedTags: decision.matchedTags,
       timestamp: ctx.timestamp,
     });
 
-    // [3단계] 차단 결정이면 다운스트림에 넘기지 않고 여기서 끊는다.
-    // → send_email이면 진짜 서버는 호출조차 되지 않는다(=실제 차단).
     if (!decision.allowed) {
-      console.error(`[proxy] ⛔ 차단  name=${name}  reason=${decision.reason}`);
-      // 에이전트에게는 프로토콜 에러가 아니라 '도구 실행 결과가 에러'인 형태로 알린다.
-      return {
-        isError: true,
-        content: [
-          { type: "text", text: `🛑 정책 차단: ${decision.reason ?? "정책 위반"}` },
-        ],
-      };
+      console.error(`[proxy] 차단  ${name}  reason=${decision.reason}`);
+      // 오버라이드 가능한 차단이면 승인 id를 알려준다 — 사람이 승인 후 재시도하면 통과.
+      if (decision.canOverride && decision.approvalId) {
+        console.error(`[proxy] 오버라이드 가능  approvalId=${decision.approvalId}`);
+        simulateDashboardApproval(sessionId, decision.approvalId); // C 자리 스텁
+      }
+      const text = [
+        `정책 차단: ${decision.explanation?.summary ?? decision.reason ?? "정책 위반"}`,
+        decision.canOverride && decision.approvalId
+          ? `승인 후 같은 호출을 재시도하면 진행됩니다 (approvalId=${decision.approvalId})`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      return { isError: true, content: [{ type: "text", text }] };
     }
 
-    // [통과] 0/1단계와 동일하게 중계한다.
     const result = await downstream.callTool(request.params);
 
-    // ★★ 오염 기록 — 이게 없으면 엔진이 무력화된다(fail-open).
-    // 엔진의 계보·세션 태그는 "기록된 도구 결과"에서만 자란다. 결과를 에이전트에
-    // 돌려주기 전에 반드시 기록한다. isError 결과도 기록 — 에러 텍스트에도
-    // 민감정보가 실릴 수 있다. (차단 경로는 downstream 미호출이라 기록할 결과 없음)
+    // ★ 오염 기록 — 엔진의 세션 오염은 '기록된 결과'에서만 자란다. 빠뜨리면 fail-open.
+    // 기록 실패 시엔 추적 안 된 데이터를 넘기지 않고 막는다 (fail-safe).
     try {
-      recordToolResult(ctx.sessionId, name, ctx.args, result);
+      recordToolResult(sessionId, name, ctx.args, result);
     } catch (err) {
-      // 기록 실패 = 오염 추적이 안 된 결과. 그대로 넘기면 이후 판정이 이 데이터를
-      // 못 보는 fail-open이 되므로, 결과를 보류하고 에러로 알린다 (fail-safe).
-      console.error(`[proxy] ⚠ 오염 기록 실패 — 결과 전달 보류  name=${name}`, err);
+      console.error(`[proxy] 오염 기록 실패 — 결과 전달 보류  ${name}`, err);
       return {
         isError: true,
         content: [
-          { type: "text", text: "🛑 안전장치: 도구 결과의 오염 추적에 실패해 결과 전달을 보류합니다." },
+          {
+            type: "text",
+            text: "안전장치: 도구 결과의 오염 추적에 실패해 결과 전달을 보류합니다.",
+          },
         ],
       };
     }
 
-    console.error(`[proxy] ⬅ 응답 통과  name=${name}`);
+    console.error(`[proxy] ⬅ 통과  ${name}`);
 
     // 비신뢰 콘텐츠 도구 결과만 인젝션 탐지 (사용자 명령문엔 절대 적용 금지 — 오탐 확인됨)
     if (name === "fetch_web_page") {
@@ -214,7 +255,7 @@ async function main() {
       );
       broadcastToDashboard({
         type: "injection_check",
-        sessionId: ctx.sessionId,
+        sessionId,
         toolName: name,
         isInjection: injectionResult.isInjection,
         score: injectionResult.score,
@@ -225,14 +266,20 @@ async function main() {
     return result;
   });
 
-  // ---------------------------------------------------------------------
-  // (3) 서버 얼굴을 켠다: 에이전트가 우리를 spawn하면서 연결된 stdio에 붙는다.
-  // ---------------------------------------------------------------------
+  // [투명성] tools 외 모든 요청·알림은 손대지 않고 그대로 중계한다.
+  // 임의 메서드를 통과시키므로 타입 유니온을 우회(any)하고, 결과는 관대한 스키마로 받는다.
+  server.fallbackRequestHandler = async (req) =>
+    downstream.request({ method: req.method, params: req.params } as any, z.any());
+  server.fallbackNotificationHandler = async (n) => downstream.notification(n as any);
+  // 역방향(서버→클라, 예: sampling/roots)도 통과.
+  downstream.fallbackRequestHandler = async (req) =>
+    server.request({ method: req.method, params: req.params } as any, z.any());
+  downstream.fallbackNotificationHandler = async (n) => server.notification(n as any);
+
+  // stdout은 에이전트와의 JSON-RPC 전용선이므로, 로그는 반드시 stderr(console.error)로.
   const upstreamTransport = new StdioServerTransport();
   await server.connect(upstreamTransport);
-
-  // stdout은 에이전트와의 통신 전용이므로, 로그는 반드시 stderr로.
-  console.error("[proxy] 기동됨. 에이전트 <-> 프록시 <-> 진짜 서버 사슬 준비 완료.");
+  console.error(`[proxy] 기동됨. session=${sessionId}`);
 }
 
 main().catch((err) => {
