@@ -1,0 +1,37 @@
+{
+  "domain": "dev",
+  "sensitiveSourceTools": ["read_env_file", "read_secrets", "get_db_credentials"],
+  "untrustedSourceTools": ["read_github_issue", "read_pr_comment", "fetch_web_page"],
+  "outboundSinkTools": ["http_post", "push_to_remote", "install_package"],
+  "unknownToolPolicy": "deny",
+  "sensitiveSourcePolicy": "tag_all",
+  "propagationMode": "live",
+  "judgmentMode": "shadow",
+  "hitlPolicy": "off",
+  "pruningPolicy": "off",
+  "toolLabels": {
+    "read_env_file": "환경설정 파일 읽기",
+    "read_secrets": "비밀 파일 읽기",
+    "get_db_credentials": "DB 접속정보 조회",
+    "read_github_issue": "GitHub 이슈 읽기",
+    "read_pr_comment": "PR 코멘트 읽기",
+    "fetch_web_page": "웹 페이지 가져오기",
+    "http_post": "외부로 전송",
+    "push_to_remote": "원격 저장소 푸시",
+    "install_package": "패키지 설치"
+  },
+  "secretDetection": {
+    "bySource": true,
+    "byEntropy": { "minLength": 20, "entropyThreshold": 3.8 },
+    "byRegex": [
+      { "type": "AWS_KEY", "pattern": "\\bAKIA[0-9A-Z]{16}\\b" },
+      { "type": "GITHUB_TOKEN", "pattern": "\\bgh[pousr]_[A-Za-z0-9]{36,255}\\b" }
+    ]
+  },
+  "extractionSchema": {
+    "fields": {
+      "type": { "kind": "enum", "values": ["bug", "feature", "question"] },
+      "title": { "kind": "string", "maxLength": 80, "charset": "safe-text" }
+    }
+  }
+}

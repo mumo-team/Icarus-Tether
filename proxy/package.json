@@ -8,7 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-    "dependencies": {
+  "dependencies": {
+    "@icarus-tether/policy-engine": "*",
     "@icarus-tether/types": "*",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "ws": "^8.18.0",

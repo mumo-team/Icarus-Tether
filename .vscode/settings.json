@@ -1,0 +1,4 @@
+{
+    "js/ts.tsdk.path": "node_modules\\typescript\\lib",
+    "tlaplus.tlc.modelChecker.options": "-workers 1 -coverage 1"
+}

