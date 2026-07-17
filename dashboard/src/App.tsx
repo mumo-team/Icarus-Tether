@@ -1,5 +1,5 @@
-import { useState,useEffect } from "react";
-import type { AuditLogEntry, ApprovalRequest, PolicyDecision } from "@icarus-tether/types";
+import { useState,useEffect, useRef } from "react";
+import type { AuditLogEntry, ApprovalRequest, PolicyDecision, UserAction } from "@icarus-tether/types";
 import MetricCards from "./components/MetricCards";
 import TrifectaWarningBanner from "./components/TrifectaWarningBanner";
 import EventLogTimeline from "./components/EventLogTimeline";
@@ -89,45 +89,92 @@ const SAMPLE_BLOCKED_DECISION: PolicyDecision = {
 export default function App() {
   const [logs, setLogs] = useState<AuditLogEntry[]>(SAMPLE_LOGS);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>(SAMPLE_APPROVALS);
-  const [showModal, setShowModal] = useState(false);
+  const [modalDecision, setModalDecision] = useState<PolicyDecision | null>(null);
   const [injectionChecks, setInjectionChecks] = useState<InjectionCheckEntry[]>([]);
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
 
-  useEffect(() => {
-    const ws = new WebSocket("ws://localhost:7331");
+    useEffect(() => {
+    let disposed = false; // 언마운트 후 재연결 타이머가 되살아나는 것 방지
+    let retryTimer: number | undefined;
+    let ws: WebSocket | null = null;
 
-     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+    function connect() {
+      ws = new WebSocket("ws://localhost:7331");
+      wsRef.current = ws;
 
-      if (data.type === "decision") {
-        const entry: AuditLogEntry = {
-          id: `${data.sessionId}-${data.toolName}-${data.timestamp}`,
-          sessionId: data.sessionId,
-          toolName: data.toolName,
-          decision: data.allowed ? "ALLOWED" : "BLOCKED",
-          matchedTags: data.matchedTags ?? [],
-          timestamp: data.timestamp,
-        };
-        setLogs((prev) => [...prev, entry]);
-      }
+      ws.onopen = () => {
+        setWsConnected(true);
+        console.log("[대시보드] proxy 연결됨");
+      };
 
-      if (data.type === "injection_check") {
-        const entry: InjectionCheckEntry = {
-          id: `${data.sessionId}-${data.toolName}-${data.timestamp}`,
-          sessionId: data.sessionId,
-          toolName: data.toolName,
-          isInjection: data.isInjection,
-          score: data.score,
-          timestamp: data.timestamp,
-        };
-        setInjectionChecks((prev) => [...prev, entry]);
-      }
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "decision") {
+          const entry: AuditLogEntry = {
+            id: `${data.sessionId}-${data.toolName}-${data.timestamp}`,
+            sessionId: data.sessionId,
+            toolName: data.toolName,
+            decision: data.allowed ? "ALLOWED" : "BLOCKED",
+            matchedTags: data.matchedTags ?? [],
+            timestamp: data.timestamp,
+          };
+          setLogs((prev) => [...prev, entry]);
+          // 승인 가능한 차단이 오면 모달을 자동으로 띄운다 — 발표 3단계 "와우 포인트".
+          if (data.allowed === false && data.canOverride && data.approvalId) {
+            setModalDecision({
+              sessionId: data.sessionId,
+              toolName: data.toolName,
+              allowed: false,
+              matchedTags: data.matchedTags ?? [],
+              reason: data.reason,
+              explanation: data.explanation,
+              canOverride: data.canOverride,
+              approvalId: data.approvalId,
+            });
+          }
+        }
+        if (data.type === "approval_resolved") {
+          console.log(
+            `[대시보드] 승인 처리됨: ${data.approvalId} → ${data.approved ? "승인" : "거부"}`
+          );
+        }
+
+        if (data.type === "injection_check") {
+          const entry: InjectionCheckEntry = {
+            id: `${data.sessionId}-${data.toolName}-${data.timestamp}`,
+            sessionId: data.sessionId,
+            toolName: data.toolName,
+            isInjection: data.isInjection,
+            score: data.score,
+            timestamp: data.timestamp,
+          };
+          setInjectionChecks((prev) => [...prev, entry]);
+        }
+      };
+
+      // onerror 뒤에는 항상 onclose가 따라오므로, 재연결은 onclose 한 곳에서만 건다.
+      ws.onerror = () => {};
+
+      ws.onclose = () => {
+        setWsConnected(false);
+        wsRef.current = null;
+        if (disposed) return;
+        // proxy는 "데모 1회 = 1프로세스"라 실행할 때마다 죽고 새로 뜬다.
+        // 계속 재시도해 두면 다음 데모 실행에 자동으로 다시 붙는다.
+        retryTimer = window.setTimeout(connect, 1000);
+      };
+    }
+
+    connect();
+
+    return () => {
+      disposed = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      wsRef.current = null;
+      ws?.close();
     };
-
-    ws.onerror = () => {
-      console.error("[대시보드] proxy 웹소켓 연결 실패 — proxy가 켜져 있는지 확인하세요");
-    };
-
-    return () => ws.close();
   }, []);
 
     function handleDecide(id: string, status: "APPROVED" | "REJECTED", resolvedBy: string) {
@@ -140,16 +187,40 @@ export default function App() {
     );
   }
 
-  function handleActionClick(action: { label: string }) {
-    // TODO: 실제 requestApproval/resolveApproval 연결은 프로세스 분리 문제(회의 안건) 해결 후
-    console.log("[demo] 액션 클릭:", action);
-    setShowModal(false);
+  function handleActionClick(action: UserAction) {
+    // 지금 실제로 배선된 건 승인 요청뿐. 정화(SANITIZE)는 아직 미구현.
+    if (action.kind === "REQUEST_APPROVAL" && modalDecision?.approvalId) {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        // 승인 상태는 proxy 프로세스의 엔진 메모리에 있어 브라우저가 직접 못 부른다.
+        // 웹소켓으로 보내면 proxy가 같은 프로세스에서 resolveApproval을 대신 호출한다.
+        ws.send(
+          JSON.stringify({
+            type: "approve",
+            sessionId: modalDecision.sessionId,
+            approvalId: modalDecision.approvalId,
+            resolvedBy: "dashboard-reviewer",
+          })
+        );
+        console.log("[대시보드] 승인 전송:", modalDecision.approvalId);
+      } else {
+        console.error("[대시보드] proxy 연결이 없어 승인을 보낼 수 없습니다");
+      }
+    } else {
+      console.log("[대시보드] 아직 미배선 액션:", action.kind, action.label);
+    }
+    setModalDecision(null);
   }
 
   return (
     <div style={{ fontFamily: "sans-serif", padding: "24px" }}>
       <h1>Icarus-Tether 대시보드</h1>
-      <button onClick={() => setShowModal(true)}>⚠️ 트라이펙타 경고 데모 보기</button>
+       <button onClick={() => setModalDecision(SAMPLE_BLOCKED_DECISION)}>
+        ⚠️ 트라이펙타 경고 데모 보기 (샘플)
+      </button>
+      <p style={{ color: wsConnected ? "#2e7d32" : "#d32f2f", fontWeight: "bold" }}>
+        {wsConnected ? "🟢 proxy 연결됨" : "🔴 proxy 대기 중 — 데모를 실행하면 자동 연결됩니다"}
+      </p>
       <TrifectaWarningBanner logs={logs} />
       <MetricCards logs={logs} approvals={approvals} />
       <EventLogTimeline logs={logs} />
@@ -171,11 +242,11 @@ export default function App() {
       <ApprovalQueue approvals={approvals} onDecide={handleDecide} />
       <SanitizationCompareView />
       <TaintGraph />
-      {showModal && (
+      {modalDecision && (
         <TrifectaApprovalModal
-          decision={SAMPLE_BLOCKED_DECISION}
+          decision={modalDecision}
           onActionClick={handleActionClick}
-          onClose={() => setShowModal(false)}
+          onClose={() => setModalDecision(null)}
         />
       )}
     </div>

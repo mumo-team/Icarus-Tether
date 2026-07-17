@@ -5,7 +5,6 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { WebSocket } from "ws";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -20,16 +19,6 @@ async function main() {
     env: process.env as Record<string, string>, // APPROVAL_DECISION 등을 프록시로 전달
   });
   await client.connect(transport); // 프록시(서버 얼굴)와 initialize 핸드셰이크
-
-  // 대시보드 웹소켓도 자동으로 연결해서, 사람이 타이밍 맞출 필요 없이 확인한다.
-  const dashboardSocket = new WebSocket("ws://localhost:7331");
-  await new Promise<void>((resolve, reject) => {
-    dashboardSocket.once("open", () => resolve());
-    dashboardSocket.once("error", reject);
-  });
-  dashboardSocket.on("message", (data) => {
-    console.error("[mock-client] 📡 대시보드 수신:", data.toString());
-  });
 
   console.error("[mock-client] 프록시에 연결됨.\n");
 
@@ -92,7 +81,7 @@ async function main() {
     "send_email 2차 (오염 겹친 후)",
     await client.callTool({ name: "send_email", arguments: emailArgs })
   );
-
+  
   // --- (7) 승인이 등록됐다면(APPROVAL_DECISION=approve) 같은 호출 재시도 시 통과 ---
   show(
     "send_email 재시도 (승인 소비)",
@@ -101,11 +90,9 @@ async function main() {
 
   console.error("[mock-client] ✅ 데모 완료 — 같은 send_email이 흐름에 따라 통과→차단으로 갈림.");
 
-  // 다운스트림까지 깔끔히 정리하고 종료.
-  dashboardSocket.close();
+   // 다운스트림까지 깔끔히 정리하고 종료.
   await client.close();
-  // 프록시→mock-server 자식 프로세스 사슬이 stdio 핸들을 물고 있고, 프록시의
-  // 웹소켓 서버도 이벤트 루프를 잡고 있어 자연 종료가 매달린다 → 명시적 종료.
+  // 프록시→mock-server 자식 프로세스 사슬이 stdio 핸들을 물고 있어 자연 종료가 매달린다.
   process.exit(0);
 }
 

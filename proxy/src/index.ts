@@ -16,8 +16,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { WebSocketServer, type WebSocket } from "ws";
-import { pipeline } from "@huggingface/transformers";
+import { startDashboardBridge, stopDashboardBridge, broadcastDecision } from "./dashboard-bridge.js";
+import { checkInjection } from "./injection.js";
 import { z } from "zod";
 // 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
 import type { ToolCallContext, AuditLogEntry } from "@icarus-tether/types";
@@ -42,53 +42,6 @@ const MOCK_SERVER_PATH = resolve(__dirname, "../test/mock-server.ts");
 const TSX_CLI = resolve(__dirname, "../../node_modules/tsx/dist/cli.mjs");
 const AUDIT_LOG_PATH = resolve(__dirname, "../audit.log");
 
-// ── 대시보드용 웹소켓 서버 (개념 증명) ──────────────────────────────
-// proxy는 판정 데이터를 이미 갖고 있으니, 별도 서버 없이 여기서 바로 방송한다.
-const WS_PORT = 7331;
-const wss = new WebSocketServer({ port: WS_PORT });
-const dashboardClients = new Set<WebSocket>();
-
-wss.on("connection", (socket) => {
-  dashboardClients.add(socket);
-  console.error(`[proxy] 대시보드 연결됨 (현재 ${dashboardClients.size}개)`);
-  socket.on("close", () => dashboardClients.delete(socket));
-});
-
-function broadcastToDashboard(event: Record<string, unknown>): void {
-  const payload = JSON.stringify(event);
-  for (const client of dashboardClients) {
-    if (client.readyState === client.OPEN) client.send(payload);
-  }
-}
-
-// ── 인젝션 탐지 (개념 증명 — 원래는 dashboard/server 소유, 지금은 임시로 여기 복제) ──
-// ⚠️ 비신뢰 콘텐츠(fetch_web_page 등) 전용. 사용자 명령문에는 쓰지 말 것(오탐 확인됨).
-const INJECTION_THRESHOLD = 0.95;
-let injectionClassifierPromise: ReturnType<typeof pipeline> | null = null;
-function getInjectionClassifier() {
-  if (!injectionClassifierPromise) {
-    injectionClassifierPromise = pipeline(
-      "text-classification",
-      "protectai/deberta-v3-base-prompt-injection-v2"
-    );
-  }
-  return injectionClassifierPromise;
-}
-
-async function detectInjection(text: string): Promise<{ isInjection: boolean; score: number }> {
-  try {
-    const classifier = await getInjectionClassifier();
-    const result = (await classifier(text.slice(0, 2000), { top_k: null })) as Array<{
-      label: string;
-      score: number;
-    }>;
-    const score = result.find((r) => r.label === "INJECTION")?.score ?? 0;
-    return { isInjection: score > INJECTION_THRESHOLD, score };
-  } catch (err) {
-    console.error("[proxy] 인젝션 탐지 실패 — fail-safe로 의심 처리:", err);
-    return { isInjection: true, score: 1 };
-  }
-}
 
 interface SessionState {
   id: string;
@@ -134,6 +87,7 @@ async function main() {
     toolCalls: 0,
   });
   console.error(`[proxy] 세션 시작  session=${sessionId}`);
+  startDashboardBridge();
 
   const downstream = new Client({
     name: "icarus-tether-proxy-client",
@@ -160,6 +114,8 @@ async function main() {
       `[proxy] 세션 종료  session=${sessionId}  (도구호출 ${s?.toolCalls ?? 0}건)`
     );
     sessions.delete(sessionId);
+    stopDashboardBridge();
+    process.exit(0);
   });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -194,15 +150,7 @@ async function main() {
       timestamp: new Date().toISOString(),
     });
 
-    broadcastToDashboard({
-      type: "decision",
-      sessionId,
-      toolName: name,
-      allowed: decision.allowed,
-      reason: decision.reason,
-      matchedTags: decision.matchedTags,
-      timestamp: ctx.timestamp,
-    });
+    broadcastDecision(sessionId, name, decision, ctx.timestamp);
 
     if (!decision.allowed) {
       console.error(`[proxy] 차단  ${name}  reason=${decision.reason}`);
@@ -243,25 +191,9 @@ async function main() {
 
     console.error(`[proxy] ⬅ 통과  ${name}`);
 
-    // 비신뢰 콘텐츠 도구 결과만 인젝션 탐지 (사용자 명령문엔 절대 적용 금지 — 오탐 확인됨)
-    if (name === "fetch_web_page") {
-      const textContent =
-        (result as { content?: Array<{ type: string; text?: string }> }).content?.find(
-          (c) => c.type === "text"
-        )?.text ?? "";
-      const injectionResult = await detectInjection(textContent);
-      console.error(
-        `[proxy] 🔍 인젝션 탐지  score=${injectionResult.score.toFixed(4)}  isInjection=${injectionResult.isInjection}`
-      );
-      broadcastToDashboard({
-        type: "injection_check",
-        sessionId,
-        toolName: name,
-        isInjection: injectionResult.isInjection,
-        score: injectionResult.score,
-        timestamp: new Date().toISOString(),
-      });
-    }
+    
+   // 비신뢰 출처 콘텐츠 인젝션 검사 (대상 판단·점수 산출·방송은 injection.ts가 한다).
+    await checkInjection(sessionId, name, result);
 
     return result;
   });
