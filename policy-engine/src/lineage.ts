@@ -8,8 +8,13 @@
  * parent 연결 3층 (전부 결정론, 우선순위 — 상위 층이 맞으면 하위 층 미시도):
  *   1순위 MCP_REF          — 인자 속에 세션 그래프의 노드 id("tn_…")가 있으면 명시 참조
  *   2순위 VALUE_MATCH      — 이전 노드 결과의 토큰(해시)이 이번 인자 토큰과 일치
- *   3순위 TEMPORAL_FALLBACK — 둘 다 없으면 "살아있는 오염의 최전선(루트 보유자)"을
- *                             보수적으로 parent 후보로 (시간 근사, fail-safe, 항상 약한 연결)
+ *   3순위 TEMPORAL_FALLBACK — "살아있는 오염의 최전선(루트 보유자)"을 보수적으로
+ *                             parent 후보로 (시간 근사, 항상 약한 연결)
+ *
+ * ★ 3순위는 단순 else가 아니라 "안전 바닥(fail-safe floor)"이다: VALUE_MATCH가
+ *   깨끗한 노드에만 걸려(=오염 출처를 하나도 식별 못 함) 오염 루트가 안 덮이면,
+ *   1·2순위가 성립했더라도 frontier를 덧붙여 fail-open을 막는다. MCP_REF(권위적
+ *   명시 출처)와 "오염 노드를 실제로 잡은 VALUE_MATCH"는 신뢰하고 바닥을 건너뛴다.
  *
  * 전파·정화 불변식 (구조적으로 보장):
  *   1. 단방향 — 오염은 부모→자식으로만 흐른다. 역방향(자식→부모) 전파 코드는
@@ -280,23 +285,36 @@ function resolveParents(
     }
   }
 
-  // 3순위 TEMPORAL_FALLBACK: "살아있는 오염의 최전선(frontier)"만 후보 — 보수적,
-  // 항상 약한 연결 (fail-safe).
+  // 3순위 TEMPORAL_FALLBACK: "살아있는 오염의 최전선(frontier)" — 이제 단순한
+  // else 분기가 아니라 "안전 바닥(safety floor)"이다 (fail-safe). 항상 약한 연결.
   //
   // 태그별 루트 보유자 규칙: N이 태그 T를 tags에 갖고 있고 N의 부모 중 누구도 T를
   // 갖고 있지 않으면, N이 T의 루트 보유자 = 후보다.
   //  - 정화 전: 소스 노드만 후보 (상속받은 자식은 부모가 T를 보유하므로 제외 — 눈덩이 방지)
-  //  - 소스 A가 정화돼 T를 잃으면: A의 직계 자식이 자동으로 루트 보유자로 승격(오염원 승계).
+  //  - 소스 A가 정화돼 T를 잃으면: A의 직계 자식이 자동으로 루트 보유자로 승계.
   //    손자는 부모(자식)가 아직 T를 보유하므로 여전히 제외 — 후보는 항상 최전선만.
-  if (linkMethod === "NONE") {
+  //
+  // ★ 안전 바닥 발동조건 (fail-open 수정): VALUE_MATCH(2순위 휴리스틱)가 "깨끗한
+  // 노드에만" 걸렸다면 이 전송값의 오염 출처를 하나도 식별하지 못한 것이다 —
+  // "부모(및 그 조상)에 오염이 전혀 없음" = 살아있는 오염 루트 전부가 안 덮임.
+  // 이때 frontier를 보수적으로 덧붙여 "확인 불가 = 의심 = 차단"으로 만든다.
+  //  - VALUE_MATCH가 오염 노드를 하나라도 잡았으면 그 값의 실제 출처를 식별한
+  //    것이므로 신뢰하고 바닥을 발동하지 않는다 (N4/N5 흐름 분리 정상 통과 유지).
+  //  - MCP_REF(1순위)는 프록시가 확정한 명시 출처라 권위적 — 바닥에서 제외한다.
+  //  - tombstone(가지치기된 깨끗 노드) id는 graph.get이 undefined → 깨끗 취급.
+  const resolvedTaint = parentLinks.some((l) => (graph.get(l.nodeId)?.tags.size ?? 0) > 0);
+  const valueMatchOnlyClean = linkMethod === "VALUE_MATCH" && !resolvedTaint;
+  if (linkMethod === "NONE" || valueMatchOnlyClean) {
     const tainted = [...graph.values()].filter((n) => isLiveTaintRoot(graph, n));
     if (tainted.length > 0) {
+      // 깨끗 매칭 엣지는 보존(그래프 구조)하고 frontier만 덧붙인다 (dedup).
+      const existing = new Set(parentLinks.map((l) => l.nodeId));
+      for (const n of tainted) {
+        if (!existing.has(n.id)) {
+          parentLinks.push({ nodeId: n.id, method: "TEMPORAL_FALLBACK", weak: true });
+        }
+      }
       linkMethod = "TEMPORAL_FALLBACK";
-      parentLinks = tainted.map((n) => ({
-        nodeId: n.id,
-        method: "TEMPORAL_FALLBACK" as const,
-        weak: true,
-      }));
     }
   }
 
