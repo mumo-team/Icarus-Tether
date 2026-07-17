@@ -6,6 +6,7 @@ dist/
 .DS_Store
 *.tsbuildinfo
 
-# TLC Çü½Ä°ËÁõ »ý¼º¹°
+# TLC ï¿½ï¿½ï¿½Ä°ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 policy-engine/formal/*.out
 policy-engine/formal/states/
+policy-engine/formal/*_TTrace_*
