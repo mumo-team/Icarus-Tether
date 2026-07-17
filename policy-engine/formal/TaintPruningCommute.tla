@@ -4,32 +4,33 @@
 (* 같은 연산 시퀀스를 (a) 가지치기가 낀 실세계와 (b) 가지치기가 전혀 없는  *)
 (* 이상세계에서 lockstep으로 실행했을 때 sink 판정이 항상 같은가?          *)
 (*                                                                         *)
-(* TaintPruning.tla(상태-점별 보존, PruneSafety 위반 0)보다 강한 속성이다: *)
-(* 그 모델은 "묘비가 그래프에 있던 정보를 잃지 않음"을 증명하지만, prune   *)
-(* "이후"의 연산이 두 세계에서 다르게 전개되는 경우는 정의상 다루지 않는다.*)
+(* ★ 2단계(수정판 — 현재 파일): "재오염 가능 묘비" 수정을 반영한 모델.     *)
+(* 1단계 버그 재현판(수정 전 의미론, CommuteSafety 위반 5스텝 반례)은      *)
+(* git 이력에 있다. 재현판이 찾은 반례 양방향:                             *)
+(*  - 유출: prune 후 조상 addNodeTags(live cascade)가 묘비에서 절단돼      *)
+(*    묘비 참조 값이 이상세계 차단 / 실세계 통과                           *)
+(*  - 과차단: "묘비=무조건 깨끗" 취급이라 재오염 묘비를 잡은 VALUE_MATCH   *)
+(*    에서 안전 바닥이 오발동                                              *)
 (*                                                                         *)
-(* ★ 1단계(버그 재현판): 이 파일은 현재 코드(lineage.ts)의 의미론을 그대로 *)
-(* 모델링한다 — prune이 childIndex 엣지를 지우므로(pruneSessionLineage의   *)
-(* perSession.delete) 이후의 cascadeDown(addNodeTags live 전파)이 묘비를   *)
-(* 관통하지 못한다. 기대 결과: CommuteSafety 위반 —                        *)
+(* 수정 의미론 (lineage.ts·shadow.ts에 이식된 것과 1:1):                   *)
+(*  - 묘비 = {resultTokens, tags, parents} — tags는 prune 시점 {}(clean    *)
+(*    guard), 이후 cascadeDown 관통으로만 증가 (grow-only, 정화 불가).     *)
+(*  - prune이 childIndex 엣지 유지 → cascade가 묘비를 관통(잔존 tags 적재  *)
+(*    + 자손 계속). childless 판정은 "live 자식 없음".                     *)
+(*  - 판정 5곳이 묘비 태그 반영: evidence unionTags / 안전 바닥            *)
+(*    resolvedTaint / 생성 상속 / sessionHasLiveTag / frontier.            *)
 (*                                                                         *)
-(*   Create(a, own={U}) → Create(p, ps={a}) → Declassify(p, U) → Prune(p)  *)
-(*   → Create(m, ps={p}) (묘비 참조) → AddTag(a, S) (지연 오염 발견)       *)
-(*                                                                         *)
-(*   실세계: cascade가 a에서 절단(p는 a의 children에서 제거됨) → m은 S     *)
-(*   없음 → REF{m} 프로브 통과. 이상세계: a→p→m 관통 전파 → m이 S 보유     *)
-(*   ∧ 세션 U(a) → 차단. 판정 상이 = 유출 방향 구멍.                       *)
-(*                                                                         *)
-(* fast-check(pruning.test.ts ★판정 보존)는 prune을 시퀀스 마지막에 두므로 *)
-(* 이 시나리오를 관측하지 못한다.                                          *)
-(*                                                                         *)
-(* 두 세계는 created/parents/pruned를 공유하고(같은 이벤트 스트림·같은     *)
-(* 그래프 구조) 태그만 두 벌이다: tagsR = 실세계(절단), tagsI = 이상세계   *)
-(* (관통). 전이 guard는 실세계 기준 — 시스템을 구동하는 것은 실세계다.     *)
+(* 메커니즘을 정직하게 모델링: 실세계는 두 저장소(tagsL = live 그래프의    *)
+(* TaintNode.tags, tagsT = 묘비 저장소의 잔존 tags)로 나뉘고, 이상세계     *)
+(* (tagsI)는 단일 저장소다. TLC가 "두 저장소 부기가 어떤 연산 인터리빙     *)
+(* 에서도 단일 저장소와 판정 동치"를 검사한다 — 수식이 정의상 같아지는     *)
+(* 공허한 증명이 아니다: prune이 저장소를 옮기고, Declassify는 live        *)
+(* 저장소만 만지며, cascade는 대상 저장소를 갈라 쓴다.                     *)
 (*                                                                         *)
 (* 범위 제한: 묘비에 대한 직접 addNodeTags는 두 세계 모두 전이 제외 —      *)
 (* 코드가 throw(fail-closed)로 "시끄럽게" 실패하는 문서화된 한계라,        *)
-(* 이 모델이 찾는 "조용한" 발산(cascade 절단은 오류 없이 지나감)과 구분.   *)
+(* 이 모델이 찾는 "조용한" 발산과 구분된다. cascade 경유 재오염(관통)이    *)
+(* 조용한 경로의 전부이며 그것이 여기서 증명된다.                          *)
 (***************************************************************************)
 EXTENDS FiniteSets
 
@@ -38,33 +39,33 @@ CONSTANT Nodes
 Tags == {"SENSITIVE", "UNTRUSTED"}
 
 VARIABLES
-    created,   \* 생성된 노드 집합 (두 세계 공유)
-    parents,   \* [Nodes -> SUBSET Nodes] (두 세계 공유 — 구조 동일)
+    created,   \* 생성된 노드 집합 (두 세계 공유 — 같은 이벤트 스트림)
+    parents,   \* [Nodes -> SUBSET Nodes] (공유 — 그래프 구조 동일, 소급 금지)
     pruned,    \* 실세계에서 묘비화된 노드 (이상세계에는 prune 없음)
-    tagsR,     \* 실세계 태그 — cascade가 묘비에서 절단 (현재 코드)
-    tagsI      \* 이상세계 태그 — prune이 없었다면의 관통 전파
+    tagsL,     \* 실세계 live 저장소     <-> lineageStore의 TaintNode.tags
+    tagsT,     \* 실세계 묘비 저장소     <-> tombstoneStore의 Tombstone.tags
+    tagsI      \* 이상세계(never-pruned) 단일 저장소
 
-vars == <<created, parents, pruned, tagsR, tagsI>>
+vars == <<created, parents, pruned, tagsL, tagsT, tagsI>>
 
 Live == created \ pruned
+
+\* 실세계 판정이 읽는 유효 태그 — 노드가 어느 저장소에 있든 (tagsOfAny와 1:1)
+TagsOf(n) == IF n \in pruned THEN tagsT[n] ELSE tagsL[n]
 
 Init ==
     /\ created = {}
     /\ parents = [n \in Nodes |-> {}]
     /\ pruned = {}
-    /\ tagsR = [n \in Nodes |-> {}]
+    /\ tagsL = [n \in Nodes |-> {}]
+    /\ tagsT = [n \in Nodes |-> {}]
     /\ tagsI = [n \in Nodes |-> {}]
 
-(* 실세계 자손: live 사슬만 (prune의 childIndex 엣지 삭제 = 묘비 경유 절단) *)
-LiveDesc1(S) == S \cup {m \in Live : parents[m] \cap S # {}}
-LiveDescendantsOf(n) ==
-    LET s1 == LiveDesc1({n})
-        s2 == LiveDesc1(s1)
-        s3 == LiveDesc1(s2)
-        s4 == LiveDesc1(s3)
-    IN s4 \ {n}
-
-(* 이상세계 자손: 전 노드 경유 (prune이 없었다면 모든 사슬이 살아있다) *)
+(***************************************************************************)
+(* 자손 계산 — 수정 후 cascade는 묘비를 관통하므로 실세계도 전 노드 경유.  *)
+(* (childIndex 엣지가 prune에서 삭제되지 않는다는 코드 사실의 표현.)       *)
+(* 노드가 최대 4개이므로 4회 언롤이면 어떤 체인도 포화된다.                *)
+(***************************************************************************)
 FullDesc1(S) == S \cup {m \in created : parents[m] \cap S # {}}
 FullDescendantsOf(n) ==
     LET s1 == FullDesc1({n})
@@ -74,48 +75,59 @@ FullDescendantsOf(n) ==
     IN s4 \ {n}
 
 (***************************************************************************)
-(* CreateNode — 실세계: live 부모에게서만 상속(묘비는 graph.get undefined  *)
-(* → 상속 0). 이상세계: 모든 부모에게서 상속 (p가 살아있었다면 물려줬을    *)
-(* 태그까지).                                                              *)
+(* CreateNode  <->  createTaintNode — 상속이 묘비 태그 포함 (수정 ③:       *)
+(* tagsOfAny). ps ⊆ created — 묘비 부모 허용(묘비 참조 연결). own·ps       *)
+(* 비결정 = resolveParents 3층 + 태그 분류의 과근사.                       *)
 (***************************************************************************)
 CreateNode(n, own, ps) ==
     /\ n \notin created
     /\ ps \subseteq created
     /\ created' = created \cup {n}
     /\ parents' = [parents EXCEPT ![n] = ps]
-    /\ tagsR' = [tagsR EXCEPT ![n] = own \cup UNION {tagsR[p] : p \in ps \cap Live}]
+    /\ tagsL' = [tagsL EXCEPT ![n] = own \cup UNION {TagsOf(p) : p \in ps}]
     /\ tagsI' = [tagsI EXCEPT ![n] = own \cup UNION {tagsI[p] : p \in ps}]
-    /\ UNCHANGED pruned
+    /\ UNCHANGED <<pruned, tagsT>>
 
 (***************************************************************************)
-(* AddTag — 같은 지연 오염 발견 이벤트가 두 세계에서 다르게 전파된다:      *)
-(* 실세계는 LiveDescendants(절단), 이상세계는 FullDescendants(관통).       *)
-(* guard는 실세계 기준(n ∈ Live, 재추가 no-op 제거).                       *)
+(* AddTag  <->  addNodeTags + cascadeDown(묘비 관통, 수정 ②) — 같은 지연   *)
+(* 오염 발견 이벤트. 실세계는 live 자손을 tagsL에, 묘비 자손을 tagsT에     *)
+(* 적재하며 관통한다. guard는 실세계 기준(n ∈ Live — 묘비 직접 재오염은    *)
+(* throw로 전이 제외, 재추가 no-op 제거).                                  *)
 (***************************************************************************)
 AddTag(n, t) ==
     /\ n \in Live
-    /\ t \notin tagsR[n]
-    /\ tagsR' = [m \in Nodes |->
-                   IF m = n \/ m \in LiveDescendantsOf(n) THEN tagsR[m] \cup {t} ELSE tagsR[m]]
-    /\ tagsI' = [m \in Nodes |->
-                   IF m = n \/ m \in FullDescendantsOf(n) THEN tagsI[m] \cup {t} ELSE tagsI[m]]
+    /\ t \notin tagsL[n]
+    /\ LET hit == {n} \cup FullDescendantsOf(n) IN
+       /\ tagsL' = [m \in Nodes |->
+                      IF m \in hit /\ m \notin pruned THEN tagsL[m] \cup {t} ELSE tagsL[m]]
+       /\ tagsT' = [m \in Nodes |->
+                      IF m \in hit /\ m \in pruned THEN tagsT[m] \cup {t} ELSE tagsT[m]]
+       /\ tagsI' = [m \in Nodes |->
+                      IF m \in hit THEN tagsI[m] \cup {t} ELSE tagsI[m]]
     /\ UNCHANGED <<created, parents, pruned>>
 
-(* 같은 정화 이벤트 — 두 세계 모두 그 노드 하나에서 t 제거 (비대칭 유지) *)
+(***************************************************************************)
+(* Declassify  <->  declassifyNodeTag — live 저장소만 (묘비 태그는         *)
+(* grow-only, 정화 불가 = fail-closed). 그 노드 하나만(비대칭).            *)
+(***************************************************************************)
 Declassify(n, t) ==
     /\ n \in Live
-    /\ t \in tagsR[n]
-    /\ tagsR' = [tagsR EXCEPT ![n] = @ \ {t}]
+    /\ t \in tagsL[n]
+    /\ tagsL' = [tagsL EXCEPT ![n] = @ \ {t}]
     /\ tagsI' = [tagsI EXCEPT ![n] = @ \ {t}]
-    /\ UNCHANGED <<created, parents, pruned>>
+    /\ UNCHANGED <<created, parents, pruned, tagsT>>
 
-(* Prune — 실세계에만 존재. guard는 실세계 조건 (깨끗 + live 자식 없음). *)
+(***************************************************************************)
+(* Prune  <->  pruneSessionLineage — 저장소 이동. guard = 깨끗 + "live     *)
+(* 자식 없음"(묘비 자식은 prune을 막지 않음 — 연쇄 유지). 이상세계 무변화. *)
+(***************************************************************************)
 Prune(n) ==
     /\ n \in Live
-    /\ tagsR[n] = {}
+    /\ tagsL[n] = {}
     /\ ~\E m \in Live : n \in parents[m]
     /\ pruned' = pruned \cup {n}
-    /\ UNCHANGED <<created, parents, tagsR, tagsI>>
+    /\ tagsT' = [tagsT EXCEPT ![n] = tagsL[n]]
+    /\ UNCHANGED <<created, parents, tagsL, tagsI>>
 
 Next ==
     \/ \E n \in Nodes : \E own \in SUBSET Tags : \E ps \in SUBSET created :
@@ -127,19 +139,24 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 (***************************************************************************)
-(* 판정 — TaintPruning.tla와 동일한 프로브·판정 함수, 세계별 태그로.       *)
+(* 판정 — 프로브 <<kind, R>>: NONE(무참조 폴백) / REF(MCP_REF, 바닥 미발동)*)
+(* / MATCH(VALUE_MATCH, 오염 미식별 시 바닥). R ⊆ created — 묘비 참조도    *)
+(* 해소된다(resultTokens 보존). 실세계는 TagsOf(두 저장소), 이상세계는     *)
+(* tagsI(단일 저장소)로 같은 수식을 평가한다.                              *)
 (***************************************************************************)
 
-FrontierR == {n \in Live :
-                \E t \in tagsR[n] : \A p \in parents[n] \cap Live : t \notin tagsR[p]}
+\* frontier: 묘비도 후보·커버 참여 (수정 ⑤ — isLiveTaintRoot의 tagsOfAny)
+FrontierR == {n \in created :
+                \E t \in TagsOf(n) : \A p \in parents[n] : t \notin TagsOf(p)}
 FrontierI == {n \in created :
                 \E t \in tagsI[n] : \A p \in parents[n] : t \notin tagsI[p]}
 
+\* evidence: 묘비 참조도 자기 태그 기여 (수정 ①), 바닥 resolvedTaint도 (수정 ②)
 EvTagsR(kind, R) ==
-    LET refTags == UNION {tagsR[n] : n \in R \cap Live}
-        resolvedTaint == \E n \in R \cap Live : tagsR[n] # {}
+    LET refTags == UNION {TagsOf(n) : n \in R}
+        resolvedTaint == \E n \in R : TagsOf(n) # {}
         floor == kind = "NONE" \/ (kind = "MATCH" /\ ~resolvedTaint)
-    IN IF floor THEN refTags \cup UNION {tagsR[n] : n \in FrontierR} ELSE refTags
+    IN IF floor THEN refTags \cup UNION {TagsOf(n) : n \in FrontierR} ELSE refTags
 
 EvTagsI(kind, R) ==
     LET refTags == UNION {tagsI[n] : n \in R}
@@ -147,10 +164,12 @@ EvTagsI(kind, R) ==
         floor == kind = "NONE" \/ (kind = "MATCH" /\ ~resolvedTaint)
     IN IF floor THEN refTags \cup UNION {tagsI[n] : n \in FrontierI} ELSE refTags
 
+\* 비대칭 규칙: 차단 ⇔ S ∈ 값-계보 ∧ (U ∈ 값-계보 ∨ 세션에 U 보유자 존재)
+\* sessionHasLiveTag는 묘비 잔존 태그도 센다 (수정 ④) — 전 created를 TagsOf로.
 BlockedR(kind, R) ==
     /\ "SENSITIVE" \in EvTagsR(kind, R)
     /\ \/ "UNTRUSTED" \in EvTagsR(kind, R)
-       \/ \E n \in Live : "UNTRUSTED" \in tagsR[n]
+       \/ \E n \in created : "UNTRUSTED" \in TagsOf(n)
 
 BlockedI(kind, R) ==
     /\ "SENSITIVE" \in EvTagsI(kind, R)
@@ -163,20 +182,21 @@ BlockedI(kind, R) ==
 
 TypeOK ==
     /\ created \subseteq Nodes
-    /\ tagsR \in [Nodes -> SUBSET Tags]
+    /\ tagsL \in [Nodes -> SUBSET Tags]
+    /\ tagsT \in [Nodes -> SUBSET Tags]
     /\ tagsI \in [Nodes -> SUBSET Tags]
     /\ parents \in [Nodes -> SUBSET Nodes]
     /\ pruned \subseteq created
 
-\* ★ 교환성: 모든 프로브에서 실세계와 이상세계 판정이 같다.
-\*   1단계(현재 코드 의미론)에서는 위반이 기대된다 — 반례 = cascade 절단 경로.
+\* ★ 교환성: 모든 프로브에서 실세계와 이상세계 판정이 같다 —
+\*   "가지치기는 어떤 연산 인터리빙 아래서도 판정에 관측 불가능하다".
 CommuteSafety ==
     /\ BlockedR("NONE", {}) = BlockedI("NONE", {})
     /\ \A R \in (SUBSET created) \ {{}} :
            /\ BlockedR("REF", R) = BlockedI("REF", R)
            /\ BlockedR("MATCH", R) = BlockedI("MATCH", R)
 
-\* 방향 분해 — 반례 트레이스를 방향별로 뽑기 위한 약화판 2종.
+\* 방향 분해 — 반례 발생 시 트레이스를 방향별로 뽑기 위한 약화판 2종.
 \*  유출 방향(보안 구멍): 이상세계는 차단하는데 실세계가 통과시킨다.
 CommuteNoLeak ==
     /\ BlockedI("NONE", {}) => BlockedR("NONE", {})
@@ -191,12 +211,12 @@ CommuteNoOverblock ==
            /\ BlockedR("REF", R) => BlockedI("REF", R)
            /\ BlockedR("MATCH", R) => BlockedI("MATCH", R)
 
-\* 절단은 태그를 "덜 퍼뜨리는" 방향으로만 발산한다 — 실세계 태그는 항상
-\* 이상세계의 부분집합 (발산이 유출 방향임의 구조적 근거: 과차단은 없다).
-WorldMono == \A n \in Nodes : tagsR[n] \subseteq tagsI[n]
+\* 판정 이전 수준의 더 강한 동치: 저장소 분할이 태그 자체를 보존한다.
+\* (CommuteSafety ⊂ StoreFaithful의 따름 — 그래도 둘 다 걸어 이중 확인.)
+StoreFaithful == \A n \in created : TagsOf(n) = tagsI[n]
 
 ParentsExist == \A n \in created : parents[n] \subseteq created \ {n}
 
-Unborn == \A n \in Nodes \ created : tagsR[n] = {} /\ parents[n] = {}
+Unborn == \A n \in Nodes \ created : tagsL[n] = {} /\ tagsT[n] = {} /\ parents[n] = {}
 
 ==================================================================================

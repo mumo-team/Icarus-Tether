@@ -8,6 +8,8 @@
 | `TaintLineage.tla` | **값 단위 계보 판정(real)** — snapshot 전파 + 비대칭 정화 + 차단 규칙 |
 | `TaintLineageLive.tla` | **live 전파 확장** — addNodeTags+cascadeDown(사후 오염·하향 전파) + sink 재통과 |
 | `TaintHITL.tla` | **HITL 오버라이드 — TOCTOU 발견→수정 검증** ★ 1단계: 버그 재현(반례 5스텝) → 2단계: 소비 시점 계보 지문 대조 추가 후 위반 0 |
+| `TaintPruning.tla` | **가지치기 상태-점별 판정 보존(PruneSafety)** — 수정 전 의미론에서도 성립 (보존 기록) |
+| `TaintPruningCommute.tla` | **가지치기 교환성 — 발견→수정 검증** ★ 1단계: 반례 5스텝(git 이력) → 2단계: 재오염 가능 묘비 반영 후 위반 0 |
 
 ## 증명된 속성 (TaintLineage)
 
@@ -161,6 +163,92 @@ ConsumeStale 전이)한 뒤:
      단 새 제안 발급 → 재승인하면 통과 (A였다면 낡은 승인이 그대로 통과했을 케이스).
    - T4 정상 케이스: 계보 무변화 → 승인 그대로 1회 통과.
 
+## 가지치기(묘비 압축) — PruneSafety 증명 + 교환성 발견→수정 (TaintPruning / TaintPruningCommute)
+
+`pruneSessionLineage`(lineage.ts)의 핵심 안전성 "가지치기 전후 판정 불변"을 두 층으로
+전수 증명했다. fast-check(★판정 보존, pruning.test.ts)의 설계판이자, 그 테스트가
+못 보던 구멍의 발견→수정 기록이다.
+
+### 1층 — 상태-점별 보존 (TaintPruning.tla): 위반 0
+
+> **PruneSafety**: 모든 도달 가능 상태 × 모든 프로브(무참조 폴백 / `_taintRef` 명시
+> 참조 / 값 매칭)에서, "묘비 압축된 실세계"와 "아무것도 안 지운 이상세계"의 sink
+> 판정이 같다. Prune 전이는 pruned만 바꾸고 이상세계 판정은 pruned와 무관하므로
+> "Prune 직전 판정 = 직후 판정"(테스트의 ★속성)이 따름정리로 나온다.
+
+- 검증 결과: 노드 4개 기준 **2,775,761 상태 생성 / 352,346 고유 상태 전수 탐색
+  (깊이 12), 위반 0** (35초, TLC 2026.07). 불변식 5종(TypeOK / ★PruneSafety /
+  PrunedClean / ParentsExist / Unborn) 전부 cfg 활성.
+- 모델링 결정: 판정을 ReachSink 전이 + exfiltrated 스냅샷 대신 **상태 함수**
+  `Blocked(kind, R)`로 — "가지치기 전 스냅샷 보관"이 필요 없어 상태가 작고,
+  모든 상태에서 모든 프로브를 동시 검사하므로 더 강하다. 묘비의 id+resultTokens
+  보존은 "pruned 노드에 대한 참조가 여전히 해소된다"(R ⊆ created)로 표현.
+- 비공허성 witness 3종(스크래치패드 변형, 반례 트레이스로 확보): 가지치기 발생 후에도
+  frontier 차단 유지 / 무참조는 차단인데 묘비 참조는 통과 / 자식 먼저→부모 승격 연쇄.
+- mutation sanity 2종 — 불변식이 살아있음을 양방향으로: clean guard 제거 →
+  묘비가 오염을 숨겨 **유출 방향** 3스텝 반례. 묘비 없는 완전 삭제 → 깨끗 참조가
+  폴백 강등돼 **과차단 방향** 4스텝 반례 ("노드를 통째로 지우면 통과→차단"이라는
+  묘비 주석의 형식적 확인).
+
+### 2층 — 교환성 구멍: 발견 (1단계, 반례) → 수정 → 재증명 (TaintPruningCommute)
+
+1층은 "묘비가 그래프에 **있던** 정보를 잃지 않음"이다. 더 강한 질문 — "prune과
+**미래** 연산이 교환하는가"(가지치기 낀 세션 ≡ 없던 세션) — 에는 수정 전 코드가
+반례를 갖고 있었다. fast-check는 prune을 항상 시퀀스 마지막에 두므로 관측 불가.
+
+**1단계 (버그 재현판 — git 이력)**: 두-세계 lockstep(태그 두 벌: 절단 vs 관통)에서
+**CommuteSafety 위반, 최단 반례 5스텝** 양방향:
+
+```text
+유출:   Create(n1 깨끗 루트) → Create(n2, 부모 n1) → Create(n3 {U})
+        → Prune(n2) → AddTag(n1, S)   ⇒ REF{n2}: 이상세계 차단 / 실세계 통과
+        수정 전 prune이 childIndex 엣지를 지워 cascade가 묘비에서 절단 —
+        묘비는 resultTokens로 참조가 여전히 해소되므로 그 값이 조용히 나간다.
+과차단: 같은 골격에서 MATCH{n2} — "묘비=무조건 깨끗" 취급이라 재오염 묘비를
+        잡은 값 매칭에서 안전 바닥(fail-open 3차 수정)이 오발동해 차단.
+```
+
+- 코드 재현 확인: 쌍둥이 세션(가지치기 유/무) 프로브 — 수정 전 `allowed: true` vs
+  `false`로 실측 발산 (현 `pruning.commute.test.ts` T1이 그 시나리오의 회귀 테스트).
+- 모델 건전성: CommuteSafety 제외 불변식(TypeOK/WorldMono/ParentsExist/Unborn)은
+  35,290 상태 위반 0. WorldMono(실세계 태그 ⊆ 이상세계)가 "절단은 덜 퍼뜨리는
+  방향으로만 발산 = 유출 방향"임을 구조적으로 보였다.
+
+**2단계 (수정 — "재오염 가능 묘비", model-first)**: 코드보다 모델을 먼저 고쳐
+TLC로 의미론을 확정한 뒤 이식했다. 더 약한 안(cascade 관통만, 묘비 tags 없이)은
+묘비 자기 참조 프로브가 여전히 발산함을 손 시뮬레이션으로 확인하고 기각.
+
+- 묘비 = `{resultTokens, tags, parents}` — tags는 prune 시점 항상 `{}`(clean guard),
+  이후 **cascadeDown 관통으로만 증가** (grow-only, 정화 불가 — fail-closed).
+- prune이 childIndex 엣지 유지, childless 판정은 "live 자식 없음" (연쇄 fixpoint 유지).
+- 판정 5곳이 묘비 태그 반영: ① evidence unionTags(shadow.ts) ② 안전 바닥
+  resolvedTaint ③ 생성 상속 ④ sessionHasLiveTag ⑤ frontier(후보+커버).
+  안전 바닥과의 관계는 충돌이 아니라 정확화 — 바닥의 의도("오염 출처 미식별 =
+  의심 = 차단")에서 재오염 묘비를 잡은 매칭은 "출처 식별"이므로 바닥을 건너뛴다.
+  묘비 tags는 평소 비어 있어 기존 fail-open 3차 수정 동작은 그대로다.
+- 묘비 직접 `addNodeTags`는 여전히 throw(fail-closed) — 조용한 경로(cascade)만 관통.
+
+**2단계 결과**:
+
+1. **모델 (위반 0)**: 두-저장소 메커니즘(tagsL=live, tagsT=묘비 vs 이상세계 단일
+   저장소)을 정직하게 모델링 — **33,514 상태 생성 / 6,906 고유 전수 탐색(깊이 13),
+   불변식 7종(★CommuteSafety / CommuteNoLeak / CommuteNoOverblock /
+   ★StoreFaithful(태그 수준 동치) / TypeOK / ParentsExist / Unborn) 위반 0**.
+   비공허성 witness: 묘비가 cascade로 실제 태그를 받는 상태 도달(4스텝 트레이스).
+2. **구현 테스트**: 기존 127개 무수정 통과 + 신규 4개(`src/pruning.commute.test.ts`)
+   = **131 pass / 0 fail**: ★T1 유출 회귀(반례 시나리오 → 차단) / T2 묘비 너머
+   live 자손까지 관통 전파 / T3 과차단 해소(재오염 묘비 잡은 매칭 = 바닥 미발동) /
+   ★T4 fast-check 강화판 — prune을 시퀀스 **중간**에 끼우고 쌍둥이 세션과 전 프로브
+   판정 비교 (기존 fast-check가 못 보던 계열의 상시 감시).
+3. **과차단·성능 회귀 없음**: 벤치마크 오탐률 수정 전후 동일 — lineage 정상 오탐
+   5/50 = **10.0%** (boundary 5/10, easy 0/40), 미탐 4.3%, 승패 케이스 목록 불변.
+
+### 1층 모델의 의미론 시점
+
+TaintPruning.tla는 **수정 전(절단) 의미론의 보존 기록**이다 — 수정 전 코드에서도
+상태-점별 보존은 성립했다(fast-check ★판정 보존이 통과하던 이유가 바로 이것).
+현재 lineage.ts와의 전이 대응은 TaintPruningCommute.tla(수정판)를 기준으로 볼 것.
+
 ## 구현 검증 (fast-check)
 
 TLA+가 "설계"의 SinkSafety를 증명했다면, `src/property.test.ts`는 같은 속성을
@@ -223,10 +311,13 @@ cd policy-engine/formal
 java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintLineage.tla
 java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintLineageLive.tla
 java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintHITL.tla
+java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintPruning.tla
+java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintPruningCommute.tla
 ```
 
 - TaintHITL은 **위반 0이 정상** (2단계 수정 반영판 — 위 섹션). 1단계 버그
-  재현판(반례 5스텝)은 git 이력 참조. 반례/witness의 최단 트레이스를 보려면
+  재현판(반례 5스텝)은 git 이력 참조. TaintPruning·TaintPruningCommute도
+  **위반 0이 정상** — Commute의 1단계 재현판(반례 5스텝) 역시 git 이력 참조. 반례/witness의 최단 트레이스를 보려면
   `-workers 1`로 (병렬 BFS는 같은 깊이의 다른 반례를 먼저 보고할 수 있다).
   TLC가 남기는 `*_TTrace_*.tla/.bin`과 `states/`의 새 타임스탬프 디렉토리는
   생성물이니 커밋하지 말 것.
