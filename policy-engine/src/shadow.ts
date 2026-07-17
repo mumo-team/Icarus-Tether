@@ -13,6 +13,7 @@
 
 import { SinkClass, ToolRiskTag, type ToolCallContext } from "@icarus-tether/types";
 import { getTaintNode, previewParentLinks, sessionHasLiveTag, type LinkMethod } from "./lineage.js";
+import { containsVaultOriginal } from "./sanitization.js";
 
 // ---------------------------------------------------------------------------
 // 로그 구조 (나중에 대시보드 C 파트로 그대로 내보낼 수 있는 형태)
@@ -104,11 +105,13 @@ export function runShadowEvaluation(
       const { linkMethod, nodes, unionTags } = collectLineageEvidence(ctx);
 
       // ★ 실제 판정부(computeLineageDecision)와 동일한 비대칭 규칙으로 예측:
-      //   민감(S)은 값-계보로, 비신뢰(U)는 세션-존재로. (argTags는 여기서 unionTags에
-      //   포함되지 않으므로 값-축 U는 unionTags만으로 본다 — 기존 shadow 관례 유지.)
+      //   민감(S)은 값-계보(또는 정화 전 원본 재전송)로, 비신뢰(U)는 세션-존재로.
+      //   (argTags는 여기서 unionTags에 포함되지 않으므로 값-축 U는 unionTags만으로 본다.)
+      const valueSensitive =
+        unionTags.has(ToolRiskTag.SENSITIVE) || containsVaultOriginal(ctx.args);
       const realBlocked =
         sinkClass === SinkClass.OUTBOUND_SINK &&
-        unionTags.has(ToolRiskTag.SENSITIVE) &&
+        valueSensitive &&
         (unionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) ||
           sessionHasLiveTag(ctx.sessionId, ToolRiskTag.UNTRUSTED_ORIGIN));
       const realAllowed = !realBlocked;

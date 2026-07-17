@@ -73,7 +73,7 @@ const NUM_RUNS = (n: number): number =>
 // "TLA+ 허용 범위(ps ⊆ created)의 한 경우를 코드와 같은 규칙으로 고른 것"이다.
 // ===========================================================================
 
-type PayloadKind = "clean" | "schemaValid" | "junk";
+type PayloadKind = "clean" | "schemaValid" | "junk" | "pii";
 
 interface ModelNode {
   id: string;
@@ -151,8 +151,9 @@ class RefModel {
    * 이 메서드에 자식을 갱신하는 코드가 없다 (비대칭 — declassifyNodeTag와 동일 구조).
    * 성공 조건은 index.ts attemptSanitization 미러:
    *   session에 targetTag 존재 ∧ targetTag 레코드 존재 ∧ 전원 검증 통과.
-   * 검증 결과 미러: TOKENIZATION은 이 설정의 페이로드(전부 PII 없음)에서 항상
-   * 성공, STRUCTURED_EXTRACTION은 schemaValid 페이로드만 성공.
+   * ★ 검증 결과 미러 (S4 "실제 변경" 게이트): TOKENIZATION은 페이로드가 실제로
+   *   토큰화될 내용(PII)을 담은 "pii" 종류일 때만 성공(안 바꾸면 실패 — no-op 성공이
+   *   곧 버그였다). STRUCTURED_EXTRACTION은 schemaValid 페이로드만 성공.
    */
   sanitize(method: SanitizationMethod): { success: boolean; targets: string[] } {
     const targetTag = method === SanitizationMethod.TOKENIZATION ? S : U;
@@ -161,7 +162,7 @@ class RefModel {
       return { success: false, targets: [] };
     }
     const allOk = targets.every((r) =>
-      method === SanitizationMethod.TOKENIZATION ? true : r.payloadKind === "schemaValid"
+      method === SanitizationMethod.TOKENIZATION ? r.payloadKind === "pii" : r.payloadKind === "schemaValid"
     );
     if (!allOk) return { success: false, targets: [] }; // fail-safe: 하나라도 실패 → 전부 유지
 
@@ -212,7 +213,7 @@ const recordArb = fc.record({
     "mystery_tool" // 미분류 → default-deny로 UNTRUSTED
   ),
   refs: fc.array(fc.nat({ max: 30 }), { maxLength: 2 }),
-  payloadKind: fc.constantFrom<PayloadKind>("clean", "schemaValid", "junk"),
+  payloadKind: fc.constantFrom<PayloadKind>("clean", "schemaValid", "junk", "pii"),
 });
 
 const sanitizeArb = fc.record({
@@ -238,11 +239,15 @@ function makePayload(kind: PayloadKind): unknown {
   // 전부 8자 미만 문자열 → 값 매칭 토큰이 생기지 않는다 (VALUE_MATCH 배제)
   switch (kind) {
     case "clean":
-      return "p"; // 추출 실패(객체 아님) / 토큰화 성공
+      return "p"; // PII 없음 → 토큰화가 아무것도 안 바꿈(실제변경 게이트로 정화 실패) / 추출 실패
     case "schemaValid":
-      return { type: "note", name: "ok" }; // 둘 다 성공
+      return { type: "note", name: "ok" }; // 추출 성공 / 토큰화는 no-op → 실패
     case "junk":
-      return { type: "zzz", name: "ok" }; // 추출 실패(enum 밖) / 토큰화 성공
+      return { type: "zzz", name: "ok" }; // 추출 실패(enum 밖) / 토큰화 no-op → 실패
+    case "pii":
+      // 짧은 이메일(6자<8 → VALUE_MATCH 토큰 안 생김)이라 토큰화가 실제로 치환한다
+      // → 토큰화 성공(태그 해제)의 유효 경로. 추출은 스키마 필드 아님 → 실패.
+      return { contact: "a@b.co" };
   }
 }
 

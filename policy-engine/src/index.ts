@@ -28,7 +28,7 @@ import {
 } from "@icarus-tether/types";
 import { getPolicyConfig, type PolicyConfig } from "./config.js";
 import { detectSecrets } from "./secret-detection.js";
-import { extractStructured, tokenizePII } from "./sanitization.js";
+import { extractStructured, tokenizePII, containsVaultOriginal } from "./sanitization.js";
 import { createTaintNode, declassifyNodeTag, sessionHasLiveTag, type TaintNode } from "./lineage.js";
 import { collectLineageEvidence, runShadowEvaluation } from "./shadow.js";
 import { consumeApprovalIfMatching, evaluateOverridability, offerOverride } from "./hitl.js";
@@ -277,7 +277,18 @@ export function attemptSanitization(
         : extractStructured(r.payload)
     );
 
-    if (outcomes.every((o) => o.ok)) {
+    // ★ TOKENIZATION "실제 변경" 게이트 (S4 정화 악용 수정):
+    // tokenizePII는 내용에 PII/비밀이 없으면 "아무것도 안 바꾸고 ok:true"를 낸다
+    // (그 함수의 순수 계약 — 단위 테스트가 요구). 하지만 그 no-op 성공으로 태그를
+    // 해제하면, 출처 기반 SENSITIVE(tag_all — 이름·등급 등 PII 아닌 값)가 데이터는
+    // 그대로인 채 태그만 벗겨져 유출된다. 그래서 호출부에서 "대상 레코드가 실제로
+    // 바뀌었을 때만" 해제한다. STRUCTURED_EXTRACTION은 '스키마 필드만 남김' 자체가
+    // 안전 증명이라(불변이어도 안전) 이 게이트를 적용하지 않는다.
+    const tokenizationEffective =
+      method !== SanitizationMethod.TOKENIZATION ||
+      records.every((r, i) => outcomes[i].ok && JSON.stringify(r.payload) !== JSON.stringify((outcomes[i] as { value: unknown }).value));
+
+    if (outcomes.every((o) => o.ok) && tokenizationEffective) {
       // 검증 통과 — 페이로드를 정화된 값으로 교체하고 태그 해제
       records.forEach((record, i) => {
         const outcome = outcomes[i];
@@ -362,7 +373,12 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
     //     비신뢰 본문은 미포함)을 잡아낸다 — 대칭 규칙이 놓치던 경로.
     //   정화로 비신뢰가 노드에서 제거되면 sessionHasLiveTag가 false가 되어
     //   과차단되지 않는다.
-    const valueSensitive = effectiveTags.has(ToolRiskTag.SENSITIVE);
+    //
+    // ★ 원본 재전송 탐지(S4 정화 악용 #2): 정화는 노드 태그만 벗기므로, 정화 후
+    //   "정화 전 원본"을 그대로 재전송하면 계보상 깨끗해 통과한다. 나가는 값에
+    //   볼트 원본(실제로 토큰화된 PII/비밀)이 들어 있으면 값-민감으로 본다.
+    const resendsSanitizedOriginal = containsVaultOriginal(ctx.args);
+    const valueSensitive = effectiveTags.has(ToolRiskTag.SENSITIVE) || resendsSanitizedOriginal;
     const sessionUntrusted =
       effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) ||
       sessionHasLiveTag(ctx.sessionId, ToolRiskTag.UNTRUSTED_ORIGIN);
@@ -401,6 +417,9 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
       const sessionNote = untrustedInValue
         ? ""
         : " (세션이 비신뢰 입력에 노출됨 — 제어흐름 조작으로 민감 데이터가 유출될 수 있어 차단)";
+      const resendNote = resendsSanitizedOriginal
+        ? " (정화 전 원본 값이 나가는 값에 감지됨 — 정화된 값이 아닌 원본 재전송 차단)"
+        : "";
       const decision: PolicyDecision = {
         sessionId: ctx.sessionId,
         toolName: ctx.toolName,
@@ -408,6 +427,7 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
         reason:
           `lethal trifecta 감지(계보 판정): 이 값의 계보에 정화되지 않은 오염 노드가 남아 있어 외부 유출 차단 — ${nodeDesc || "근거 없음"}${argDesc} ${CLEAR_HINT}` +
           sessionNote +
+          resendNote +
           (unclassified ? " (미분류 도구 — default-deny로 OUTBOUND_SINK 취급)" : ""),
         matchedTags: [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN],
       };
