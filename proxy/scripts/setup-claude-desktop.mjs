@@ -65,6 +65,19 @@ if (existsSync(CONFIG_PATH)) {
   console.log(`백업 생성: ${backup}`);
 }
 
+// 3-1) --remove: 등록만 지우고 끝낸다 (다른 설정은 손대지 않음)
+if (process.argv.includes("--remove")) {
+  if (config.mcpServers?.["icarus-tether"]) {
+    delete config.mcpServers["icarus-tether"];
+    if (Object.keys(config.mcpServers).length === 0) delete config.mcpServers;
+    writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+    console.log("✅ 'icarus-tether' 등록을 제거했습니다. Claude Desktop을 다시 실행하세요.");
+  } else {
+    console.log("등록된 'icarus-tether'가 없습니다. (이미 제거됨)");
+  }
+  process.exit(0);
+}
+
 // 4) mcpServers만 병합 (기존 preferences 등은 그대로 둔다)
 // nvm 등으로 node가 표준 경로 밖에 있을 수 있으므로 전부 절대경로로 적는다.
 const nodeBin = process.execPath;

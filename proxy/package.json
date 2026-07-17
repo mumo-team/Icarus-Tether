@@ -9,7 +9,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "demo:attack": "tsx test/mock-client.ts",
     "demo:approve": "APPROVAL_DECISION=approve tsx test/mock-client.ts",
-    "demo:safe": "tsx test/mock-client-safe.ts"
+    "demo:safe": "tsx test/mock-client-safe.ts",
+    "test:exfil": "tsx test/mock-client-exfil.ts"
   },
   "dependencies": {
     "@icarus-tether/policy-engine": "*",
