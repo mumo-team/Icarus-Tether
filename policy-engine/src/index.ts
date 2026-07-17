@@ -83,6 +83,7 @@ export {
   addNodeTags,
   getSessionLineage,
   getTaintNode,
+  getTombstoneTags,
   pruneSessionLineage,
   MATCH_TOKEN_MIN_LENGTH,
   STRONG_TOKEN_MIN_LENGTH,
