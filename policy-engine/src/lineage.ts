@@ -149,6 +149,23 @@ export function getSessionLineage(sessionId: string): ReadonlyMap<string, TaintN
   return lineageStore.get(sessionId) ?? new Map();
 }
 
+/**
+ * 세션 계보에 지정 태그를 "지금도 살아있게" 지닌 노드가 하나라도 있는가.
+ *
+ * 비대칭 위협 모델(index.ts computeLineageDecision)의 U 축 판정에 쓴다: 비신뢰는
+ * "제어흐름을 조작했는가"라 값-계보가 아니라 세션-존재로 본다. 정화가
+ * declassifyNodeTag로 노드의 태그를 실제 제거하므로(비대칭 — 그 노드만), 정화된
+ * 비신뢰는 여기서 자동으로 빠진다(정화 후 과차단 방지).
+ */
+export function sessionHasLiveTag(sessionId: string, tag: ToolRiskTag): boolean {
+  const graph = lineageStore.get(sessionId);
+  if (!graph) return false;
+  for (const node of graph.values()) {
+    if (node.tags.has(tag)) return true;
+  }
+  return false;
+}
+
 export function getTaintNode(sessionId: string, nodeId: string): TaintNode | undefined {
   return lineageStore.get(sessionId)?.get(nodeId);
 }

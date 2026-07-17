@@ -29,7 +29,7 @@ import {
 import { getPolicyConfig, type PolicyConfig } from "./config.js";
 import { detectSecrets } from "./secret-detection.js";
 import { extractStructured, tokenizePII } from "./sanitization.js";
-import { createTaintNode, declassifyNodeTag, type TaintNode } from "./lineage.js";
+import { createTaintNode, declassifyNodeTag, sessionHasLiveTag, type TaintNode } from "./lineage.js";
 import { collectLineageEvidence, runShadowEvaluation } from "./shadow.js";
 import { consumeApprovalIfMatching, evaluateOverridability, offerOverride } from "./hitl.js";
 import { buildFailSafeExplanation, buildUserExplanation } from "./explain.js";
@@ -352,10 +352,22 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
     const evidence = collectLineageEvidence(ctx);
     const effectiveTags = new Set<ToolRiskTag>([...evidence.unionTags, ...ctx.argTags]);
 
-    if (
-      effectiveTags.has(ToolRiskTag.SENSITIVE) &&
-      effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN)
-    ) {
+    // ★ 비대칭 위협 모델: lethal trifecta = (이 값이 실제로 민감 데이터를 담음)
+    //   AND (세션이 비신뢰 입력에 노출됨). 근거:
+    //   - 민감(S)은 "실제로 나가는가"의 문제라 값-계보(+argTags)로 판정한다.
+    //     → 값이 비신뢰-only 갈래(N4/N5)면 민감이 안 나가므로 통과(정밀함 유지).
+    //   - 비신뢰(U)는 "제어흐름을 조작해 유출을 유도했는가"의 문제라 body에 그
+    //     본문을 안 실어도 위험하다 → 세션-존재로 판정(sessionHasLiveTag).
+    //     이것이 "민감 데이터를 그대로 실어 보내는 현실적 exfil"(값은 S 매칭,
+    //     비신뢰 본문은 미포함)을 잡아낸다 — 대칭 규칙이 놓치던 경로.
+    //   정화로 비신뢰가 노드에서 제거되면 sessionHasLiveTag가 false가 되어
+    //   과차단되지 않는다.
+    const valueSensitive = effectiveTags.has(ToolRiskTag.SENSITIVE);
+    const sessionUntrusted =
+      effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) ||
+      sessionHasLiveTag(ctx.sessionId, ToolRiskTag.UNTRUSTED_ORIGIN);
+
+    if (valueSensitive && sessionUntrusted) {
       const hitlPolicy = getPolicyConfig().hitlPolicy;
 
       // HITL 소비: "이 호출"과 지문이 일치하는 APPROVED·미사용 승인이 있고,
@@ -382,12 +394,20 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
         .join(", ");
       const argDesc = ctx.argTags.length > 0 ? ` (인자 태그: ${ctx.argTags.join("+")})` : "";
       const unclassified = !isClassifiedTool(getPolicyConfig(), ctx.toolName);
+      // 값 자체가 비신뢰를 안 실었는데 세션-존재로 트리거된 경우(현실적 exfil):
+      // 근거에 U 노드가 없을 수 있으므로 "세션 비신뢰 노출"을 명시한다.
+      const untrustedInValue = evidence.unionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) ||
+        ctx.argTags.includes(ToolRiskTag.UNTRUSTED_ORIGIN);
+      const sessionNote = untrustedInValue
+        ? ""
+        : " (세션이 비신뢰 입력에 노출됨 — 제어흐름 조작으로 민감 데이터가 유출될 수 있어 차단)";
       const decision: PolicyDecision = {
         sessionId: ctx.sessionId,
         toolName: ctx.toolName,
         allowed: false,
         reason:
           `lethal trifecta 감지(계보 판정): 이 값의 계보에 정화되지 않은 오염 노드가 남아 있어 외부 유출 차단 — ${nodeDesc || "근거 없음"}${argDesc} ${CLEAR_HINT}` +
+          sessionNote +
           (unclassified ? " (미분류 도구 — default-deny로 OUTBOUND_SINK 취급)" : ""),
         matchedTags: [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN],
       };

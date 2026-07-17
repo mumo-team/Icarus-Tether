@@ -174,14 +174,20 @@ class RefModel {
   }
 
   /**
-   * TLA+ ReachSink(n)의 guard ~Trifecta(tags[n]) 대응 — index.ts
-   * computeLineageDecision 미러: (부모 태그 합집합 ∪ argTags)가 트라이펙타면 차단.
+   * index.ts computeLineageDecision 미러 — ★비대칭 위협 모델:
+   *   차단 ⇔ (값-계보에 민감 S) AND (세션에 살아있는 비신뢰 U).
+   *   - 민감(S): 이 값이 실제로 민감 데이터를 담는가 → 값-계보(부모 태그 ∪ argTags).
+   *   - 비신뢰(U): 세션이 비신뢰에 노출됐는가 → 세션 전체 노드 중 U 보유 존재
+   *     (제어흐름 조작 위협이라 값에 본문이 없어도 성립). 값-축 U(argTags/부모)도 충분.
+   * TLA+ per-value 트라이펙타보다 엄격한 보수적 확장이므로 SinkSafety를 위반하지 않는다.
    */
   predictAllowed(refIds: string[], argTags: ToolRiskTag[]): boolean {
     const parents = refIds.length > 0 ? refIds : this.frontier();
-    const union = new Set<ToolRiskTag>(argTags);
-    for (const pid of parents) for (const t of this.byId.get(pid)!.tags) union.add(t);
-    return !(union.has(S) && union.has(U)); // SinkSafety guard
+    const valueTags = new Set<ToolRiskTag>(argTags);
+    for (const pid of parents) for (const t of this.byId.get(pid)!.tags) valueTags.add(t);
+    const valueSensitive = valueTags.has(S);
+    const sessionUntrusted = valueTags.has(U) || this.nodes.some((n) => n.tags.has(U));
+    return !(valueSensitive && sessionUntrusted);
   }
 }
 
