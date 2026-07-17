@@ -5,3 +5,7 @@ dist/
 .env
 .DS_Store
 *.tsbuildinfo
+
+# TLC 형식검증 생성물
+policy-engine/formal/*.out
+policy-engine/formal/states/
