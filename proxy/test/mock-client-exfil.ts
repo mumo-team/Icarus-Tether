@@ -39,6 +39,7 @@ async function main() {
     new StdioClientTransport({
       command: process.execPath,
       args: [TSX_CLI, PROXY_PATH],
+      env: process.env as Record<string, string>, // 엔진 config 경로(TAINTGUARD_*)를 프록시로 전달
     })
   );
 

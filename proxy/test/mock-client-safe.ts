@@ -10,12 +10,14 @@ import { dirname, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROXY_PATH = resolve(__dirname, "../src/index.ts");
+const TSX_CLI = resolve(__dirname, "../../node_modules/tsx/dist/cli.mjs");
 
 async function main() {
   const client = new Client({ name: "mock-agent-safe", version: "0.0.1" });
   const transport = new StdioClientTransport({
-    command: "npx",
-    args: ["tsx", PROXY_PATH],
+    command: process.execPath,
+    args: [TSX_CLI, PROXY_PATH],
+    env: process.env as Record<string, string>, // 엔진 config 경로(TAINTGUARD_*)를 프록시로 전달
   });
   await client.connect(transport);
 

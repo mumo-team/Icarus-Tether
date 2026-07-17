@@ -7,10 +7,10 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "demo:attack": "tsx test/mock-client.ts",
-    "demo:approve": "APPROVAL_DECISION=approve tsx test/mock-client.ts",
-    "demo:safe": "tsx test/mock-client-safe.ts",
-    "test:exfil": "tsx test/mock-client-exfil.ts"
+    "demo:attack": "TAINTGUARD_TOOL_REGISTRY=$PWD/config/demo-registry.json tsx test/mock-client.ts",
+    "demo:approve": "TAINTGUARD_TOOL_REGISTRY=$PWD/config/demo-registry.json APPROVAL_DECISION=approve tsx test/mock-client.ts",
+    "demo:safe": "TAINTGUARD_TOOL_REGISTRY=$PWD/config/demo-registry.json tsx test/mock-client-safe.ts",
+    "test:exfil": "TAINTGUARD_TOOL_REGISTRY=$PWD/config/demo-registry.json tsx test/mock-client-exfil.ts"
   },
   "dependencies": {
     "@icarus-tether/policy-engine": "*",

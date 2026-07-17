@@ -86,7 +86,11 @@ config.mcpServers = {
   "icarus-tether": {
     command: nodeBin,
     args: [TSX_CLI, PROXY_ENTRY],
-    env: { PATH: `${dirname(nodeBin)}:/usr/local/bin:/usr/bin:/bin` },
+    env: {
+      PATH: `${dirname(nodeBin)}:/usr/local/bin:/usr/bin:/bin`,
+      // 데모용 정책 설정(계보 판정 + HITL). 엔진 기본값(session/off)은 건드리지 않는다.
+      TAINTGUARD_TOOL_REGISTRY: join(REPO_ROOT, "proxy/config/demo-registry.json"),
+    },
   },
 };
 
