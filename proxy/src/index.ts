@@ -33,6 +33,9 @@ console.log = (...args: unknown[]) => console.error(...args);
 // ESM엔 __dirname이 없어 import.meta.url로 계산 (실행 위치와 무관하게 경로 고정)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MOCK_SERVER_PATH = resolve(__dirname, "../test/mock-server.ts");
+// npx 대신 로컬 tsx를 절대경로로 직접 실행한다. npx는 cwd 기준으로 tsx를 찾기 때문에,
+// 에이전트가 임의의 cwd에서 프록시를 띄우면 tsx를 인터넷에서 새로 받으려 한다(느리고 오프라인 실패).
+const TSX_CLI = resolve(__dirname, "../../node_modules/tsx/dist/cli.mjs");
 const AUDIT_LOG_PATH = resolve(__dirname, "../audit.log");
 
 interface SessionState {
@@ -85,8 +88,8 @@ async function main() {
     version: "0.1.0",
   });
   const downstreamTransport = new StdioClientTransport({
-    command: "npx",
-    args: ["tsx", MOCK_SERVER_PATH],
+    command: process.execPath, // 지금 프록시를 돌리는 node 실행파일 (절대경로라 cwd 무관)
+    args: [TSX_CLI, MOCK_SERVER_PATH],
   });
   await downstream.connect(downstreamTransport);
 

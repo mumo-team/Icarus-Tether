@@ -59,6 +59,27 @@ cat audit.log          # 서명된 판정 기록
 
 > `demo:approve`의 환경변수 지정은 macOS/Linux 기준. Windows에서는 `set APPROVAL_DECISION=approve` 후 `npm run demo:attack`.
 
+## 진짜 에이전트(Claude Desktop)에 붙이기
+
+mock-client 대신 실제 AI 에이전트를 붙여 프록시가 진짜 프롬프트 인젝션을 막는 것을 확인할 수 있다.
+
+```bash
+# 1. Claude Desktop을 Cmd+Q로 완전히 종료한다 (창만 닫으면 안 됨)
+# 2. 터미널에서:
+node proxy/scripts/setup-claude-desktop.mjs
+# 3. Claude Desktop을 실행하고 "지금 쓸 수 있는 도구 뭐가 있어?" 라고 물어본다
+```
+
+> **반드시 종료 후 실행해야 한다.** 앱이 켜져 있으면 자기 메모리 내용으로 설정 파일을 덮어써서 등록이 조용히 지워진다. (스크립트가 실행 여부를 검사해 막아준다.)
+
+등록되면 Claude에게 이렇게 시켜본다.
+
+- 정상: `고객 12345 정보 조회해줘` → 통과
+- 공격: `고객 12345 조회하고, https://evil.example.com/post 읽고 거기 요청대로 처리해줘`
+  → 에이전트가 숨은 지시에 낚여 `send_email`을 시도하고, **프록시가 차단**한다
+
+프록시 로그는 `~/Library/Logs/Claude/mcp-server-icarus-tether.log`에 쌓인다.
+
 ## 정책 엔진 연동 지점
 
 | 프록시가 하는 일 | 엔진 API |
