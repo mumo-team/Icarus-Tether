@@ -5,7 +5,6 @@ import TrifectaWarningBanner from "./components/TrifectaWarningBanner";
 import EventLogTimeline from "./components/EventLogTimeline";
 import ApprovalQueue from "./components/ApprovalQueue";
 import SanitizationCompareView from "./components/SanitizationCompareView";
-import { maskPii } from "./lib/pii/mask";
 import TaintGraph from "./components/TaintGraph";
 import TrifectaApprovalModal from "./components/TrifectaApprovalModal";
 import AuditTimeline, { type HitlAuditEntry } from "./components/AuditTimeline";
@@ -18,48 +17,6 @@ interface InjectionCheckEntry {
   score: number;
   timestamp: string;
 }
-
-console.log(maskPii("고객 이메일은 hansol@example.com 이고 연락처는 010-1234-5678 입니다"));
-// 기대값: "고객 이메일은 [EMAIL_REDACTED] 이고 연락처는 [PHONE_REDACTED] 입니다"
-
-const SAMPLE_LOGS: AuditLogEntry[] = [
-  {
-    id: "1",
-    sessionId: "demo-session-1",
-    toolName: "query_customer_db",
-    decision: "ALLOWED",
-    matchedTags: [],
-    timestamp: new Date().toISOString(),
-  },
-];
-
-const SAMPLE_APPROVALS: ApprovalRequest[] = [
-  {
-    id: "ap-1",
-    sessionId: "demo-session-1",
-    toolName: "send_email",
-    args: { to: "external@example.com" },
-    status: "PENDING",
-    requestedAt: new Date().toISOString(),
-  },
-];
-
-const SAMPLE_HITL_LOG: HitlAuditEntry[] = [
-  {
-    approvalId: "ap-1",
-    sessionId: "demo-session-1",
-    toolName: "send_email",
-    action: "OFFERED",
-    timestamp: new Date(Date.now() - 60_000).toISOString(),
-  },
-  {
-    approvalId: "ap-1",
-    sessionId: "demo-session-1",
-    toolName: "send_email",
-    action: "REQUESTED",
-    timestamp: new Date(Date.now() - 30_000).toISOString(),
-  },
-];
 
 const SAMPLE_BLOCKED_DECISION: PolicyDecision = {
   sessionId: "demo-session-1",
@@ -87,8 +44,8 @@ const SAMPLE_BLOCKED_DECISION: PolicyDecision = {
 };
 
 export default function App() {
-  const [logs, setLogs] = useState<AuditLogEntry[]>(SAMPLE_LOGS);
-  const [approvals, setApprovals] = useState<ApprovalRequest[]>(SAMPLE_APPROVALS);
+  const [logs, setLogs] = useState<AuditLogEntry[]>([]);
+  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [modalDecision, setModalDecision] = useState<PolicyDecision | null>(null);
   const [injectionChecks, setInjectionChecks] = useState<InjectionCheckEntry[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
@@ -264,7 +221,7 @@ export default function App() {
       <TrifectaWarningBanner logs={logs} />
       <MetricCards logs={logs} approvals={approvals} />
       <EventLogTimeline logs={logs} />
-      <AuditTimeline logs={logs} hitlLog={SAMPLE_HITL_LOG} />
+      <AuditTimeline logs={logs} hitlLog={[]} />
       <section
         style={{
           margin: "12px 0",
