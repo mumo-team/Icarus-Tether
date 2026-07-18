@@ -22,6 +22,7 @@ import {
   type PolicyDecision,
   type SessionTaintState,
   type TrifectaEvent,
+  type OutputScanEvent,
   type SanitizationResult,
   SanitizationMethod,
 
@@ -29,6 +30,11 @@ import {
 import { getPolicyConfig, type PolicyConfig } from "./config.js";
 import { detectSecrets } from "./secret-detection.js";
 import { extractStructured, tokenizePII, containsVaultOriginal } from "./sanitization.js";
+import {
+  scanOutputForSensitive,
+  type OutputScanFinding,
+  type SensitivePayload,
+} from "./output-scan.js";
 import { createTaintNode, declassifyNodeTag, sessionHasLiveTag, type TaintNode } from "./lineage.js";
 import { collectLineageEvidence, runShadowEvaluation } from "./shadow.js";
 import { consumeApprovalIfMatching, evaluateOverridability, offerOverride } from "./hitl.js";
@@ -187,6 +193,20 @@ interface RecordedPayload {
 }
 
 const payloadStore = new Map<string, RecordedPayload[]>();
+
+/**
+ * TIER3 출력-스캔용: 이 세션이 실제로 읽은 "아직 민감한(정화 안 된)" 원본값 목록.
+ * 정화(attemptSanitization)를 통과한 레코드는 tags에서 SENSITIVE가 벗겨지므로 자동
+ * 제외된다 → "정화 후 정상 공유"는 스캔 대상이 아니라 과차단되지 않는다.
+ */
+function getSensitivePayloads(sessionId: string): SensitivePayload[] {
+  const records = payloadStore.get(sessionId) ?? [];
+  const out: SensitivePayload[] = [];
+  for (const r of records) {
+    if (r.tags.includes(ToolRiskTag.SENSITIVE)) out.push({ toolName: r.toolName, payload: r.payload });
+  }
+  return out;
+}
 
 /** 출처 기반(1순위) + 내용 기반(2·3순위) 태그를 계산한다 */
 function computeResultTags(toolName: string, payload: unknown): ToolRiskTag[] {
@@ -383,7 +403,19 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
     //   "정화 전 원본"을 그대로 재전송하면 계보상 깨끗해 통과한다. 나가는 값에
     //   볼트 원본(실제로 토큰화된 PII/비밀)이 들어 있으면 값-민감으로 본다.
     const resendsSanitizedOriginal = containsVaultOriginal(ctx.args);
-    const valueSensitive = effectiveTags.has(ToolRiskTag.SENSITIVE) || resendsSanitizedOriginal;
+
+    // ★ TIER3 출력-스캔 (미탐 #1 벡터 A): 값-계보가 세탁으로 놓친 민감을 값의 *내용*에서
+    //   직접 잡는다. (1) 세션이 읽은 민감 원본이 출력에 포함(청크 재조립 포함)되었거나
+    //   (2) 출력에 verbatim 비밀 키 패턴이 있으면 값-민감으로 본다. 엔트로피는 안 쓴다
+    //   (고엔트로피 정상값 SHA/UUID/JWT 과차단 방지). OUTBOUND_SINK 경로에서만 실행.
+    const outputScanFinding = scanOutputForSensitive(
+      getSensitivePayloads(ctx.sessionId),
+      ctx.args,
+      getPolicyConfig().secretDetection
+    );
+
+    const valueSensitive =
+      effectiveTags.has(ToolRiskTag.SENSITIVE) || resendsSanitizedOriginal || outputScanFinding !== null;
     const sessionUntrusted =
       effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) ||
       sessionHasLiveTag(ctx.sessionId, ToolRiskTag.UNTRUSTED_ORIGIN);
@@ -425,6 +457,11 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
       const resendNote = resendsSanitizedOriginal
         ? " (정화 전 원본 값이 나가는 값에 감지됨 — 정화된 값이 아닌 원본 재전송 차단)"
         : "";
+      const outputScanNote = outputScanFinding
+        ? outputScanFinding.kind === "containment"
+          ? " (출력-스캔: 세션이 읽은 민감 원본이 나가는 값에 포함됨 — 세탁 유출 차단)"
+          : " (출력-스캔: 나가는 값에서 비밀 키 패턴 감지 — 유출 차단)"
+        : "";
       const decision: PolicyDecision = {
         sessionId: ctx.sessionId,
         toolName: ctx.toolName,
@@ -433,9 +470,16 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
           `lethal trifecta 감지(계보 판정): 이 값의 계보에 정화되지 않은 오염 노드가 남아 있어 외부 유출 차단 — ${nodeDesc || "근거 없음"}${argDesc} ${CLEAR_HINT}` +
           sessionNote +
           resendNote +
+          outputScanNote +
           (unclassified ? " (미분류 도구 — default-deny로 OUTBOUND_SINK 취급)" : ""),
         matchedTags: [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN],
       };
+
+      // TIER3 출력-스캔이 차단에 기여했으면 이벤트를 방출하고 판정에 실어 프록시가
+      // 대시보드로 전달하게 한다 (③가 type:"output_scan" 구독).
+      if (outputScanFinding) {
+        decision.outputScan = emitOutputScanEvent(ctx, sinkClass, outputScanFinding);
+      }
 
       // HITL 제안: 승인 가능 여부는 결정론 규칙(evaluateOverridability — weak 연결
       // 판정)이 정한다. AI 판단 없음. 차단(allowed:false)은 그대로 유지된다.
@@ -519,5 +563,28 @@ function emitTrifectaEvent(
   };
   // TODO(B/C): dashboard·audit-log 쪽으로 이 이벤트를 발행 (HTTP/이벤트버스 등)
   console.log("[policy-engine] TrifectaEvent 발행:", event);
+  return event;
+}
+
+/** TIER3 출력-스캔 탐지 이벤트 발행 (emitTrifectaEvent와 동일 관례 — 비밀 원본 미포함). */
+function emitOutputScanEvent(
+  ctx: ToolCallContext,
+  sinkClass: SinkClass,
+  finding: OutputScanFinding
+): OutputScanEvent {
+  const event: OutputScanEvent = {
+    id: crypto.randomUUID(),
+    sessionId: ctx.sessionId,
+    toolName: ctx.toolName,
+    sinkClass,
+    timestamp: new Date().toISOString(),
+    kind: finding.kind,
+    sourceTool: finding.sourceTool,
+    matchLen: finding.matchLen,
+    valueHash: finding.valueHash,
+  };
+  // TODO(B/C): dashboard·audit-log 쪽으로 발행. 현재는 PolicyDecision.outputScan으로
+  // 프록시가 broadcastDecision 경로에 실어 대시보드로 전달한다.
+  console.log("[policy-engine] OutputScanEvent 발행:", event);
   return event;
 }
