@@ -50,6 +50,46 @@ function hashValue(v: string): string {
 }
 
 /**
+ * base64로 보이는 연속 구간(run). 표준 base64 charset만(url변형 -_ 는 다음 단계).
+ * 인코딩 ≥16자만 후보 — 디코딩 ≥12바이트라야 포함검사(min-length 12) 통과 가능하고,
+ * 짧은 정상 단어("test"·"name")는 애초에 후보에서 빠져 우연 디코드 오탐을 원천 차단.
+ */
+const BASE64_RUN = /[A-Za-z0-9+/]{16,}={0,2}/g;
+
+/** 유효 UTF-8 텍스트인가 — 디코딩이 replacement(U+FFFD) 없이 왕복하면 "의미있는 평문". */
+function isMeaningfulText(decoded: string, bytes: Buffer): boolean {
+  if (decoded.includes("�")) return false; // 이진 쓰레기(SHA 디코딩 등) 탈락
+  return Buffer.from(decoded, "utf8").equals(bytes); // utf8 왕복 일치
+}
+
+/**
+ * 출력 문자열들(+concat)에서 base64 run을 찾아 "의미있는 평문"으로 디코딩한 목록을 만든다.
+ * 세탁(base64 인코딩) 민감을 포함검사가 볼 수 있게 하는 전처리. 결정론(Buffer + 문자열 검사만).
+ * 게이트: charset/길이(정규식) → 정준성(재인코딩 일치) → 유효 UTF-8 → (호출부의 min-length).
+ */
+function decodeBase64Runs(strings: readonly string[]): string[] {
+  const decoded: string[] = [];
+  for (const s of strings) {
+    for (const run of s.match(BASE64_RUN) ?? []) {
+      if (run.replace(/=+$/, "").length % 4 === 1) continue; // base64로 불가능한 길이
+      let bytes: Buffer;
+      try {
+        bytes = Buffer.from(run, "base64");
+      } catch {
+        continue;
+      }
+      if (bytes.length < OUTPUT_SCAN_MIN_LENGTH) continue; // 디코딩 <12바이트 → 매치 불가
+      // 정준성: 재인코딩이 원본 run과 일치해야(패딩 정규화 후) — 비정준/우연 base64 배제
+      if (bytes.toString("base64").replace(/=+$/, "") !== run.replace(/=+$/, "")) continue;
+      const text = bytes.toString("utf8");
+      if (!isMeaningfulText(text, bytes)) continue;
+      decoded.push(text);
+    }
+  }
+  return decoded;
+}
+
+/**
  * 나가는 값에서 세탁된 민감 유출을 탐지한다. 첫 finding에서 즉시 반환(차단엔 하나면 충분).
  * OUTBOUND_SINK 판정 경로에서만 호출됨 (핫패스 비용 제한).
  */
@@ -62,9 +102,14 @@ export function scanOutputForSensitive(
   const outStrings: string[] = [];
   collectStrings(args, outStrings);
 
-  // 1. 포함검사: 개별 출력 문자열 + 전체 concat(청크 재조립) 을 haystack으로.
-  if (outStrings.length > 0) {
-    const haystacks = outStrings.length > 1 ? [...outStrings, outStrings.join("")] : outStrings;
+  // 개별 출력 문자열 + 전체 concat(단순/청크 재조립). base64 세탁 전처리: 이들에서
+  // base64 run을 찾아 의미있는 평문으로 디코딩한 문자열을 검사 대상에 함께 넣는다.
+  const baseStrings = outStrings.length > 1 ? [...outStrings, outStrings.join("")] : outStrings;
+  const decodedStrings = decodeBase64Runs(baseStrings);
+
+  // 1. 포함검사: 원문 + 디코딩 평문을 haystack으로. min-length가 우연 매치를 막는다.
+  if (baseStrings.length > 0) {
+    const haystacks = [...baseStrings, ...decodedStrings];
     for (const { toolName, payload } of sensitivePayloads) {
       const values: string[] = [];
       collectStrings(payload, values);
@@ -78,10 +123,11 @@ export function scanOutputForSensitive(
   }
 
   // 2. 정규식(byRegex)만 — byEntropy는 의도적으로 제외(고엔트로피 정상값 과차단 방지).
+  //    디코딩 평문도 함께 스캔 → base64된 AWS/GitHub 키도 덤으로 잡힌다.
   const byRegex = secretDetection?.byRegex ?? [];
   if (byRegex.length > 0) {
     const regexOnly: SecretDetectionConfig = { bySource: false, byEntropy: null, byRegex };
-    for (const s of outStrings) {
+    for (const s of [...outStrings, ...decodedStrings]) {
       const found = detectSecretsInString(s, regexOnly);
       if (found.length > 0) {
         return { kind: "regex", matchLen: found[0].value.length, valueHash: hashValue(found[0].value) };

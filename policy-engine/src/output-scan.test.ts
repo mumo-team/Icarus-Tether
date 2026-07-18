@@ -85,6 +85,37 @@ test("★ npm integrity(sha512-) 정상값 — 미발동", () => {
   assert.equal(f, null);
 });
 
+// ── base64 디코딩 전처리 (풀버전 1단계) ────────────────────────────────────
+const B64_SECRET = "dbConnString_Prod_Xy7788"; // 24자
+const b64Payloads: SensitivePayload[] = [{ toolName: "read_env_file", payload: { conn: B64_SECRET } }];
+const enc = Buffer.from(B64_SECRET).toString("base64");
+
+test("base64: 세탁(단일 base64)된 민감 원본 탐지", () => {
+  const f = scanOutputForSensitive(b64Payloads, { body: `payload ${enc}` }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("base64: 청크로 쪼갠 base64도 concat 재조립 후 디코딩·탐지", () => {
+  const parts = [enc.slice(0, 8), enc.slice(8, 16), enc.slice(16)];
+  const f = scanOutputForSensitive(b64Payloads, { parts }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ base64 우연 디코드: 짧은 문자열('test')은 후보 아님 → 미발동", () => {
+  assert.equal(scanOutputForSensitive(b64Payloads, { body: "test" }, DET), null);
+});
+
+test("★ base64 우연 디코드: git SHA/UUID/JWT/integrity 정상값 → 미발동", () => {
+  assert.equal(scanOutputForSensitive(b64Payloads, { body: "9f3ab2c1e4d5f6a7b8c9d0e1f2a3b4c5d6e7f8a9" }, DET), null);
+  assert.equal(scanOutputForSensitive(b64Payloads, { id: "550e8400-e29b-41d4-a716-446655440000" }, DET), null);
+  assert.equal(scanOutputForSensitive(b64Payloads, { integrity: "sha512-oPX8q3aB9cD2eF4gH6iJ8kL0mN2oP4qR6sT8uV0wX2yZ4aB6cD8eF0gH2iJ4kL6mN8oP0qR2sT4uV6" }, DET), null);
+});
+
+test("★ base64 정상 첨부(민감 무관 평문)는 디코딩돼도 미발동", () => {
+  const normal = Buffer.from("just a normal build log line here").toString("base64");
+  assert.equal(scanOutputForSensitive(b64Payloads, { body: normal }, DET), null);
+});
+
 // ── 통합: evaluateToolCall 판정 경로 (lineage 모드) ──────────────────────────
 const dir = mkdtempSync(path.join(tmpdir(), "taintguard-tier3-"));
 const configFile = path.join(dir, "tier3.json");
