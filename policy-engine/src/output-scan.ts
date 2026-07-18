@@ -36,6 +36,17 @@ export interface OutputScanFinding {
   sourceTool?: string;
   matchLen: number;
   valueHash: string;
+  /** 정규화 매칭으로 잡혔는가 (재포맷 세탁 — 대소문자·구분자 차이) */
+  normalized?: boolean;
+}
+
+/**
+ * 정규화 — 소문자 + 문자/숫자만 남긴다(구분자·구두점·공백 제거, 유니코드 letter 유지).
+ * 재포맷 세탁(대소문자·`=`·`-`·`_`·공백 변경, 예: "SECRET=Kx.." ↔ "SecretKx..")을 견디는 매칭용.
+ * min-length는 normalize 후 길이에 적용하므로 짧은 자연어값(예 "홍길동 VIP"→6자)은 자동 제외된다.
+ */
+function normalizeText(s: string): string {
+  return s.replace(/[^\p{L}\p{N}]/gu, "").toLowerCase();
 }
 
 function collectStrings(value: unknown, out: string[]): void {
@@ -110,13 +121,19 @@ export function scanOutputForSensitive(
   // 1. 포함검사: 원문 + 디코딩 평문을 haystack으로. min-length가 우연 매치를 막는다.
   if (baseStrings.length > 0) {
     const haystacks = [...baseStrings, ...decodedStrings];
+    const normHaystacks = haystacks.map(normalizeText); // 재포맷 세탁 매칭용 (RS08)
     for (const { toolName, payload } of sensitivePayloads) {
       const values: string[] = [];
       collectStrings(payload, values);
       for (const v of values) {
-        if (v.length < minLength) continue; // 짧은 값은 우연일치 방지로 제외
-        if (haystacks.some((h) => h.includes(v))) {
+        // (a) 정확 포함검사 — 무손실. 원문/base64 그대로 실린 경우.
+        if (v.length >= minLength && haystacks.some((h) => h.includes(v))) {
           return { kind: "containment", sourceTool: toolName, matchLen: v.length, valueHash: hashValue(v) };
+        }
+        // (b) 정규화 포함검사 — 대소문자·구분자 재포맷을 견딘다. min-length는 normalize 후 길이에.
+        const nv = normalizeText(v);
+        if (nv.length >= minLength && normHaystacks.some((h) => h.includes(nv))) {
+          return { kind: "containment", sourceTool: toolName, matchLen: nv.length, valueHash: hashValue(v), normalized: true };
         }
       }
     }

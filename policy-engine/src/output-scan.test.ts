@@ -116,6 +116,43 @@ test("★ base64 정상 첨부(민감 무관 평문)는 디코딩돼도 미발�
   assert.equal(scanOutputForSensitive(b64Payloads, { body: normal }, DET), null);
 });
 
+// ── 정규화 매칭 (재포맷 세탁) ────────────────────────────────────────────────
+test("normalize: 재포맷(대소문자·구분자) 세탁된 민감 탐지", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_env_file", payload: { v: "dbConnString_Prod_Xy7788" } }];
+  const f = scanOutputForSensitive(sp, { body: "db conn string PROD xy7788" }, DET);
+  assert.equal(f?.kind, "containment");
+  assert.equal(f?.normalized, true);
+});
+
+test("normalize: RS08식 재포맷 + base64 세탁 탐지 (SECRET=Kx.. ↔ SecretKx..)", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_env_file", payload: { v: "SECRET=Kx9021ffb" } }];
+  // "U2VjcmV0S3g5MDIxZmZi" = base64("SecretKx9021ffb")
+  const f = scanOutputForSensitive(sp, { body: "info U2VjcmV0S3g5MDIxZmZi end" }, DET);
+  assert.equal(f?.kind, "containment");
+  assert.equal(f?.normalized, true);
+});
+
+test("★ normalize 오탐 가드: 위험값 api.internal — 무관 정상 출력은 미발동", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_env_file", payload: { v: "API_BASE=https://api.internal" } }];
+  assert.equal(scanOutputForSensitive(sp, { body: "문서 webdoc_A83jd9 요약 보고" }, DET), null);
+});
+
+test("★ normalize 오탐 가드: 짧은 자연어 PII(홍길동 VIP, 정규화 6자<12)는 출력에 있어도 제외", () => {
+  const sp: SensitivePayload[] = [{ toolName: "get_db_credentials", payload: { v: "홍길동 VIP" } }];
+  assert.equal(scanOutputForSensitive(sp, { body: "고객 홍길동 VIP 등급 안내" }, DET), null);
+});
+
+test("한계(정직): 영숫자 junk 인터리브는 정규화로도 미탐", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "MYSECRETPASSWORDVALUE" } }];
+  assert.equal(scanOutputForSensitive(sp, { body: "MYSECRETxPASSWORDxVALUE" }, DET), null);
+});
+
+test("한계(정직): hex 인코딩은 미탐 (알파벳 변경 — 다음 단계)", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "MYSECRETPASSWORDVALUE" } }];
+  const hex = Buffer.from("MYSECRETPASSWORDVALUE").toString("hex");
+  assert.equal(scanOutputForSensitive(sp, { body: `data ${hex}` }, DET), null);
+});
+
 // ── 통합: evaluateToolCall 판정 경로 (lineage 모드) ──────────────────────────
 const dir = mkdtempSync(path.join(tmpdir(), "taintguard-tier3-"));
 const configFile = path.join(dir, "tier3.json");

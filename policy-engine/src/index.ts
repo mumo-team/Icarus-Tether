@@ -459,7 +459,9 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
         : "";
       const outputScanNote = outputScanFinding
         ? outputScanFinding.kind === "containment"
-          ? " (출력-스캔: 세션이 읽은 민감 원본이 나가는 값에 포함됨 — 세탁 유출 차단)"
+          ? outputScanFinding.normalized
+            ? " (출력-스캔: 세션이 읽은 민감 원본이 재포맷/인코딩돼 나가는 값에 포함됨 — 정규화 매칭으로 세탁 유출 차단)"
+            : " (출력-스캔: 세션이 읽은 민감 원본이 나가는 값에 포함됨 — 세탁 유출 차단)"
           : " (출력-스캔: 나가는 값에서 비밀 키 패턴 감지 — 유출 차단)"
         : "";
       const decision: PolicyDecision = {
