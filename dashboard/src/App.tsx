@@ -98,6 +98,12 @@ export default function App() {
     total: number;
     problems: { line: number; kind: string; detail: string }[];
   } | null>(null);
+  const [sanitization, setSanitization] = useState<{
+    method: string;
+    originalTags: string[];
+    resultTags: string[];
+    ok: boolean;
+  } | null>(null);
 
     useEffect(() => {
     let disposed = false; // 언마운트 후 재연결 타이머가 되살아나는 것 방지
@@ -160,6 +166,17 @@ export default function App() {
         if (data.type === "audit_integrity") {
           setAuditIntegrity({ ok: data.ok, total: data.total, problems: data.problems ?? [] });
         }
+        if (data.type === "sanitized") {
+          console.log(
+            `[대시보드] 정화됨(${data.method}): ${data.originalTags?.join(",")} → ${data.resultTags?.join(",") || "(없음)"}`
+          );
+          setSanitization({
+            method: data.method,
+            originalTags: data.originalTags ?? [],
+            resultTags: data.resultTags ?? [],
+            ok: data.ok,
+          });
+        }
       };
 
       // onerror 뒤에는 항상 onclose가 따라오므로, 재연결은 onclose 한 곳에서만 건다.
@@ -195,11 +212,11 @@ export default function App() {
     );
   }
 
-  function handleActionClick(action: UserAction) {
-    // 지금 실제로 배선된 건 승인 요청뿐. 정화(SANITIZE)는 아직 미구현.
+   function handleActionClick(action: UserAction) {
+    const ws = wsRef.current;
+    const wsOpen = ws && ws.readyState === WebSocket.OPEN;
     if (action.kind === "REQUEST_APPROVAL" && modalDecision?.approvalId) {
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      if (wsOpen) {
         // 승인 상태는 proxy 프로세스의 엔진 메모리에 있어 브라우저가 직접 못 부른다.
         // 웹소켓으로 보내면 proxy가 같은 프로세스에서 resolveApproval을 대신 호출한다.
         ws.send(
@@ -213,6 +230,21 @@ export default function App() {
         console.log("[대시보드] 승인 전송:", modalDecision.approvalId);
       } else {
         console.error("[대시보드] proxy 연결이 없어 승인을 보낼 수 없습니다");
+      }
+    } else if (action.kind === "SANITIZE" && modalDecision?.sessionId) {
+      // action.detail에 정화 방법(TOKENIZATION / STRUCTURED_EXTRACTION)이 들어있다.
+      // proxy가 attemptSanitization으로 세션 태그를 해제 → 재시도하면 통과된다.
+      if (wsOpen) {
+        ws.send(
+          JSON.stringify({
+            type: "sanitize",
+            sessionId: modalDecision.sessionId,
+            method: action.detail,
+          })
+        );
+        console.log("[대시보드] 정화 요청:", action.detail);
+      } else {
+        console.error("[대시보드] proxy 연결이 없어 정화를 요청할 수 없습니다");
       }
     } else {
       console.log("[대시보드] 아직 미배선 액션:", action.kind, action.label);
@@ -278,7 +310,7 @@ export default function App() {
         )}
       </section>
       <ApprovalQueue approvals={approvals} onDecide={handleDecide} />
-      <SanitizationCompareView />
+      <SanitizationCompareView sanitization={sanitization} />
       <TaintGraph />
       {modalDecision && (
         <TrifectaApprovalModal

@@ -16,8 +16,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { requestApproval, resolveApproval } from "@icarus-tether/policy-engine";
-import type { PolicyDecision, AuditLogEntry, ToolRiskTag } from "@icarus-tether/types";
+import { requestApproval, resolveApproval, attemptSanitization } from "@icarus-tether/policy-engine";
+import { SanitizationMethod, type PolicyDecision, type AuditLogEntry, type ToolRiskTag } from "@icarus-tether/types";
 
 const WS_PORT = 7331;
 
@@ -169,23 +169,51 @@ function handleDashboardMessage(text: string): void {
     sessionId?: string;
     approvalId?: string;
     resolvedBy?: string;
+    method?: string;
   };
-  if (msg.type !== "approve" && msg.type !== "reject") return;
-  if (!msg.sessionId || !msg.approvalId) return;
 
-  const approved = msg.type === "approve";
-  requestApproval(msg.sessionId, msg.approvalId); // OFFERED → PENDING
-  resolveApproval(msg.approvalId, approved, msg.resolvedBy ?? "dashboard");
-  console.error(`[bridge] 대시보드 ${approved ? "승인" : "거부"}  approvalId=${msg.approvalId}`);
+  // (1) 승인/거부 — HITL 오버라이드
+  if (msg.type === "approve" || msg.type === "reject") {
+    if (!msg.sessionId || !msg.approvalId) return;
+    const approved = msg.type === "approve";
+    requestApproval(msg.sessionId, msg.approvalId); // OFFERED → PENDING
+    resolveApproval(msg.approvalId, approved, msg.resolvedBy ?? "dashboard");
+    console.error(`[bridge] 대시보드 ${approved ? "승인" : "거부"}  approvalId=${msg.approvalId}`);
+    broadcastToDashboard({
+      type: "approval_resolved",
+      sessionId: msg.sessionId,
+      approvalId: msg.approvalId,
+      approved,
+      resolvedBy: msg.resolvedBy ?? "dashboard",
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
 
-  broadcastToDashboard({
-    type: "approval_resolved",
-    sessionId: msg.sessionId,
-    approvalId: msg.approvalId,
-    approved,
-    resolvedBy: msg.resolvedBy ?? "dashboard",
-    timestamp: new Date().toISOString(),
-  });
+  // (2) 정화 — 세션 오염 태그를 검증된 방법으로 해제한다.
+  // 승인(1회 통과)과 달리 태그 자체가 사라지므로, 재시도하면 트라이펙타가 미성립해 통과된다.
+  if (msg.type === "sanitize") {
+    if (!msg.sessionId || !msg.method) return;
+    if (msg.method !== SanitizationMethod.TOKENIZATION && msg.method !== SanitizationMethod.STRUCTURED_EXTRACTION) {
+      console.error(`[bridge] 알 수 없는 정화 방법: ${msg.method}`);
+      return;
+    }
+    const result = attemptSanitization(msg.sessionId, msg.method);
+    const ok = result.originalTags.length > result.resultTags.length; // 태그가 줄었으면 정화 성공
+    console.error(
+      `[bridge] 대시보드 정화(${msg.method})  ${result.originalTags.join(",")} → ${result.resultTags.join(",") || "(없음)"}`
+    );
+    broadcastToDashboard({
+      type: "sanitized",
+      sessionId: msg.sessionId,
+      method: msg.method,
+      originalTags: result.originalTags,
+      resultTags: result.resultTags,
+      ok,
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
 }
 
 /** 웹소켓 서버 기동. 포트가 물려 있으면 원인을 분명히 알리고 죽는다. */

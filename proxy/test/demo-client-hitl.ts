@@ -55,15 +55,18 @@ async function main() {
   }
 
   const pendingApprovals: { sessionId: string; approvalId: string }[] = [];
-  const approvalAcks = new Map<string, (approved: boolean) => void>();
-
+  // 차단이 해소되면(승인 또는 정화) 이 resolver가 불려 재시도로 넘어간다.
+  let resolveAction: ((how: string) => void) | null = null;
   bridge.on("message", (data) => {
     const msg = JSON.parse(data.toString());
     if (msg.type === "decision" && msg.allowed === false && msg.canOverride && msg.approvalId) {
       pendingApprovals.push({ sessionId: msg.sessionId, approvalId: msg.approvalId });
     }
     if (msg.type === "approval_resolved") {
-      approvalAcks.get(msg.approvalId)?.(msg.approved);
+      resolveAction?.(msg.approved ? "승인됨" : "거부됨");
+    }
+    if (msg.type === "sanitized") {
+      resolveAction?.(msg.ok ? `정화됨(${msg.method})` : "정화 실패");
     }
   });
 
@@ -120,11 +123,6 @@ async function main() {
     await new Promise((res) => setTimeout(res, 50));
   }
   const pending = pendingApprovals[pendingApprovals.length - 1];
-  if (!pending) {
-    console.error("[demo] ⚠ approvalId를 못 받았습니다 — 설정의 hitlPolicy가 weak-only인지 확인하세요.");
-    await cleanup();
-  }
-
   if (AUTO_APPROVE) {
     // 자동 모드(test:bridge): 사람 대신 여기서 승인 메시지를 보내 브리지 왕복을 검증한다.
     console.error(`[demo] 🤖 자동 승인 전송 — approvalId=${pending.approvalId}\n`);
@@ -138,21 +136,22 @@ async function main() {
     );
   } else {
     console.error(
-      `[demo] ⏳ 대시보드 모달에서 "관리자 승인 받고 보내기"를 눌러주세요\n` +
+      `[demo] ⏳ 대시보드 모달에서 버튼을 눌러주세요 (승인 또는 정화)\n` +
         `       approvalId=${pending.approvalId} (최대 ${APPROVAL_TIMEOUT_MS / 1000}초)\n`
     );
   }
-  // 승인 처리 완료(approval_resolved)를 받은 뒤 재시도해야 순서가 맞는다 —
-  // WS와 stdio는 별개 채널이라 도착 순서가 보장되지 않는다.
-  const approved = await new Promise<boolean | null>((res) => {
-    approvalAcks.set(pending.approvalId, (ok) => res(ok));
+  // 차단 해소 신호(approval_resolved 또는 sanitized) 중 먼저 오는 걸 기다렸다 재시도한다.
+  // WS와 stdio는 별개 채널이라, 신호를 받은 뒤 재시도해야 순서가 맞는다.
+  const how = await new Promise<string | null>((res) => {
+    resolveAction = (h) => res(h);
     setTimeout(() => res(null), AUTO_APPROVE ? 3_000 : APPROVAL_TIMEOUT_MS);
   });
-  if (approved === null) {
-    console.error("[demo] ⌛ 시간 초과 — 승인 없이 재시도합니다 (차단 유지가 정상).\n");
+  if (how === null) {
+    console.error("[demo] ⌛ 시간 초과 — 아무 조치 없이 재시도합니다 (차단 유지가 정상).\n");
   } else {
-    console.error(`[demo] ${approved ? "✅ 승인됨" : "🚫 거부됨"} — 재시도합니다.\n`);
+    console.error(`[demo] ✅ ${how} — 재시도합니다.\n`);
   }
+ 
 
   // --- 6) 같은 호출 재시도 → 승인이 있으면 1회만 통과 ---
   await pace();
