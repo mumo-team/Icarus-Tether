@@ -5,3 +5,8 @@ dist/
 .env
 .DS_Store
 *.tsbuildinfo
+
+# TLC ���İ��� ������
+policy-engine/formal/*.out
+policy-engine/formal/states/
+policy-engine/formal/*_TTrace_*

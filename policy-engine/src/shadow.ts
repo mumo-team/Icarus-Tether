@@ -12,7 +12,14 @@
  */
 
 import { SinkClass, ToolRiskTag, type ToolCallContext } from "@icarus-tether/types";
-import { getTaintNode, previewParentLinks, type LinkMethod } from "./lineage.js";
+import {
+  getTaintNode,
+  getTombstoneTags,
+  previewParentLinks,
+  sessionHasLiveTag,
+  type LinkMethod,
+} from "./lineage.js";
+import { containsVaultOriginal } from "./sanitization.js";
 
 // ---------------------------------------------------------------------------
 // 로그 구조 (나중에 대시보드 C 파트로 그대로 내보낼 수 있는 형태)
@@ -75,8 +82,14 @@ export function collectLineageEvidence(ctx: ToolCallContext): LineageEvidence {
   const { linkMethod, parentLinks } = previewParentLinks(ctx.sessionId, ctx.args);
   const nodes = parentLinks.flatMap((link) => {
     const node = getTaintNode(ctx.sessionId, link.nodeId);
-    return node
-      ? [{ nodeId: node.id, toolName: node.toolName, tags: [...node.tags], weak: link.weak }]
+    if (node) {
+      return [{ nodeId: node.id, toolName: node.toolName, tags: [...node.tags], weak: link.weak }];
+    }
+    // 재오염된 묘비도 판정 근거다 (교환성 수정 ①) — 깨끗한 묘비는 기존대로
+    // 태그 무기여라 제외한다 (evidence·지문 형태를 기존과 동일하게 유지).
+    const tombTags = getTombstoneTags(ctx.sessionId, link.nodeId);
+    return tombTags !== undefined && tombTags.size > 0
+      ? [{ nodeId: link.nodeId, toolName: "(pruned)", tags: [...tombTags], weak: link.weak }]
       : [];
   });
   const unionTags = new Set(nodes.flatMap((n) => n.tags));
@@ -103,10 +116,16 @@ export function runShadowEvaluation(
       // 그 부모들의 태그 합집합이 트라이펙타를 이루며 OUTBOUND_SINK로 나가면 차단.
       const { linkMethod, nodes, unionTags } = collectLineageEvidence(ctx);
 
+      // ★ 실제 판정부(computeLineageDecision)와 동일한 비대칭 규칙으로 예측:
+      //   민감(S)은 값-계보(또는 정화 전 원본 재전송)로, 비신뢰(U)는 세션-존재로.
+      //   (argTags는 여기서 unionTags에 포함되지 않으므로 값-축 U는 unionTags만으로 본다.)
+      const valueSensitive =
+        unionTags.has(ToolRiskTag.SENSITIVE) || containsVaultOriginal(ctx.args);
       const realBlocked =
         sinkClass === SinkClass.OUTBOUND_SINK &&
-        unionTags.has(ToolRiskTag.SENSITIVE) &&
-        unionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN);
+        valueSensitive &&
+        (unionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) ||
+          sessionHasLiveTag(ctx.sessionId, ToolRiskTag.UNTRUSTED_ORIGIN));
       const realAllowed = !realBlocked;
       const match = realAllowed === toyAllowed;
 
