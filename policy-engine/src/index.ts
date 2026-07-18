@@ -109,12 +109,16 @@ function classifySink(toolName: string): SinkClass {
   const cfg = getPolicyConfig();
   const explicit = cfg.sinks.get(toolName);
   if (explicit) return explicit;
-  if (isClassifiedTool(cfg, toolName)) return SinkClass.READ; // 소스로는 알지만 싱크 미등록 → 읽기
 
-  // 원칙 4 default-deny: 미분류 도구는 외부 유출 능력이 있다고 가정
+  // ★ 원칙 4(모르면 의심 = default-deny)를 싱크 축에도 적용 (fail-open #2 수정):
+  // 싱크 등급이 명시되지 않았으면 "외부 유출 능력이 없다는 보장"이 없다. 소스로
+  // 등록된 도구라도(웹 fetch처럼 GET URL로 유출 가능한 이중능력일 수 있으므로)
+  // READ로 강등하지 않는다 — 이전 구현은 소스면 무조건 READ라 소스 도구를 통한
+  // 유출이 트라이펙타 검사를 통째로 건너뛰었다(미탐). read-only임을 확신하는
+  // 소스는 설정의 sinks에 "READ"(또는 "WRITE_INTERNAL")로 명시할 것.
   if (cfg.unknownToolPolicy === "warn") {
     console.warn(
-      `[policy-engine] 미분류 도구 "${toolName}" — unknownToolPolicy=warn이라 READ로 취급 (차단 안 함)`
+      `[policy-engine] 싱크 미선언 도구 "${toolName}" — unknownToolPolicy=warn이라 READ로 취급 (차단 안 함)`
     );
     return SinkClass.READ;
   }

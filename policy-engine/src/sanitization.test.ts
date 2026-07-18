@@ -101,7 +101,9 @@ test("loadToolRegistry: 기본 config/tool-registry.json을 읽는다", () => {
   assert.ok(registry.sensitiveSources.has("query_customer_db"));
   assert.ok(registry.untrustedSources.has("fetch_web_page"));
   assert.equal(registry.sinks.get("send_email"), SinkClass.OUTBOUND_SINK);
-  assert.equal(registry.sinks.get("query_customer_db"), undefined); // 미등록 → READ 취급
+  // fail-open #2 수정: read-only 소스는 이제 sinks에 READ로 명시해야 한다
+  // (미등록이면 싱크 축 default-deny로 OUTBOUND 강등되므로). 명시된 READ를 확인.
+  assert.equal(registry.sinks.get("query_customer_db"), SinkClass.READ);
 });
 
 test("loadToolRegistry: 커스텀 경로의 설정 파일을 읽는다", () => {
