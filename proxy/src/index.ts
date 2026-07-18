@@ -15,7 +15,7 @@ import {
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { startDashboardBridge, stopDashboardBridge, broadcastDecision, recordAudit, broadcastAuditIntegrity } from "./dashboard-bridge.js";
+import { startDashboardBridge, stopDashboardBridge, broadcastDecision, recordAudit, broadcastAuditIntegrity, broadcastLineage } from "./dashboard-bridge.js";
 import { checkInjection } from "./injection.js";
 import { z } from "zod";
 // 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
@@ -142,6 +142,7 @@ async function main() {
     });
 
     broadcastDecision(sessionId, name, decision, ctx.timestamp);
+    broadcastLineage(sessionId); // 판정 직후 현재 계보 스냅샷 방송 → TaintGraph 실시간 갱신
 
     if (!decision.allowed) {
       console.error(`[proxy] 차단  ${name}  reason=${decision.reason}`);

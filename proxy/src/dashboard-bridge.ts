@@ -16,7 +16,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { requestApproval, resolveApproval, attemptSanitization } from "@icarus-tether/policy-engine";
+import { requestApproval, resolveApproval, attemptSanitization, getSessionLineage } from "@icarus-tether/policy-engine";
 import { SanitizationMethod, type PolicyDecision, type AuditLogEntry, type ToolRiskTag } from "@icarus-tether/types";
 
 const WS_PORT = 7331;
@@ -161,6 +161,33 @@ export function broadcastDecision(
     approvalId: decision.approvalId,
     timestamp,
   });
+}
+
+/**
+ * 현재 세션의 오염 계보 전체를 대시보드에 방송한다 — TaintGraph 실데이터 소스.
+ * TaintNode의 Set/Map은 JSON 직렬화가 안 되므로 그래프에 필요한 것만 배열로 편다:
+ * 노드 id·도구·유효태그, 그리고 부모 연결(어느 노드에서·어떤 방법으로·신뢰도).
+ * 판정 직후 호출하면 노드가 하나씩 자라는 게 화면에 실시간으로 보인다.
+ */
+export function broadcastLineage(sessionId: string): void {
+  const lineage = getSessionLineage(sessionId);
+  const nodes = [...lineage.values()].map((n) => ({
+    id: n.id,
+    toolName: n.toolName,
+    tags: [...n.tags],
+    parents: n.parentLinks.map((p) => ({
+      nodeId: p.nodeId,
+      method: p.method,
+      weak: p.weak,
+    })),
+  }));
+  broadcastToDashboard({
+    type: "lineage",
+    sessionId,
+    nodes,
+    timestamp: new Date().toISOString(),
+  });
+  console.error(`[bridge] 계보 방송  노드 ${nodes.length}개`);
 }
 
 function handleDashboardMessage(text: string): void {

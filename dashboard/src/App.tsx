@@ -2,10 +2,12 @@ import { useState,useEffect, useRef } from "react";
 import type { AuditLogEntry, ApprovalRequest, PolicyDecision, UserAction } from "@icarus-tether/types";
 import MetricCards from "./components/MetricCards";
 import TrifectaWarningBanner from "./components/TrifectaWarningBanner";
+import ThreatFusionBanner from "./components/ThreatFusionBanner";
 import EventLogTimeline from "./components/EventLogTimeline";
 import ApprovalQueue from "./components/ApprovalQueue";
 import SanitizationCompareView from "./components/SanitizationCompareView";
-import TaintGraph from "./components/TaintGraph";
+import TaintGraph, { type LineageNode } from "./components/TaintGraph";
+import ForensicReplay from "./components/ForensicReplay";
 import TrifectaApprovalModal from "./components/TrifectaApprovalModal";
 import AuditTimeline, { type HitlAuditEntry } from "./components/AuditTimeline";
 
@@ -61,6 +63,7 @@ export default function App() {
     resultTags: string[];
     ok: boolean;
   } | null>(null);
+  const [snapshots, setSnapshots] = useState<LineageNode[][]>([]);
 
     useEffect(() => {
     let disposed = false; // 언마운트 후 재연결 타이머가 되살아나는 것 방지
@@ -133,6 +136,9 @@ export default function App() {
             resultTags: data.resultTags ?? [],
             ok: data.ok,
           });
+       }
+        if (data.type === "lineage") {
+          setSnapshots((prev) => [...prev, data.nodes ?? []]);
         }
       };
 
@@ -213,11 +219,12 @@ export default function App() {
     <div style={{ fontFamily: "sans-serif", padding: "24px" }}>
       <h1>Icarus-Tether 대시보드</h1>
        <button onClick={() => setModalDecision(SAMPLE_BLOCKED_DECISION)}>
-        ⚠️ 트라이펙타 경고 데모 보기 (샘플)
+         트라이펙타 경고 데모 보기 (샘플)
       </button>
       <p style={{ color: wsConnected ? "#2e7d32" : "#d32f2f", fontWeight: "bold" }}>
-        {wsConnected ? "🟢 proxy 연결됨" : "🔴 proxy 대기 중 — 데모를 실행하면 자동 연결됩니다"}
+        {wsConnected ? "[연결됨] proxy 연결됨" : "[대기] proxy 대기 중 — 데모를 실행하면 자동 연결됩니다"}
       </p>
+      <ThreatFusionBanner logs={logs} injectionChecks={injectionChecks} />
       <TrifectaWarningBanner logs={logs} />
       <MetricCards logs={logs} approvals={approvals} />
       <EventLogTimeline logs={logs} />
@@ -268,7 +275,7 @@ export default function App() {
       </section>
       <ApprovalQueue approvals={approvals} onDecide={handleDecide} />
       <SanitizationCompareView sanitization={sanitization} />
-      <TaintGraph />
+      <ForensicReplay snapshots={snapshots} />
       {modalDecision && (
         <TrifectaApprovalModal
           decision={modalDecision}
