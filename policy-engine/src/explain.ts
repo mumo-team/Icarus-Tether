@@ -158,6 +158,88 @@ export function buildUserExplanation(input: ExplainInput): UserFacingExplanation
   return { summary: SUMMARY_BLOCKED, reason, risks, actions };
 }
 
+// ---------------------------------------------------------------------------
+// 파괴적 액션 게이트 설명 — 유출 템플릿과 별개 (위험의 성격이 다르다:
+// "정보가 새 나감"이 아니라 "외부 내용이 되돌리기 어려운 작업을 유발했을 수 있음")
+// ---------------------------------------------------------------------------
+
+const SUMMARY_DESTRUCTIVE = "외부에서 온 내용을 읽은 뒤의 되돌리기 어려운 작업이라 잠시 멈췄어요.";
+
+const RISK_DESTRUCTIVE =
+  "외부에서 온 내용에 숨은 지시가 있으면, 삭제 같은 되돌리기 어려운 작업이 의도치 않게 실행될 수 있어요.";
+
+export interface DestructiveExplainInput {
+  /** 세션의 살아있는 비신뢰 보유자 스냅샷 (lineage.ts collectLiveTagHolders) */
+  holders: Array<{ nodeId: string; toolName: string; tags: ToolRiskTag[] }>;
+  canOverride: boolean;
+  approvalId?: string;
+}
+
+/** 파괴 게이트 차단의 사람 말 번역 — buildUserExplanation과 동일한 노출 규칙. */
+export function buildDestructiveExplanation(input: DestructiveExplainInput): UserFacingExplanation {
+  const { holders, canOverride, approvalId } = input;
+
+  // 노드 id는 노출하지 않고 도구 라벨만. 묘비("(pruned)")는 사람 말로 바꾼다.
+  const labels = [...new Set(holders.map((h) => h.toolName))].map((t) =>
+    t === "(pruned)" ? "이전에 정리된 기록" : toolLabelOf(t)
+  );
+  const sourceDesc = labels.map((l) => `「${l}」`).join(", ");
+  const reason =
+    labels.length > 0
+      ? `이 작업 전에 ${sourceDesc}(으)로 외부 내용을 읽었고, 그 내용이 이 작업을 하기로 한 결정에 영향을 줬을 수 있어요.`
+      : "이 작업의 요청에 외부에서 온 내용이 직접 실려 있어요.";
+
+  const actions: UserAction[] = [];
+  actions.push(
+    canOverride && approvalId
+      ? {
+          kind: "REQUEST_APPROVAL",
+          label: "확인하고 진행하기",
+          description:
+            "직접 시킨 작업이 맞다면, 관리자가 확인 후 이번 한 번만 진행을 승인할 수 있습니다.",
+          available: true,
+          detail: approvalId,
+        }
+      : {
+          kind: "REQUEST_APPROVAL",
+          label: "확인하고 진행하기",
+          description:
+            "지금 정책에서는 승인으로 열 수 없어요. 외부에서 온 내용을 정리한 뒤 다시 시도해 주세요.",
+          available: false,
+        }
+  );
+  // 정화(안전 항목 추출)로 비신뢰가 해소되면 재시도 시 통과된다 — available은
+  // 정화 게이트의 설정 기준 선행조건(canExtractStructured)을 따른다 (기존 관례).
+  actions.push(
+    canExtractStructured()
+      ? {
+          kind: "SANITIZE",
+          label: "외부 내용에서 안전한 항목만 추려 정리하기",
+          description:
+            "외부에서 온 내용 전체 대신 정해진 형식의 값만 남기면, 이 작업을 다시 시도할 때 통과할 수 있어요.",
+          available: true,
+          detail: SanitizationMethod.STRUCTURED_EXTRACTION,
+        }
+      : {
+          kind: "SANITIZE",
+          label: "외부 내용에서 안전한 항목만 추려 정리하기",
+          description: "지금 설정에는 안전한 항목을 정하는 형식이 없어서 이 방법을 쓸 수 없어요.",
+          available: false,
+        }
+  );
+  actions.push({
+    kind: "INSPECT_SOURCE",
+    label: "문제가 된 데이터 출처 확인하기",
+    description:
+      labels.length > 0
+        ? `이 작업 전에 ${sourceDesc}의 결과를 읽었어요.`
+        : "이 요청의 데이터 흐름을 확인할 수 있어요.",
+    available: true,
+  });
+
+  return { summary: SUMMARY_DESTRUCTIVE, reason, risks: [RISK_DESTRUCTIVE], actions };
+}
+
 /** fail-safe 차단용 — 계산 실패라 근거(evidence)가 없을 때의 단순 설명 */
 export function buildFailSafeExplanation(): UserFacingExplanation {
   return {

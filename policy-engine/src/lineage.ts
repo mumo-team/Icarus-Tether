@@ -196,6 +196,38 @@ export function sessionHasLiveTag(sessionId: string, tag: ToolRiskTag): boolean 
   return false;
 }
 
+/**
+ * 지정 태그를 "지금도 살아있게" 지닌 보유자 전체의 읽기 전용 스냅샷 —
+ * sessionHasLiveTag와 정확히 같은 범위(live 노드 + 묘비 잔존 태그)를 목록으로 편다.
+ * 즉 `collectLiveTagHolders(s, t).length > 0 ⇔ sessionHasLiveTag(s, t)`.
+ *
+ * 용도: 파괴 게이트(index.ts computeDestructiveDecision)의 HITL 승인 지문 입력.
+ * "승인은 그 U-그림에만 유효"의 '그림'이 바로 이 스냅샷이다 — 승인~소비 사이에
+ * 보유자가 추가(새 비신뢰 read)·제거(정화)되면 지문이 달라져 낡은 승인이 무효화된다
+ * (TaintDestructiveHITL.tla ApprovalFreshness, 위반 0). 그래프는 절대 변형하지 않는다.
+ * 묘비의 toolName은 "(pruned)" — shadow.ts collectLineageEvidence 관례와 동일.
+ */
+export function collectLiveTagHolders(
+  sessionId: string,
+  tag: ToolRiskTag
+): Array<{ nodeId: string; toolName: string; tags: ToolRiskTag[] }> {
+  const out: Array<{ nodeId: string; toolName: string; tags: ToolRiskTag[] }> = [];
+  const graph = lineageStore.get(sessionId);
+  if (graph) {
+    for (const node of graph.values()) {
+      if (node.tags.has(tag)) {
+        out.push({ nodeId: node.id, toolName: node.toolName, tags: [...node.tags] });
+      }
+    }
+  }
+  for (const [nodeId, tomb] of tombstoneStore.get(sessionId) ?? []) {
+    if (tomb.tags.has(tag)) {
+      out.push({ nodeId, toolName: "(pruned)", tags: [...tomb.tags] });
+    }
+  }
+  return out;
+}
+
 export function getTaintNode(sessionId: string, nodeId: string): TaintNode | undefined {
   return lineageStore.get(sessionId)?.get(nodeId);
 }

@@ -65,12 +65,24 @@ export function evaluateOverridability(
 /** SUPERSEDED: 제안 후 계보가 달라져 새 제안으로 대체됨 — 낡은 그림의 승인 차단 */
 type OfferStatus = "OFFERED" | "PENDING" | "APPROVED" | "REJECTED" | "SUPERSEDED";
 
+/**
+ * ★ 게이트 판별자 — 승인이 "어느 게이트의 차단"에 대한 것인지.
+ * 지문(fingerprintOf)에 포함되어 두 게이트의 offer 공간이 서로소가 된다:
+ * 같은 호출(sessionId|toolName|args)에 유출·파괴 offer가 공존해도 서로의
+ * 제안을 SUPERSEDED로 봉인하거나 승인을 지문 불일치로 소각(OVERRIDE_STALE)
+ * 하는 교차 간섭이 구조적으로 불가능하다
+ * (TaintDestructiveHITL.tla GateIsolation — 공유 키 변형은 4스텝 반례).
+ */
+export type OverrideGate = "exfil" | "destructive";
+
 interface OverrideOffer {
   approvalId: string;
   sessionId: string;
   toolName: string;
   args: Record<string, unknown>;
-  /** 승인은 "그 호출"에만 유효 — sessionId|toolName|args의 결정론적 지문 */
+  /** 이 제안을 발급한 게이트 (지문에도 포함 — 감사·디버깅용 중복 보관) */
+  gate: OverrideGate;
+  /** 승인은 "그 게이트의 그 호출"에만 유효 — gate|sessionId|toolName|args의 결정론적 지문 */
   fingerprint: string;
   /**
    * ★ 승인은 "그 계보 상태"에만 유효 — 제안 시점 evidence의 결정론적 지문
@@ -89,9 +101,15 @@ interface OverrideOffer {
 
 const offers = new Map<string, OverrideOffer>();
 
-function fingerprintOf(sessionId: string, toolName: string, args: Record<string, unknown>): string {
+function fingerprintOf(
+  gate: OverrideGate,
+  sessionId: string,
+  toolName: string,
+  args: Record<string, unknown>
+): string {
+  // gate가 지문의 첫 성분 — 두 게이트의 offer 공간을 서로소로 만드는 바로 그 지점.
   return createHash("sha256")
-    .update(`${sessionId}|${toolName}|${JSON.stringify(args)}`)
+    .update(`${gate}|${sessionId}|${toolName}|${JSON.stringify(args)}`)
     .digest("hex")
     .slice(0, 32);
 }
@@ -167,11 +185,19 @@ export function getOverrideAuditLog(sessionId?: string): ReadonlyArray<OverrideA
  * 자체를 차단 (superseded id의 requestApproval/resolveApproval은 상태 검사에서
  * 예외 = fail-closed).
  *
- * ★팀 공지(시그니처 변경): evidence 인자 추가 — 제안 시점 계보 지문 저장용.
- * 호출처는 index.ts computeLineageDecision 한 곳.
+ * ★팀 공지(시그니처 변경 2회차): evidence 인자(제안 시점 계보 지문 저장용)에 이어
+ * gate 인자 추가(기본 "exfil" — 기존 호출부 무변경). 호출처는 게이트별 한 곳:
+ * 유출은 index.ts computeLineageDecision, 파괴는 index.ts computeDestructiveDecision.
+ * 파괴 게이트의 evidence는 값-계보가 아니라 "살아있는 U-보유자 스냅샷"
+ * (collectLiveTagHolders)을 LineageEvidence 모양으로 접은 것 — 같은
+ * lineageFingerprintOf에 태워 같은 TOCTOU 수명주기를 얻는다.
  */
-export function offerOverride(ctx: ToolCallContext, evidence: LineageEvidence): string {
-  const fingerprint = fingerprintOf(ctx.sessionId, ctx.toolName, ctx.args);
+export function offerOverride(
+  ctx: ToolCallContext,
+  evidence: LineageEvidence,
+  gate: OverrideGate = "exfil"
+): string {
+  const fingerprint = fingerprintOf(gate, ctx.sessionId, ctx.toolName, ctx.args);
   const lineageFingerprint = lineageFingerprintOf(evidence, ctx.argTags);
   for (const offer of offers.values()) {
     if (offer.fingerprint === fingerprint && (offer.status === "OFFERED" || offer.status === "PENDING")) {
@@ -187,6 +213,7 @@ export function offerOverride(ctx: ToolCallContext, evidence: LineageEvidence): 
     sessionId: ctx.sessionId,
     toolName: ctx.toolName,
     args: ctx.args,
+    gate,
     fingerprint,
     lineageFingerprint,
     status: "OFFERED",
@@ -247,15 +274,18 @@ export function resolveApproval(
  * fail-safe: 지문 재계산이 예외를 던지면 그대로 전파 —
  * computeLineageDecision의 try/catch가 차단으로 흡수한다 (조용한 통과 없음).
  *
- * ★팀 공지(시그니처 변경): evidence 인자 추가 — 소비 시점 계보 지문 재계산용.
- * 호출처는 index.ts computeLineageDecision 한 곳.
- * index.ts 밖으로 re-export하지 않는다 — 소비 경로는 판정 하나뿐.
+ * ★팀 공지(시그니처 변경 2회차): evidence 인자(소비 시점 계보 지문 재계산용)에 이어
+ * gate 인자 추가(기본 "exfil" — 기존 호출부 무변경). 지문에 gate가 포함되므로
+ * 이 스캔은 자기 게이트의 offer만 본다 — 상대 게이트의 정당한 승인을 지문
+ * 불일치로 소각하는 교차 간섭이 구조적으로 불가능 (GateIsolation).
+ * 호출처는 게이트별 판정 한 곳씩. index.ts 밖으로 re-export하지 않는다.
  */
 export function consumeApprovalIfMatching(
   ctx: ToolCallContext,
-  evidence: LineageEvidence
+  evidence: LineageEvidence,
+  gate: OverrideGate = "exfil"
 ): { approvalId: string; resolvedBy?: string } | null {
-  const fingerprint = fingerprintOf(ctx.sessionId, ctx.toolName, ctx.args);
+  const fingerprint = fingerprintOf(gate, ctx.sessionId, ctx.toolName, ctx.args);
   const lineageFingerprint = lineageFingerprintOf(evidence, ctx.argTags);
   for (const offer of offers.values()) {
     if (offer.fingerprint === fingerprint && offer.status === "APPROVED" && !offer.used) {
@@ -270,6 +300,36 @@ export function consumeApprovalIfMatching(
     }
   }
   return null;
+}
+
+/**
+ * 무변형 조회 — "지금 소비하면 성공할 승인이 있는가"만 답한다. 상태를 절대 바꾸지
+ * 않는다(stale 마킹·감사 기록 없음).
+ *
+ * 용도(승인 소각 방지 프로토콜, index.ts evaluateToolCall lineage 분기): 파괴
+ * 게이트가 차단 예정일 때 소비 가능한 파괴 승인이 없으면 유출 판정(승인 소비 포함)을
+ * 아예 돌리지 않는다 — 유출 승인이 "통과했는데 파괴에 막혀 실행 없이 소각"되는
+ * 것을 막는다. 동기 단일 스레드라 peek↔consume 사이에 상태가 변하지 않으므로
+ * peek=true면 이어지는 consume은 반드시 같은 offer를 소비한다.
+ */
+export function peekApprovalMatches(
+  ctx: ToolCallContext,
+  evidence: LineageEvidence,
+  gate: OverrideGate
+): boolean {
+  const fingerprint = fingerprintOf(gate, ctx.sessionId, ctx.toolName, ctx.args);
+  const lineageFingerprint = lineageFingerprintOf(evidence, ctx.argTags);
+  for (const offer of offers.values()) {
+    if (
+      offer.fingerprint === fingerprint &&
+      offer.status === "APPROVED" &&
+      !offer.used &&
+      offer.lineageFingerprint === lineageFingerprint
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function toApprovalRequest(offer: OverrideOffer): ApprovalRequest {

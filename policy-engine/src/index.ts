@@ -35,12 +35,33 @@ import {
   type OutputScanFinding,
   type SensitivePayload,
 } from "./output-scan.js";
-import { createTaintNode, declassifyNodeTag, sessionHasLiveTag, type TaintNode } from "./lineage.js";
-import { collectLineageEvidence, runShadowEvaluation } from "./shadow.js";
-import { consumeApprovalIfMatching, evaluateOverridability, offerOverride } from "./hitl.js";
-import { buildFailSafeExplanation, buildUserExplanation } from "./explain.js";
+import {
+  collectLiveTagHolders,
+  createTaintNode,
+  declassifyNodeTag,
+  sessionHasLiveTag,
+  type TaintNode,
+} from "./lineage.js";
+import { collectLineageEvidence, runShadowEvaluation, type LineageEvidence } from "./shadow.js";
+import {
+  consumeApprovalIfMatching,
+  evaluateOverridability,
+  offerOverride,
+  peekApprovalMatches,
+} from "./hitl.js";
+import {
+  buildDestructiveExplanation,
+  buildFailSafeExplanation,
+  buildUserExplanation,
+} from "./explain.js";
 
-export { buildUserExplanation, buildFailSafeExplanation, type ExplainInput } from "./explain.js";
+export {
+  buildUserExplanation,
+  buildFailSafeExplanation,
+  buildDestructiveExplanation,
+  type ExplainInput,
+  type DestructiveExplainInput,
+} from "./explain.js";
 
 export {
   requestApproval,
@@ -59,6 +80,7 @@ export {
   type JudgmentMode,
   type HitlPolicy,
   type PruningPolicy,
+  type DestructivePolicy,
   type SecretDetectionConfig,
   type ExtractionSchemaConfig,
   type FieldSpec,
@@ -89,6 +111,7 @@ export {
 } from "./shadow.js";
 export {
   addNodeTags,
+  collectLiveTagHolders,
   getSessionLineage,
   getTaintNode,
   getTombstoneTags,
@@ -104,12 +127,17 @@ export {
 // 도구 분류 — 값은 설정(config/*.json)에서, 코드는 분류 로직만
 // ---------------------------------------------------------------------------
 
-/** 설정의 어느 목록에든 등장하는(= 우리가 성질을 아는) 도구인가 */
+/** 설정의 어느 목록에든 등장하는(= 우리가 성질을 아는) 도구인가.
+ *  ★ destructiveTools도 포함 (자기-오염 수정): 파괴 목록에만 등록된 도구를
+ *  미분류 취급하면 그 결과에 UNTRUSTED_ORIGIN이 자동 부착돼(원칙 4 default-deny),
+ *  사용자 직접 지시 삭제 1회만으로 세션이 U-오염되어 두 번째 직접 삭제가 파괴
+ *  게이트에 차단된다 — "사용자가 시킨 삭제는 통과" 요구사항의 위반. */
 function isClassifiedTool(cfg: PolicyConfig, toolName: string): boolean {
   return (
     cfg.sensitiveSourceTools.has(toolName) ||
     cfg.untrustedSourceTools.has(toolName) ||
-    cfg.sinks.has(toolName)
+    cfg.sinks.has(toolName) ||
+    cfg.destructiveTools.has(toolName)
   );
 }
 
@@ -524,32 +552,211 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
   }
 }
 
-/** 도구 호출 시도 시 트라이펙타 여부를 판정한다. (Image 3 오른쪽 흐름) */
+// ---------------------------------------------------------------------------
+// 파괴적 액션 게이트 — 유출과 직교인 additive 축: "삭제 자체"가 아니라
+// "비신뢰가 유발한 파괴"만 차단한다. 의미론의 선행 확정본:
+// formal/TaintDestructiveHITL.tla (DestructiveSafety·ApprovalFreshness·
+// GateIsolation, TLC 위반 0).
+// ---------------------------------------------------------------------------
+
+interface DestructiveGateState {
+  holders: Array<{ nodeId: string; toolName: string; tags: ToolRiskTag[] }>;
+  /** HITL 승인 지문 입력 — "승인은 이 U-그림에만 유효" (ApprovalFreshness) */
+  evidence: LineageEvidence;
+}
+
+/**
+ * 게이트 발동 여부 계산 (읽기 전용).
+ * null = 게이트 무관(미등록 도구/policy off) 또는 통과(살아있는 U 없음).
+ *
+ * U 판정은 세션-존재 축만 쓴다 — 비대칭 위협 모델(computeLineageDecision)의 U축과
+ * 동일 근거: 인젝션이 유발한 삭제는 호출 args에 비신뢰 바이트를 싣지 않는 경우가
+ * 대부분이라 값-계보로는 못 잡는다. 사용자 채팅 지시는 오염 그래프에 들어오지
+ * 않으므로(노드는 도구 결과에서만 생성) "사용자 직접 지시 삭제"는 구조적으로
+ * U가 없어 통과한다. 정화(구조화 추출)가 U를 해제하면 다시 통과된다.
+ *  - lineage 모드: 살아있는 U-보유자(live 노드 + 묘비 잔존) 존재
+ *  - session/shadow 모드: 세션 boolean 태그 (toy 판정과 같은 소스)
+ *  - argTags의 U는 모드 무관 발동 (프록시가 확정 전파한 증거)
+ */
+function destructiveGateState(ctx: ToolCallContext): DestructiveGateState | null {
+  const cfg = getPolicyConfig();
+  if (cfg.destructivePolicy === "off" || !cfg.destructiveTools.has(ctx.toolName)) return null;
+
+  const holders = collectLiveTagHolders(ctx.sessionId, ToolRiskTag.UNTRUSTED_ORIGIN);
+  const sessionUntrusted =
+    cfg.judgmentMode === "lineage"
+      ? holders.length > 0 // sessionHasLiveTag와 동일 범위 — holders가 곧 그 목록
+      : getOrCreateSession(ctx.sessionId).tags.includes(ToolRiskTag.UNTRUSTED_ORIGIN);
+  if (!sessionUntrusted && !ctx.argTags.includes(ToolRiskTag.UNTRUSTED_ORIGIN)) return null;
+
+  // 스냅샷을 LineageEvidence 모양으로 접어 기존 lineageFingerprintOf에 태운다 —
+  // 검증된 TOCTOU 수명주기의 동형 재사용. weak:true 균일 — 세션-존재 판정에는
+  // 연결 신뢰도 개념이 없다 (결정론 상수라 지문 결정성에 영향 없음).
+  const evidence: LineageEvidence = {
+    linkMethod: "NONE",
+    nodes: holders.map((h) => ({ nodeId: h.nodeId, toolName: h.toolName, tags: h.tags, weak: true })),
+    unionTags: new Set(holders.flatMap((h) => h.tags)),
+  };
+  return { holders, evidence };
+}
+
+/** 파괴 차단 결정 조립 — "hitl"이면 낡은 승인 정리 후 제안 발급(항상 오버라이드 가능). */
+function destructiveBlockDecision(ctx: ToolCallContext, gate: DestructiveGateState): PolicyDecision {
+  const policy = getPolicyConfig().destructivePolicy;
+  const holderDesc = gate.holders.map((h) => `${h.nodeId}(${h.toolName})`).join(", ");
+  const decision: PolicyDecision = {
+    sessionId: ctx.sessionId,
+    toolName: ctx.toolName,
+    allowed: false,
+    reason:
+      `파괴적 액션 차단(비신뢰-유발 의심): 세션이 신뢰할 수 없는 외부 입력에 노출된 상태의 ` +
+      `되돌리기 어려운 도구 호출 — ${holderDesc || "인자 태그 근거"} ` +
+      `[해제: ${ToolRiskTag.UNTRUSTED_ORIGIN}→${SanitizationMethod.STRUCTURED_EXTRACTION}]`,
+    // TrifectaEvent(두 태그 합류)와 구분되는 단일-태그 사실 기록. 발행 경로는
+    // evaluateToolCall이 유출 판정에만 바인딩하므로 이 값으로 오발행되지 않는다.
+    matchedTags: [ToolRiskTag.UNTRUSTED_ORIGIN],
+  };
+  if (policy === "hitl") {
+    // 유출의 weak-only와 달리 항상 오버라이드 가능 — 게이트의 목적이 "사용자가
+    // 정말 시킨 게 맞는지"의 사람 확인이기 때문(설계 결정). 낡은(지문 불일치)
+    // 승인이 남아 있으면 이 소비 시도가 소각·감사(OVERRIDE_STALE)한다 — 소비
+    // "성공"이 없음은 호출부(peek)가 이미 확인한 상태다.
+    consumeApprovalIfMatching(ctx, gate.evidence, "destructive");
+    const approvalId = offerOverride(ctx, gate.evidence, "destructive");
+    decision.canOverride = true;
+    decision.approvalId = approvalId;
+    decision.reason += ` [HITL: 승인 요청 가능 — ${approvalId}]`;
+  } else {
+    decision.canOverride = false; // "block": 확정 차단
+  }
+  decision.explanation = buildDestructiveExplanation({
+    holders: gate.holders,
+    canOverride: decision.canOverride ?? false,
+    approvalId: decision.approvalId,
+  });
+  return decision;
+}
+
+/** 파괴 게이트 fail-safe 차단 — 유출 판정의 fail-safe와 동일 방향(조용한 통과 금지). */
+function destructiveFailSafe(ctx: ToolCallContext, err: unknown): PolicyDecision {
+  console.error("[policy-engine] 파괴 게이트 계산 실패 — fail-safe 차단:", err);
+  return {
+    sessionId: ctx.sessionId,
+    toolName: ctx.toolName,
+    allowed: false,
+    reason: "파괴 게이트 계산 실패 — fail-safe 차단 (오류 시 통과 금지)",
+    matchedTags: [],
+    explanation: buildFailSafeExplanation(),
+  };
+}
+
+/**
+ * session/shadow 모드용 파괴 게이트 적용 — 유출(toy) 통과 뒤에 합성한다.
+ * null = 게이트 무관/통과 (호출부가 유출 결정을 그대로 반환).
+ * session 모드에는 유출 승인 소비 경로가 없으므로(HITL은 lineage 전용) 승인
+ * 소각(burn) 우려가 없어 peek 없이 바로 소비를 시도한다.
+ */
+function applyDestructiveGate(ctx: ToolCallContext): PolicyDecision | null {
+  const gate = destructiveGateState(ctx);
+  if (!gate) return null;
+  try {
+    if (getPolicyConfig().destructivePolicy === "hitl") {
+      const consumed = consumeApprovalIfMatching(ctx, gate.evidence, "destructive");
+      if (consumed) {
+        return {
+          sessionId: ctx.sessionId,
+          toolName: ctx.toolName,
+          allowed: true,
+          matchedTags: [],
+          reason: `파괴 게이트: HITL 승인으로 1회 통과 (approvalId: ${consumed.approvalId}${consumed.resolvedBy ? `, 승인자: ${consumed.resolvedBy}` : ""})`,
+        };
+      }
+    }
+    return destructiveBlockDecision(ctx, gate);
+  } catch (err) {
+    return destructiveFailSafe(ctx, err);
+  }
+}
+
+/**
+ * lineage 모드: 유출 판정과 파괴 게이트의 합성 — 승인 소각 방지 peek 프로토콜.
+ *
+ * 문제: 유출 승인 소비는 computeLineageDecision "안"에서 일어난다. 순서를 단순히
+ * "유출 → 파괴"로 하면, 유출 승인이 소비돼 통과한 직후 파괴가 차단하는 경우
+ * 그 승인이 실행 없이 소각된다(single-use). 역순도 대칭으로 파괴 승인이 소각된다.
+ *
+ * 프로토콜 (동기 단일 스레드라 peek↔consume 사이 상태 변화 없음):
+ *  1. 파괴가 차단 예정 + 소비 가능한 파괴 승인 없음(peek) → 유출 판정을 아예
+ *     돌리지 않고 파괴 차단 반환 (유출 승인 보존).
+ *  2. 파괴 승인 있음(peek) → 유출 판정 실행(유출 승인 소비 가능) → 유출 통과
+ *     시에만 파괴 승인을 실제 소비 → 통과. 유출이 차단이면 파괴 승인 미소비
+ *     보존 — 두 승인을 다 받아둔 상태면 재시도 1회로 통과한다.
+ */
+function evaluateLineageWithDestructiveGate(
+  ctx: ToolCallContext,
+  sinkClass: SinkClass
+): PolicyDecision {
+  const gate = destructiveGateState(ctx);
+  if (!gate) {
+    const exfil = computeLineageDecision(ctx, sinkClass);
+    if (!exfil.allowed && exfil.matchedTags.length > 0) {
+      emitTrifectaEvent(ctx, sinkClass, exfil.matchedTags);
+    }
+    return exfil;
+  }
+  try {
+    const hasDestructiveApproval =
+      getPolicyConfig().destructivePolicy === "hitl" &&
+      peekApprovalMatches(ctx, gate.evidence, "destructive");
+    if (!hasDestructiveApproval) {
+      return destructiveBlockDecision(ctx, gate); // 유출 판정 생략 — 유출 승인 보존
+    }
+    const exfil = computeLineageDecision(ctx, sinkClass);
+    if (!exfil.allowed) {
+      if (exfil.matchedTags.length > 0) emitTrifectaEvent(ctx, sinkClass, exfil.matchedTags);
+      return exfil; // 파괴 승인 미소비 보존
+    }
+    const consumed = consumeApprovalIfMatching(ctx, gate.evidence, "destructive");
+    if (!consumed) {
+      // peek=true였으므로 동기 실행에선 도달 불가 — 도달 자체가 이상 상태라 차단
+      return destructiveBlockDecision(ctx, gate);
+    }
+    return {
+      ...exfil,
+      reason: [
+        exfil.reason,
+        `파괴 게이트: HITL 승인으로 1회 통과 (approvalId: ${consumed.approvalId}${consumed.resolvedBy ? `, 승인자: ${consumed.resolvedBy}` : ""})`,
+      ]
+        .filter(Boolean)
+        .join(" / "),
+    };
+  } catch (err) {
+    return destructiveFailSafe(ctx, err);
+  }
+}
+
+/** 도구 호출 시도 시 트라이펙타·파괴 게이트를 판정한다. (Image 3 오른쪽 흐름) */
 export function evaluateToolCall(ctx: ToolCallContext): PolicyDecision {
   const sinkClass = classifySink(ctx.toolName);
   const mode = getPolicyConfig().judgmentMode;
 
-  // 실제 차단 결정자 선택 — 기본 "session"(toy). "lineage"(real)는 설정으로 명시해야 켜진다.
-  const decision =
-    mode === "lineage"
-      ? computeLineageDecision(ctx, sinkClass)
-      : computeSessionDecision(ctx, sinkClass);
-
-  // 실제 차단이 확정된 트라이펙타에만 이벤트 발행
-  // (fail-safe 차단은 탐지가 아니라 운영 오류이므로 matchedTags가 비어 있고, 발행하지 않는다)
-  if (!decision.allowed && decision.matchedTags.length > 0) {
-    emitTrifectaEvent(ctx, sinkClass, decision.matchedTags);
+  // lineage 모드 — 유출(real)과 파괴 게이트를 peek 프로토콜로 합성.
+  if (mode === "lineage") {
+    return evaluateLineageWithDestructiveGate(ctx, sinkClass);
   }
 
-  // session·shadow 모드: real(계보) 섀도 판정을 로그로만 남긴다 (비교 데이터 수집).
+  // session·shadow 모드 — 유출(toy) 판정 먼저. TrifectaEvent와 섀도 비교는
+  // "유출 판정"에만 바인딩한다: 파괴 게이트가 합성된 최종값을 섀도에 넘기면
+  // toy↔real 비교에 허위 불일치가 쌓이고(순수성), 파괴 차단의 matchedTags([U])가
+  // TrifectaEvent를 오발행한다.
+  const exfil = computeSessionDecision(ctx, sinkClass);
+  if (!exfil.allowed && exfil.matchedTags.length > 0) {
+    emitTrifectaEvent(ctx, sinkClass, exfil.matchedTags);
+  }
   // runShadowEvaluation은 void + 전체 try/catch + 읽기 전용이라 decision에 관여 불가.
-  // lineage 모드에서는 생략 — "toy가 결정자"라는 비교 로그의 전제가 성립하지 않고,
-  // 판정 근거는 decision.reason에 직접 담긴다.
-  if (mode !== "lineage") {
-    runShadowEvaluation(ctx, sinkClass, decision.allowed);
-  }
-
-  return decision;
+  runShadowEvaluation(ctx, sinkClass, exfil.allowed);
+  if (!exfil.allowed) return exfil;
+  return applyDestructiveGate(ctx) ?? exfil;
 }
 
 function emitTrifectaEvent(
