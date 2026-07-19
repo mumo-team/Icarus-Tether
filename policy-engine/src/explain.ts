@@ -189,6 +189,13 @@ export function buildDestructiveExplanation(input: DestructiveExplainInput): Use
       ? `이 작업 전에 ${sourceDesc}(으)로 외부 내용을 읽었고, 그 내용이 이 작업을 하기로 한 결정에 영향을 줬을 수 있어요.`
       : "이 작업의 요청에 외부에서 온 내용이 직접 실려 있어요.";
 
+  // ★ 파괴 게이트에는 SANITIZE(정화) 해제 경로를 제시하지 않는다 (F1 수정):
+  // 정화는 "나가는 값을 안전하게" 만드는 것이지만, 삭제는 "나가는 값"이 아니라
+  // "이 삭제를 비신뢰가 유발했는가"가 문제다. 정화로 값을 안전하게 만들어도
+  // "외부 내용이 시킨 삭제"라는 사실은 변하지 않으므로 파괴엔 논리적으로 무의미하다.
+  // 게다가 STRUCTURED_EXTRACTION의 safe-text는 "delete all records" 같은 자연어
+  // 명령을 그대로 통과시켜, 정화가 U축을 세탁해 게이트를 무력화한다(헌팅 F1/P6).
+  // 파괴의 정당한 해제 경로는 사람의 HITL 승인("진짜 삭제?" 판단)뿐이다.
   const actions: UserAction[] = [];
   actions.push(
     canOverride && approvalId
@@ -204,26 +211,7 @@ export function buildDestructiveExplanation(input: DestructiveExplainInput): Use
           kind: "REQUEST_APPROVAL",
           label: "확인하고 진행하기",
           description:
-            "지금 정책에서는 승인으로 열 수 없어요. 외부에서 온 내용을 정리한 뒤 다시 시도해 주세요.",
-          available: false,
-        }
-  );
-  // 정화(안전 항목 추출)로 비신뢰가 해소되면 재시도 시 통과된다 — available은
-  // 정화 게이트의 설정 기준 선행조건(canExtractStructured)을 따른다 (기존 관례).
-  actions.push(
-    canExtractStructured()
-      ? {
-          kind: "SANITIZE",
-          label: "외부 내용에서 안전한 항목만 추려 정리하기",
-          description:
-            "외부에서 온 내용 전체 대신 정해진 형식의 값만 남기면, 이 작업을 다시 시도할 때 통과할 수 있어요.",
-          available: true,
-          detail: SanitizationMethod.STRUCTURED_EXTRACTION,
-        }
-      : {
-          kind: "SANITIZE",
-          label: "외부 내용에서 안전한 항목만 추려 정리하기",
-          description: "지금 설정에는 안전한 항목을 정하는 형식이 없어서 이 방법을 쓸 수 없어요.",
+            "지금 정책에서는 승인으로 열 수 없어요. 이 되돌리기 어려운 작업은 진행할 수 없습니다.",
           available: false,
         }
   );

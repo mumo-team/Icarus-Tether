@@ -118,17 +118,27 @@ test("비신뢰 노출 후 삭제: 차단 + 항상 승인 제안 (hitl)", () => 
   assert.ok(decision.approvalId);
 });
 
-test("정화(구조화 추출)로 비신뢰 해소 → 삭제 통과 / 정화 실패 → 계속 차단", () => {
-  // 성공 경로: 스키마에 맞는 페이로드 → 정화 → U 해제 → 통과
+test("★F1 알려진 미탐(파트2 대상): 정화로 U 세탁 시 파괴가 통과 — 현재 동작 기록", () => {
+  // ⚠ 이 통과는 "정답"이 아니라 헌팅 F1에서 확정된 미탐이다. 파괴 게이트의 U축은
+  // 세션-존재(sessionHasLiveTag)라, STRUCTURED_EXTRACTION이 U 노드를 declassify하면
+  // 세션 U축이 꺼져 정화와 무관한 삭제까지 통과한다. 파트1(explain SANITIZE 제거)은
+  // "엔진이 이 경로를 해결책으로 권하지 않는 것"까지만 고치고 판정은 불변으로 뒀다.
+  // 근본 수정(정화 불변 판정 or 노출 이력)은 유출축 C1과 함께 파트2에서 결정한다.
+  // 이 테스트는 그 미탐의 회귀 앵커다 — 파트2 수정이 들어가면 여기가 깨져
+  // "false로 업데이트하라"는 신호가 된다.
   const sid = "d3-sanitize";
   recordToolResult(sid, "fetch_web_page", undefined, { type: "bug", title: "safe title" });
   assert.equal(evaluateToolCall(ctx(sid, "delete_records", {})).allowed, false);
 
   const result = attemptSanitization(sid, SanitizationMethod.STRUCTURED_EXTRACTION);
-  assert.ok(!result.resultTags.includes(ToolRiskTag.UNTRUSTED_ORIGIN), "정화로 U가 해제돼야 함");
-  assert.equal(evaluateToolCall(ctx(sid, "delete_records", {})).allowed, true);
+  assert.ok(!result.resultTags.includes(ToolRiskTag.UNTRUSTED_ORIGIN), "정화로 U가 해제됨");
+  assert.equal(
+    evaluateToolCall(ctx(sid, "delete_records", {})).allowed,
+    true,
+    "현재 동작(미탐): 정화로 세션 U가 꺼져 파괴가 통과 — 파트2에서 차단으로 전환 예정"
+  );
 
-  // 실패 경로: 스키마 밖 페이로드 → 정화 실패(fail-safe) → 계속 차단
+  // 실패 경로: 스키마 밖 페이로드 → 정화 실패(fail-safe) → 계속 차단 (이건 정상)
   const sid2 = "d3-sanitize-fail";
   recordToolResult(sid2, "fetch_web_page", undefined, "스키마에 안 맞는 자유 텍스트");
   const failed = attemptSanitization(sid2, SanitizationMethod.STRUCTURED_EXTRACTION);
@@ -257,9 +267,21 @@ test("파괴 차단 explanation: 사람 말 규칙 + 라벨 노출 + 액션 구�
   const approval = ex.actions.find((a) => a.kind === "REQUEST_APPROVAL")!;
   assert.equal(approval.available, true);
   assert.equal(approval.detail, decision.approvalId);
-  const sanitize = ex.actions.find((a) => a.kind === "SANITIZE")!;
-  assert.equal(sanitize.available, true); // 설정에 extractionSchema 있음
-  assert.equal(sanitize.detail, SanitizationMethod.STRUCTURED_EXTRACTION);
+
+  // ★F1 파트1 회귀 앵커: 파괴 차단 설명은 SANITIZE(정화)를 해제 경로로 제시하지
+  // 않는다. 정화는 "나가는 값 안전화"라 파괴엔 논리적으로 무의미하고, safe-text가
+  // 자연어 삭제 명령을 통과시켜 U축을 세탁하므로(헌팅 F1/P6) 엔진이 이를 "해결책"
+  // 으로 권하면 사람을 오도해 게이트를 뚫는다. 정당한 해제 경로는 HITL 승인뿐.
+  assert.equal(
+    ex.actions.find((a) => a.kind === "SANITIZE"),
+    undefined,
+    "파괴 차단 설명에 SANITIZE 액션이 있으면 안 됨 (F1: 정화는 파괴 해결책 아님)"
+  );
+  // 남는 액션은 REQUEST_APPROVAL + INSPECT_SOURCE 둘뿐
+  assert.deepEqual(
+    ex.actions.map((a) => a.kind).sort(),
+    ["INSPECT_SOURCE", "REQUEST_APPROVAL"]
+  );
 });
 
 test("argTags에 실려온 비신뢰: 세션 계보 없이도 파괴 게이트 발동", () => {

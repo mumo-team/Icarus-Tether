@@ -86,14 +86,21 @@ test("섀도 순수성: 파괴 차단된 호출의 shadowLog.toyAllowed는 유�
   assert.equal(last.toyAllowed, true, "toyAllowed는 유출 판정 값이어야 함 (섀도 순수성)");
 });
 
-test("session 모드: 정화(구조화 추출) 후 삭제 통과", () => {
+test("★F1 알려진 미탐(파트2 대상): session 모드도 정화로 U 세탁 시 파괴 통과 — 현재 동작", () => {
+  // destructive.test.ts d3-sanitize와 동일한 F1 미탐이 session 모드에서도 재현된다
+  // (세탁의 뿌리는 U축이 정화로 꺼지는 것이라 judgmentMode와 무관). 파트1은 판정
+  // 불변이므로 이 통과는 현재 동작이며, 파트2 근본 수정 시 여기가 회귀 앵커로 깨진다.
   const sid = "ds3-sanitize";
   recordToolResult(sid, "fetch_web_page", undefined, { type: "feature", title: "safe title" });
   assert.equal(evaluateToolCall(ctx(sid, "delete_records", {})).allowed, false);
 
   const result = attemptSanitization(sid, SanitizationMethod.STRUCTURED_EXTRACTION);
   assert.ok(!result.resultTags.includes(ToolRiskTag.UNTRUSTED_ORIGIN));
-  assert.equal(evaluateToolCall(ctx(sid, "delete_records", {})).allowed, true);
+  assert.equal(
+    evaluateToolCall(ctx(sid, "delete_records", {})).allowed,
+    true,
+    "현재 동작(미탐): 파트2에서 차단으로 전환 예정"
+  );
 });
 
 test("session 모드: HITL 승인 → 재시도 통과 (destructive HITL은 judgmentMode 독립)", () => {
