@@ -20,6 +20,7 @@ import {
   type UserFacingExplanation,
 } from "@icarus-tether/types";
 import { getPolicyConfig } from "./config.js";
+import { canExtractStructured, canTokenize } from "./sanitization.js";
 import type { LineageEvidence } from "./shadow.js";
 
 // ---------------------------------------------------------------------------
@@ -80,27 +81,49 @@ export function buildUserExplanation(input: ExplainInput): UserFacingExplanation
   const risks: string[] = [RISK_INJECTION];
   risks.push(allWeak ? RISK_WEAK_ONLY : RISK_STRONG);
 
-  // actions: 실제로 가능한 것만 available (사실로만 결정)
+  // actions: 실제로 가능한 것만 available (사실로만 결정).
+  // SANITIZE의 available은 정화 게이트의 설정 기준 선행조건(canTokenize /
+  // canExtractStructured)을 따른다 — 설정에 근거가 없으면 시도해도 fail-safe로
+  // 실패하므로 "가능"이라 표시하지 않는다. (페이로드 기록·적합 여부는 판정
+  // 시점에 알 수 없어 이 판정의 범위 밖 — 설정 기준까지만.)
   const actions: UserAction[] = [];
 
   if (unionTags.has(ToolRiskTag.SENSITIVE)) {
-    actions.push({
-      kind: "SANITIZE",
-      label: "민감 정보를 가리고 보내기",
-      description: "이름·이메일 같은 개인정보와 비밀 값을 익명 토큰으로 바꿔서 보냅니다.",
-      available: true,
-      detail: SanitizationMethod.TOKENIZATION,
-    });
+    actions.push(
+      canTokenize()
+        ? {
+            kind: "SANITIZE",
+            label: "민감 정보를 가리고 보내기",
+            description: "이름·이메일 같은 개인정보와 비밀 값을 익명 토큰으로 바꿔서 보냅니다.",
+            available: true,
+            detail: SanitizationMethod.TOKENIZATION,
+          }
+        : {
+            kind: "SANITIZE",
+            label: "민감 정보를 가리고 보내기",
+            description: "지금 설정에는 가릴 값을 찾는 규칙이 없어서 이 방법을 쓸 수 없어요.",
+            available: false,
+          }
+    );
   }
   if (unionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN)) {
-    actions.push({
-      kind: "SANITIZE",
-      label: "외부 내용에서 안전한 항목만 추려 보내기",
-      description:
-        "외부에서 온 내용 전체 대신, 정해진 형식의 값(제목·유형 등)만 추출해 위험한 내용이 담길 자리를 없앱니다.",
-      available: true,
-      detail: SanitizationMethod.STRUCTURED_EXTRACTION,
-    });
+    actions.push(
+      canExtractStructured()
+        ? {
+            kind: "SANITIZE",
+            label: "외부 내용에서 안전한 항목만 추려 보내기",
+            description:
+              "외부에서 온 내용 전체 대신, 정해진 형식의 값(제목·유형 등)만 추출해 위험한 내용이 담길 자리를 없앱니다.",
+            available: true,
+            detail: SanitizationMethod.STRUCTURED_EXTRACTION,
+          }
+        : {
+            kind: "SANITIZE",
+            label: "외부 내용에서 안전한 항목만 추려 보내기",
+            description: "지금 설정에는 안전한 항목을 정하는 형식이 없어서 이 방법을 쓸 수 없어요.",
+            available: false,
+          }
+    );
   }
 
   actions.push(

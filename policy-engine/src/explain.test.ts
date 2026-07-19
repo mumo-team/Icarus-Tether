@@ -28,6 +28,15 @@ writeFileSync(
       fetch_web_page: "웹 페이지 가져오기",
       http_post: "외부로 전송",
     },
+    // SANITIZE available은 이제 정화 게이트 선행조건(canTokenize/canExtractStructured)을
+    // 따르므로, available:true를 단언하는 테스트(e2)에는 실제 정화 근거가 있어야 한다.
+    // 근거 없는(전부 불가) 케이스는 explain.unavailable.test.ts가 별도 픽스처로 검증.
+    piiPatterns: [
+      { type: "EMAIL", pattern: "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}" },
+    ],
+    extractionSchema: {
+      fields: { title: { kind: "string", maxLength: 80, charset: "safe-text" } },
+    },
   })
 );
 process.env.TAINTGUARD_TOOL_REGISTRY = configFile;

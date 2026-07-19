@@ -71,6 +71,8 @@ export {
   type DetectedSecret,
 } from "./secret-detection.js";
 export {
+  canExtractStructured,
+  canTokenize,
   extractStructured,
   tokenizePII,
   resolveToken,
