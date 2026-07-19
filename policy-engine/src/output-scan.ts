@@ -44,9 +44,30 @@ export interface OutputScanFinding {
  * 정규화 — 소문자 + 문자/숫자만 남긴다(구분자·구두점·공백 제거, 유니코드 letter 유지).
  * 재포맷 세탁(대소문자·`=`·`-`·`_`·공백 변경, 예: "SECRET=Kx.." ↔ "SecretKx..")을 견디는 매칭용.
  * min-length는 normalize 후 길이에 적용하므로 짧은 자연어값(예 "홍길동 VIP"→6자)은 자동 제외된다.
+ * (짧은 needle 정규화에만 쓴다 — 대용량 haystack은 normalize하지 않고 matchNormalizedNeedle 사용.)
  */
 function normalizeText(s: string): string {
   return s.replace(/[^\p{L}\p{N}]/gu, "").toLowerCase();
+}
+
+/**
+ * 이 길이 이하의 정규화 needle은 needle-regex로 매칭한다(대용량 haystack을 normalize하지 않음).
+ * 초과 시에만 normalize(haystack) 폴백 — 무손실 유지(아주 긴 민감값은 드묾).
+ */
+const NEEDLE_REGEX_MAX = 512;
+
+/**
+ * ★ 성능(대용량 무손실): "normalize(needle) ⊂ normalize(haystack)"를, 거대한 haystack을
+ * normalize해 만들지 않고 **원본 haystack을 짧은 needle에서 만든 정규식으로 1패스** 검사한다.
+ * nv(정규화된 needle)의 각 문자 사이에 "비영숫자만"(`[^\p{L}\p{N}]*`)을 허용하면, 그 사이에 다른
+ * 영숫자가 없다는 뜻 = 정규화 후 연속 = 정규화 부분문자열과 논리적 동치. nv는 normalize 결과라
+ * 소문자 영숫자·유니코드 문자뿐이라 정규식 메타문자가 없어 안전하다. 대소문자는 `i` 플래그로.
+ * (구분자만 있는 병리 입력·준일치에서도 백트래킹이 선형 유계임을 실측 확인.)
+ */
+function matchNormalizedNeedle(nv: string, haystacks: readonly string[]): boolean {
+  const pattern = Array.from(nv).join("[^\\p{L}\\p{N}]*");
+  const re = new RegExp(pattern, "iu");
+  return haystacks.some((h) => re.test(h));
 }
 
 function collectStrings(value: unknown, out: string[]): void {
@@ -113,15 +134,20 @@ export function scanOutputForSensitive(
   const outStrings: string[] = [];
   collectStrings(args, outStrings);
 
-  // 개별 출력 문자열 + 전체 concat(단순/청크 재조립). base64 세탁 전처리: 이들에서
-  // base64 run을 찾아 의미있는 평문으로 디코딩한 문자열을 검사 대상에 함께 넣는다.
-  const baseStrings = outStrings.length > 1 ? [...outStrings, outStrings.join("")] : outStrings;
-  const decodedStrings = decodeBase64Runs(baseStrings);
+  // ★ 성능(무손실): 포함검사 haystack은 "전체 concat" 하나면 충분하다. 개별 문자열의 내용은
+  // 전부 concat의 부분문자열이므로(개별에 있으면 concat에도 있음), 개별을 따로 훑을 필요가 없다
+  // — 매치 집합이 완전히 동일. 이렇게 하면 대용량에서 1MB를 여러 번 스캔하지 않는다. concat은
+  // 청크 재조립(parts[])도 커버한다. base64 세탁 전처리도 이 concat에서만 수행.
+  const concat = outStrings.length > 1 ? outStrings.join("") : outStrings[0] ?? "";
+  const containmentBases = concat.length > 0 ? [concat] : [];
+  const decodedStrings = decodeBase64Runs(containmentBases);
 
-  // 1. 포함검사: 원문 + 디코딩 평문을 haystack으로. min-length가 우연 매치를 막는다.
-  if (baseStrings.length > 0) {
-    const haystacks = [...baseStrings, ...decodedStrings];
-    const normHaystacks = haystacks.map(normalizeText); // 재포맷 세탁 매칭용 (RS08)
+  // 1. 포함검사: concat + 디코딩 평문을 haystack으로. min-length가 우연 매치를 막는다.
+  if (containmentBases.length > 0) {
+    const haystacks = [...containmentBases, ...decodedStrings];
+    // 정규화 폴백용 haystack은 "아주 긴 needle"이 나올 때만 지연 생성(대부분 생략 → 대용량 무손실 최적화).
+    let normHaystacksLazy: string[] | null = null;
+    const normHaystacks = (): string[] => (normHaystacksLazy ??= haystacks.map(normalizeText));
     for (const { toolName, payload } of sensitivePayloads) {
       const values: string[] = [];
       collectStrings(payload, values);
@@ -131,8 +157,14 @@ export function scanOutputForSensitive(
           return { kind: "containment", sourceTool: toolName, matchLen: v.length, valueHash: hashValue(v) };
         }
         // (b) 정규화 포함검사 — 대소문자·구분자 재포맷을 견딘다. min-length는 normalize 후 길이에.
+        //     짧은 needle은 needle-regex(대용량 haystack normalize 안 함), 초과분만 폴백(무손실).
         const nv = normalizeText(v);
-        if (nv.length >= minLength && normHaystacks.some((h) => h.includes(nv))) {
+        if (nv.length < minLength) continue;
+        const matched =
+          nv.length <= NEEDLE_REGEX_MAX
+            ? matchNormalizedNeedle(nv, haystacks)
+            : normHaystacks().some((h) => h.includes(nv));
+        if (matched) {
           return { kind: "containment", sourceTool: toolName, matchLen: nv.length, valueHash: hashValue(v), normalized: true };
         }
       }

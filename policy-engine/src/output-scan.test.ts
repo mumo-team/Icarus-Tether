@@ -153,6 +153,45 @@ test("한계(정직): hex 인코딩은 미탐 (알파벳 변경 — 다음 단�
   assert.equal(scanOutputForSensitive(sp, { body: `data ${hex}` }, DET), null);
 });
 
+// ── ★ 대용량(1MB) 세탁 탐지 유지 + 과차단 0 (성능 최적화 후 무손실 회귀 가드) ──────
+//    토큰화 dedup·needle-regex·concat-only 최적화가 대용량에서 탐지를 바꾸지 않음을 고정.
+const PAD = (n: number) => "the quick brown fox jumps over the lazy dog. 정상 로그. ".repeat(Math.ceil(n / 54)).slice(0, n);
+// 현실적 임베딩: 토큰 주변 공백(문서·로그엔 항상 구분자). 인접-무구분자는 base64 run 병합·regex \b
+// 경계로 회피 가능한데, 이는 최적화와 무관한 기존 성질(exact/needle 포함검사는 인접이어도 잡음).
+const embed = (p: string, at: number, total = 1048576) => PAD(at) + " " + p + " " + PAD(total - at - p.length - 2);
+const bigSec = "dbConnString_Prod_Xy7788";
+const bigPayloads: SensitivePayload[] = [{ toolName: "read_env_file", payload: { conn: bigSec } }];
+
+for (const at of [0, 12345, 524288, 1048000]) {
+  test(`1MB@${at}: verbatim 세탁 탐지`, () => {
+    assert.ok(scanOutputForSensitive(bigPayloads, { body: embed(bigSec, at) }, DET));
+  });
+  test(`1MB@${at}: 재포맷(정규화) 세탁 탐지 (needle-regex)`, () => {
+    assert.ok(scanOutputForSensitive(bigPayloads, { body: embed("db conn string PROD xy7788", at) }, DET));
+  });
+  test(`1MB@${at}: base64 세탁 탐지`, () => {
+    assert.ok(scanOutputForSensitive(bigPayloads, { body: embed(Buffer.from(bigSec).toString("base64"), at) }, DET));
+  });
+  test(`1MB@${at}: RS08 재포맷+base64 탐지`, () => {
+    const sp: SensitivePayload[] = [{ toolName: "read_env_file", payload: { v: "SECRET=Kx9021ffb" } }];
+    assert.ok(scanOutputForSensitive(sp, { body: embed(Buffer.from("SecretKx9021ffb").toString("base64"), at) }, DET));
+  });
+}
+test("1MB: 청크 세탁 concat 재조립 탐지", () => {
+  assert.ok(scanOutputForSensitive(bigPayloads, { parts: [PAD(500000), "dbConnStr", "ing_Prod", "_Xy7788", PAD(500000)] }, DET));
+});
+test("★ 1MB 정상 로그 → 미발동(과차단 0)", () => {
+  assert.equal(scanOutputForSensitive(bigPayloads, { body: PAD(1048576) }, DET), null);
+});
+test("★ 1MB SHA/base64 정상 덩어리 → 미발동", () => {
+  assert.equal(scanOutputForSensitive(bigPayloads, { body: "9f3ab2c1e4d5f6a7".repeat(65536) }, DET), null);
+  assert.equal(scanOutputForSensitive(bigPayloads, { body: Buffer.from(PAD(700000)).toString("base64") }, DET), null);
+});
+test("★ 결정론: 동일 1MB 입력 → 동일 판정", () => {
+  const o = { body: embed(bigSec, 9999) };
+  assert.deepEqual(scanOutputForSensitive(bigPayloads, o, DET), scanOutputForSensitive(bigPayloads, o, DET));
+});
+
 // ── 통합: evaluateToolCall 판정 경로 (lineage 모드) ──────────────────────────
 const dir = mkdtempSync(path.join(tmpdir(), "taintguard-tier3-"));
 const configFile = path.join(dir, "tier3.json");
