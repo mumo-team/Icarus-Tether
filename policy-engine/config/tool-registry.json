@@ -5,7 +5,11 @@
   "sinks": {
     "send_email": "OUTBOUND_SINK",
     "http_post": "OUTBOUND_SINK",
-    "write_external_file": "OUTBOUND_SINK"
+    "write_external_file": "OUTBOUND_SINK",
+    "fetch_web_page": "OUTBOUND_SINK",
+    "query_customer_db": "READ",
+    "read_internal_file": "READ",
+    "read_email": "READ"
   },
   "unknownToolPolicy": "deny",
   "sensitiveSourcePolicy": "tag_all",

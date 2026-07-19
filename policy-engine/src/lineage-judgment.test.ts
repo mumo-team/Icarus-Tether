@@ -23,6 +23,9 @@ writeFileSync(
     sensitiveSourceTools: ["read_secrets"],
     untrustedSourceTools: ["fetch_web_page"],
     outboundSinkTools: ["http_post"],
+    // read_secrets는 read-only 소스 — 싱크 축 default-deny(fail-open #2 수정)로
+    // OUTBOUND 강등되지 않도록 READ로 명시 (그래야 :127의 read_secrets 평가가 통과 유지)
+    sinks: { read_secrets: "READ" },
     judgmentMode: "lineage",
     piiPatterns: [
       { type: "EMAIL", pattern: "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}" },

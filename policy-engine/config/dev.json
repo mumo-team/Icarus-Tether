@@ -2,7 +2,14 @@
   "domain": "dev",
   "sensitiveSourceTools": ["read_env_file", "read_secrets", "get_db_credentials"],
   "untrustedSourceTools": ["read_github_issue", "read_pr_comment", "fetch_web_page"],
-  "outboundSinkTools": ["http_post", "push_to_remote", "install_package"],
+  "outboundSinkTools": ["http_post", "push_to_remote", "install_package", "fetch_web_page"],
+  "sinks": {
+    "read_env_file": "READ",
+    "read_secrets": "READ",
+    "get_db_credentials": "READ",
+    "read_github_issue": "READ",
+    "read_pr_comment": "READ"
+  },
   "unknownToolPolicy": "deny",
   "sensitiveSourcePolicy": "tag_all",
   "propagationMode": "live",

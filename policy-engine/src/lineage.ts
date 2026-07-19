@@ -227,14 +227,21 @@ function extractMatchTokens(value: unknown): Map<string, number> {
   const strings: string[] = [];
   collectStrings(value, strings);
 
-  const tokens = new Map<string, number>();
+  // ★ 성능: 해시 전에 토큰 "문자열"을 먼저 유일화한다(대용량 최적화). 반복 콘텐츠(로그·
+  // 코드)는 같은 run이 수만 번 나오는데, 예전엔 매 등장마다 sha256을 돌렸다. 유일 문자열만
+  // 해시하면 결과 Map은 비트 단위로 동일하다(중복 run은 원래도 같은 해시 key로 덮어써졌으므로
+  // — 탐지·판정 완전 불변). big.txt류에서 수만 해시 → 유일 수개로.
+  const uniqueTokens = new Map<string, number>();
   for (const s of strings) {
     const whole = s.trim();
-    if (isUsableToken(whole)) tokens.set(hashToken(whole), whole.length); // 값 통째 전달 케이스
+    if (isUsableToken(whole)) uniqueTokens.set(whole, whole.length); // 값 통째 전달 케이스
     for (const run of whole.match(TOKEN_RUN) ?? []) {
-      if (isUsableToken(run)) tokens.set(hashToken(run), run.length);
+      if (isUsableToken(run)) uniqueTokens.set(run, run.length);
     }
   }
+
+  const tokens = new Map<string, number>();
+  for (const [token, length] of uniqueTokens) tokens.set(hashToken(token), length);
   return tokens;
 }
 
