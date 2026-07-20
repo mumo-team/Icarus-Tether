@@ -172,34 +172,13 @@ export function getSessionLineage(sessionId: string): ReadonlyMap<string, TaintN
 }
 
 /**
- * 세션 계보에 지정 태그를 "지금도 살아있게" 지닌 노드가 하나라도 있는가.
- *
- * 비대칭 위협 모델(index.ts computeLineageDecision)의 U 축 판정에 쓴다: 비신뢰는
- * "제어흐름을 조작했는가"라 값-계보가 아니라 세션-존재로 본다. 정화가
- * declassifyNodeTag로 노드의 태그를 실제 제거하므로(비대칭 — 그 노드만), 정화된
- * 비신뢰는 여기서 자동으로 빠진다(정화 후 과차단 방지).
- *
- * 묘비의 잔존 태그(사후 재오염분)도 센다 — 오염을 실은 유일한 보유자가
- * 묘비뿐인 상태(cascade 관통 후 live 출처가 정화된 경우)에서 세션축이
- * 조용히 꺼지는 것을 막는다 (교환성 수정 ④).
- */
-export function sessionHasLiveTag(sessionId: string, tag: ToolRiskTag): boolean {
-  const graph = lineageStore.get(sessionId);
-  if (graph) {
-    for (const node of graph.values()) {
-      if (node.tags.has(tag)) return true;
-    }
-  }
-  for (const tomb of tombstoneStore.get(sessionId)?.values() ?? []) {
-    if (tomb.tags.has(tag)) return true;
-  }
-  return false;
-}
-
-/**
  * 지정 태그를 "지금도 살아있게" 지닌 보유자 전체의 읽기 전용 스냅샷 —
- * sessionHasLiveTag와 정확히 같은 범위(live 노드 + 묘비 잔존 태그)를 목록으로 편다.
- * 즉 `collectLiveTagHolders(s, t).length > 0 ⇔ sessionHasLiveTag(s, t)`.
+ * live 노드 + 묘비 잔존 태그(사후 재오염분)를 목록으로 편다. 묘비까지 세는 이유:
+ * 오염을 실은 유일한 보유자가 묘비뿐인 상태(cascade 관통 후 live 출처가 정화된
+ * 경우)에서도 보유자를 빠뜨리지 않기 위함이다 (교환성 수정 ④).
+ *
+ * (구 sessionHasLiveTag는 F1 노출이력 도입으로 판정에서 밀려나 제거됨 — U 축
+ * 판정은 index.ts sessionExposure(정화 불변)가, HITL 지문 스냅샷은 이 함수가 승계.)
  *
  * 용도: 파괴 게이트(index.ts computeDestructiveDecision)의 HITL 승인 지문 입력.
  * "승인은 그 U-그림에만 유효"의 '그림'이 바로 이 스냅샷이다 — 승인~소비 사이에

@@ -86,19 +86,18 @@ test("차단 시 explanation이 채워지고, 사람 말 필드에 기술 용어
   assert.ok(decision.explanation!.risks.length > 0);
 });
 
-test("SANITIZE: 정화로 풀 수 있는 태그별 액션이 available:true + 기계용 detail에 method", () => {
+test("SANITIZE: 유출 재개방은 TOKENIZATION 하나만 제시 (F1: 추출은 U축 못 열어 제거됨)", () => {
   const sid = "e2-sanitize";
   setupWeakTrifecta(sid);
 
   const ex = evaluateToolCall(ctx(sid)).explanation!;
   const sanitizes = ex.actions.filter((a) => a.kind === "SANITIZE");
-  assert.equal(sanitizes.length, 2); // SENSITIVE·UNTRUSTED 각각
-  assert.ok(sanitizes.every((a) => a.available));
-  const details = sanitizes.map((a) => a.detail).sort();
-  assert.deepEqual(
-    details,
-    [SanitizationMethod.STRUCTURED_EXTRACTION, SanitizationMethod.TOKENIZATION].sort()
-  );
+  // ★ F1 이후 STRUCTURED_EXTRACTION은 세션 U축(노출이력)을 못 열어 재개방 불가 →
+  //   유출 설명에서 제거. 남는 SANITIZE는 S축을 실제로 여는 TOKENIZATION 하나뿐.
+  assert.equal(sanitizes.length, 1);
+  assert.equal(sanitizes[0].available, true);
+  assert.equal(sanitizes[0].detail, SanitizationMethod.TOKENIZATION);
+  assert.ok(!ex.actions.some((a) => a.detail === SanitizationMethod.STRUCTURED_EXTRACTION));
 });
 
 test("REQUEST_APPROVAL: weak 차단이면 available:true + detail에 approvalId", () => {

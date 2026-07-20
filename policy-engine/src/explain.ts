@@ -20,7 +20,7 @@ import {
   type UserFacingExplanation,
 } from "@icarus-tether/types";
 import { getPolicyConfig } from "./config.js";
-import { canExtractStructured, canTokenize } from "./sanitization.js";
+import { canTokenize } from "./sanitization.js";
 import type { LineageEvidence } from "./shadow.js";
 
 // ---------------------------------------------------------------------------
@@ -82,10 +82,13 @@ export function buildUserExplanation(input: ExplainInput): UserFacingExplanation
   risks.push(allWeak ? RISK_WEAK_ONLY : RISK_STRONG);
 
   // actions: 실제로 가능한 것만 available (사실로만 결정).
-  // SANITIZE의 available은 정화 게이트의 설정 기준 선행조건(canTokenize /
-  // canExtractStructured)을 따른다 — 설정에 근거가 없으면 시도해도 fail-safe로
-  // 실패하므로 "가능"이라 표시하지 않는다. (페이로드 기록·적합 여부는 판정
-  // 시점에 알 수 없어 이 판정의 범위 밖 — 설정 기준까지만.)
+  //
+  // ★ 유출 차단의 재개방 경로는 TOKENIZATION(민감 가리기)뿐이다 — S를 토큰화하면
+  //   valueSensitive가 꺼져 통과한다(RE35). STRUCTURED_EXTRACTION(외부 내용 추출)은
+  //   더 이상 제시하지 않는다: F1 노출이력(정화 불변) 도입으로 U축이 정화로 안
+  //   꺼지므로, 외부 내용을 추려도 세션 유출 차단이 그대로 유지된다(재개방 불가).
+  //   "누르면 통과됨"을 암시하던 UX 거짓말을 제거 — 파괴 게이트 설명과 동일한 방침.
+  //   available은 정화 게이트의 설정 기준 선행조건(canTokenize)을 따른다.
   const actions: UserAction[] = [];
 
   if (unionTags.has(ToolRiskTag.SENSITIVE)) {
@@ -102,25 +105,6 @@ export function buildUserExplanation(input: ExplainInput): UserFacingExplanation
             kind: "SANITIZE",
             label: "민감 정보를 가리고 보내기",
             description: "지금 설정에는 가릴 값을 찾는 규칙이 없어서 이 방법을 쓸 수 없어요.",
-            available: false,
-          }
-    );
-  }
-  if (unionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN)) {
-    actions.push(
-      canExtractStructured()
-        ? {
-            kind: "SANITIZE",
-            label: "외부 내용에서 안전한 항목만 추려 보내기",
-            description:
-              "외부에서 온 내용 전체 대신, 정해진 형식의 값(제목·유형 등)만 추출해 위험한 내용이 담길 자리를 없앱니다.",
-            available: true,
-            detail: SanitizationMethod.STRUCTURED_EXTRACTION,
-          }
-        : {
-            kind: "SANITIZE",
-            label: "외부 내용에서 안전한 항목만 추려 보내기",
-            description: "지금 설정에는 안전한 항목을 정하는 형식이 없어서 이 방법을 쓸 수 없어요.",
             available: false,
           }
     );

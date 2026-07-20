@@ -46,7 +46,7 @@ function ctx(sessionId: string): ToolCallContext {
 /** 사람 말 필드에 노출되면 안 되는 기술 용어 (explain.test.ts와 동일 규칙) */
 const BANNED = /SENSITIVE|UNTRUSTED|OUTBOUND|TOKENIZATION|STRUCTURED_EXTRACTION|trifecta|lethal|tn_/;
 
-test("정화 근거 없는 설정: SANITIZE 두 액션 모두 available:false + detail 없음 + 사유는 사람 말", () => {
+test("정화 근거 없는 설정: SANITIZE(TOKENIZATION) available:false + detail 없음 + 사유는 사람 말", () => {
   const sid = "eu1-unavailable";
   recordToolResult(sid, "read_secrets", undefined, "키");
   recordToolResult(sid, "fetch_web_page", undefined, "문서"); // 폴백 → weak 트라이펙타
@@ -56,7 +56,9 @@ test("정화 근거 없는 설정: SANITIZE 두 액션 모두 available:false + 
   assert.ok(decision.explanation);
 
   const sanitizes = decision.explanation!.actions.filter((a) => a.kind === "SANITIZE");
-  assert.equal(sanitizes.length, 2); // 액션 자체는 태그별로 제시하되, 불가로 표시
+  // ★ F1 이후 유출 SANITIZE는 TOKENIZATION 하나뿐(STRUCTURED_EXTRACTION 제거). 정화
+  //   근거가 없는 설정이므로 그 하나가 available:false + detail 없음 + 사유 사람말.
+  assert.equal(sanitizes.length, 1);
   for (const action of sanitizes) {
     assert.equal(action.available, false);
     assert.equal(action.detail, undefined); // 불가 액션은 기계용 정보도 없음 (e4 관례)
