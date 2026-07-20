@@ -20,6 +20,7 @@ import {
   type UserFacingExplanation,
 } from "@icarus-tether/types";
 import { getPolicyConfig } from "./config.js";
+import { canTokenize } from "./sanitization.js";
 import type { LineageEvidence } from "./shadow.js";
 
 // ---------------------------------------------------------------------------
@@ -80,27 +81,33 @@ export function buildUserExplanation(input: ExplainInput): UserFacingExplanation
   const risks: string[] = [RISK_INJECTION];
   risks.push(allWeak ? RISK_WEAK_ONLY : RISK_STRONG);
 
-  // actions: 실제로 가능한 것만 available (사실로만 결정)
+  // actions: 실제로 가능한 것만 available (사실로만 결정).
+  //
+  // ★ 유출 차단의 재개방 경로는 TOKENIZATION(민감 가리기)뿐이다 — S를 토큰화하면
+  //   valueSensitive가 꺼져 통과한다(RE35). STRUCTURED_EXTRACTION(외부 내용 추출)은
+  //   더 이상 제시하지 않는다: F1 노출이력(정화 불변) 도입으로 U축이 정화로 안
+  //   꺼지므로, 외부 내용을 추려도 세션 유출 차단이 그대로 유지된다(재개방 불가).
+  //   "누르면 통과됨"을 암시하던 UX 거짓말을 제거 — 파괴 게이트 설명과 동일한 방침.
+  //   available은 정화 게이트의 설정 기준 선행조건(canTokenize)을 따른다.
   const actions: UserAction[] = [];
 
   if (unionTags.has(ToolRiskTag.SENSITIVE)) {
-    actions.push({
-      kind: "SANITIZE",
-      label: "민감 정보를 가리고 보내기",
-      description: "이름·이메일 같은 개인정보와 비밀 값을 익명 토큰으로 바꿔서 보냅니다.",
-      available: true,
-      detail: SanitizationMethod.TOKENIZATION,
-    });
-  }
-  if (unionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN)) {
-    actions.push({
-      kind: "SANITIZE",
-      label: "외부 내용에서 안전한 항목만 추려 보내기",
-      description:
-        "외부에서 온 내용 전체 대신, 정해진 형식의 값(제목·유형 등)만 추출해 위험한 내용이 담길 자리를 없앱니다.",
-      available: true,
-      detail: SanitizationMethod.STRUCTURED_EXTRACTION,
-    });
+    actions.push(
+      canTokenize()
+        ? {
+            kind: "SANITIZE",
+            label: "민감 정보를 가리고 보내기",
+            description: "이름·이메일 같은 개인정보와 비밀 값을 익명 토큰으로 바꿔서 보냅니다.",
+            available: true,
+            detail: SanitizationMethod.TOKENIZATION,
+          }
+        : {
+            kind: "SANITIZE",
+            label: "민감 정보를 가리고 보내기",
+            description: "지금 설정에는 가릴 값을 찾는 규칙이 없어서 이 방법을 쓸 수 없어요.",
+            available: false,
+          }
+    );
   }
 
   actions.push(
@@ -133,6 +140,76 @@ export function buildUserExplanation(input: ExplainInput): UserFacingExplanation
   });
 
   return { summary: SUMMARY_BLOCKED, reason, risks, actions };
+}
+
+// ---------------------------------------------------------------------------
+// 파괴적 액션 게이트 설명 — 유출 템플릿과 별개 (위험의 성격이 다르다:
+// "정보가 새 나감"이 아니라 "외부 내용이 되돌리기 어려운 작업을 유발했을 수 있음")
+// ---------------------------------------------------------------------------
+
+const SUMMARY_DESTRUCTIVE = "외부에서 온 내용을 읽은 뒤의 되돌리기 어려운 작업이라 잠시 멈췄어요.";
+
+const RISK_DESTRUCTIVE =
+  "외부에서 온 내용에 숨은 지시가 있으면, 삭제 같은 되돌리기 어려운 작업이 의도치 않게 실행될 수 있어요.";
+
+export interface DestructiveExplainInput {
+  /** 세션의 살아있는 비신뢰 보유자 스냅샷 (lineage.ts collectLiveTagHolders) */
+  holders: Array<{ nodeId: string; toolName: string; tags: ToolRiskTag[] }>;
+  canOverride: boolean;
+  approvalId?: string;
+}
+
+/** 파괴 게이트 차단의 사람 말 번역 — buildUserExplanation과 동일한 노출 규칙. */
+export function buildDestructiveExplanation(input: DestructiveExplainInput): UserFacingExplanation {
+  const { holders, canOverride, approvalId } = input;
+
+  // 노드 id는 노출하지 않고 도구 라벨만. 묘비("(pruned)")는 사람 말로 바꾼다.
+  const labels = [...new Set(holders.map((h) => h.toolName))].map((t) =>
+    t === "(pruned)" ? "이전에 정리된 기록" : toolLabelOf(t)
+  );
+  const sourceDesc = labels.map((l) => `「${l}」`).join(", ");
+  const reason =
+    labels.length > 0
+      ? `이 작업 전에 ${sourceDesc}(으)로 외부 내용을 읽었고, 그 내용이 이 작업을 하기로 한 결정에 영향을 줬을 수 있어요.`
+      : "이 작업의 요청에 외부에서 온 내용이 직접 실려 있어요.";
+
+  // ★ 파괴 게이트에는 SANITIZE(정화) 해제 경로를 제시하지 않는다 (F1 수정):
+  // 정화는 "나가는 값을 안전하게" 만드는 것이지만, 삭제는 "나가는 값"이 아니라
+  // "이 삭제를 비신뢰가 유발했는가"가 문제다. 정화로 값을 안전하게 만들어도
+  // "외부 내용이 시킨 삭제"라는 사실은 변하지 않으므로 파괴엔 논리적으로 무의미하다.
+  // 게다가 STRUCTURED_EXTRACTION의 safe-text는 "delete all records" 같은 자연어
+  // 명령을 그대로 통과시켜, 정화가 U축을 세탁해 게이트를 무력화한다(헌팅 F1/P6).
+  // 파괴의 정당한 해제 경로는 사람의 HITL 승인("진짜 삭제?" 판단)뿐이다.
+  const actions: UserAction[] = [];
+  actions.push(
+    canOverride && approvalId
+      ? {
+          kind: "REQUEST_APPROVAL",
+          label: "확인하고 진행하기",
+          description:
+            "직접 시킨 작업이 맞다면, 관리자가 확인 후 이번 한 번만 진행을 승인할 수 있습니다.",
+          available: true,
+          detail: approvalId,
+        }
+      : {
+          kind: "REQUEST_APPROVAL",
+          label: "확인하고 진행하기",
+          description:
+            "지금 정책에서는 승인으로 열 수 없어요. 이 되돌리기 어려운 작업은 진행할 수 없습니다.",
+          available: false,
+        }
+  );
+  actions.push({
+    kind: "INSPECT_SOURCE",
+    label: "문제가 된 데이터 출처 확인하기",
+    description:
+      labels.length > 0
+        ? `이 작업 전에 ${sourceDesc}의 결과를 읽었어요.`
+        : "이 요청의 데이터 흐름을 확인할 수 있어요.",
+    available: true,
+  });
+
+  return { summary: SUMMARY_DESTRUCTIVE, reason, risks: [RISK_DESTRUCTIVE], actions };
 }
 
 /** fail-safe 차단용 — 계산 실패라 근거(evidence)가 없을 때의 단순 설명 */

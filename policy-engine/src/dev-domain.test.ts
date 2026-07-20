@@ -35,17 +35,18 @@ test("dev/트라이펙타 차단: read_env_file + read_github_issue → push_to_
   assert.ok(decision.reason?.includes("lethal trifecta"));
 });
 
-test("dev/정화 후 통과: dev 스키마({type, title≤80}) 구조화 추출로 세션이 다시 열림", () => {
+test("dev/★F1(C1 회귀): U 구조화추출만으로는 재개방 안 됨 — 노출이력 영구 + S 잔존으로 차단 유지", () => {
   const sid = "d1-extract";
-  recordToolPayload(sid, "read_env_file", { DB_PASSWORD: "hunter2" });
-  recordToolPayload(sid, "read_github_issue", { type: "bug", title: "로그인 버튼이 안 눌림" });
+  recordToolPayload(sid, "read_env_file", { DB_PASSWORD: "hunter2" }); // S
+  recordToolPayload(sid, "read_github_issue", { type: "bug", title: "로그인 버튼이 안 눌림" }); // U
 
   assert.equal(evaluateToolCall(ctx(sid, "http_post")).allowed, false);
 
   const result = attemptSanitization(sid, SanitizationMethod.STRUCTURED_EXTRACTION);
-  assert.deepEqual(result.resultTags, [ToolRiskTag.SENSITIVE]); // UNTRUSTED만 해제
+  assert.deepEqual(result.resultTags, [ToolRiskTag.SENSITIVE]); // UNTRUSTED 노드 태그는 해제됨
 
-  assert.equal(evaluateToolCall(ctx(sid, "http_post")).allowed, true);
+  // ★ F1: U 추출 후에도 차단 유지 — S 잔존 + 노출이력(exposure) 정화 불변 (C1 세탁 방지).
+  assert.equal(evaluateToolCall(ctx(sid, "http_post")).allowed, false);
 });
 
 // ---------------------------------------------------------------------------

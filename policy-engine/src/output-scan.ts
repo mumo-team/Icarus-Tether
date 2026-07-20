@@ -11,7 +11,22 @@
  *     키를 잡는다. ★엔트로피(byEntropy)는 쓰지 않는다 — 고엔트로피 정상값(git SHA·UUID·
  *     JWT·integrity 해시)을 대량 과차단하기 때문(그 착시를 벤치가 숨긴다).
  *
+ * 은닉 채널(covert channel) 세탁 전처리 — 위 두 검사가 볼 haystack을 확장한다:
+ *  ① percent-decoding — 마크다운/이미지 URL에 `%40`처럼 인코딩돼 실린 민감값을
+ *     원문으로 되돌린다(malformed는 안전 스킵, 이중 인코딩 2패스). 정상 URL은 no-op.
+ *  ② URL 세그먼트 분할 + base64 다경로 디코딩 — base64가 URL 경로(`/<b64>.png`)에 실릴 때
+ *     `/`·`.`가 base64 charset(+/)과 겹쳐 run에 병합돼 디코딩이 깨지는 것을 막는다. 구분자
+ *     분할 + URL-safe(-_) 정규화 + 리딩 쓰레기 오프셋 재시도(decodeBase64Runs). 전체 문자열
+ *     스캔은 유지하므로 정상 base64는 그대로 잡혀 순수 additive(쿼리 `?d=` 탐지 회귀 없음).
+ *
  * 프라이버시: finding에 원본을 싣지 않는다 (길이 + sha256 접두만).
+ *
+ * ★ 문서화된 한계 (정직성 — fail-open 한계들과 동일 취급):
+ *  - AI 응답 텍스트: 프록시는 도구 호출(tools/call) args만 검사한다. LLM 호스트가
+ *    사용자에게 직접 렌더하는 응답 텍스트의 마크다운 이미지/링크는 도구 호출이
+ *    아니라 게이트를 통과하지 않는다 — 이 스캐너의 범위 밖(설계 경계). 우리 방어는
+ *    "행동(도구 호출)의 길목"을 검사하는 것이므로, 응답-텍스트 exfil은 out of scope.
+ *  - min-length(12) 미만 짧은 민감값은 우연 매치 방지를 위해 제외 → evade 가능.
  */
 
 import { createHash } from "node:crypto";
@@ -82,11 +97,15 @@ function hashValue(v: string): string {
 }
 
 /**
- * base64로 보이는 연속 구간(run). 표준 base64 charset만(url변형 -_ 는 다음 단계).
+ * base64로 보이는 연속 구간(run). 표준 charset(`+/`)과 URL-safe charset(`-_`)을 각각.
  * 인코딩 ≥16자만 후보 — 디코딩 ≥12바이트라야 포함검사(min-length 12) 통과 가능하고,
  * 짧은 정상 단어("test"·"name")는 애초에 후보에서 빠져 우연 디코드 오탐을 원천 차단.
  */
 const BASE64_RUN = /[A-Za-z0-9+/]{16,}={0,2}/g;
+const URLSAFE_B64_RUN = /[A-Za-z0-9_-]{16,}/g;
+
+/** 리딩 URL 쓰레기(`host/…/`) 대응으로 시도할 내부 `/` 접미부 최대 개수 (성능 유계). */
+const OFFSET_SLASH_TRIES = 8;
 
 /** 유효 UTF-8 텍스트인가 — 디코딩이 replacement(U+FFFD) 없이 왕복하면 "의미있는 평문". */
 function isMeaningfulText(decoded: string, bytes: Buffer): boolean {
@@ -95,30 +114,98 @@ function isMeaningfulText(decoded: string, bytes: Buffer): boolean {
 }
 
 /**
+ * base64 후보 하나를 게이트 통과 시 디코딩 평문으로 out에 추가하고 성공 여부를 돌려준다.
+ * 표준 run·정규화된 URL-safe·오프셋 접미부가 공유하는 단일 판정부.
+ * 게이트: 길이 → base64 가능 길이 → 디코딩 → min-length → ★정준성(재인코딩 일치) → 유효 UTF-8.
+ * ★ 정준성 검사가 핵심 과차단 가드다 — URL-safe(-_)·오프셋 확장이 정상 텍스트
+ *   (snake_case·kebab-case·UUID·파일경로)를 디코딩해도, 재인코딩이 원본과 왕복하지
+ *   않으면(정상 텍스트는 거의 항상 비정준) 폐기된다.
+ */
+function tryDecodeBase64Candidate(candidate: string, out: string[]): boolean {
+  const noPad = candidate.replace(/=+$/, "");
+  if (noPad.length < 16 || noPad.length % 4 === 1) return false; // 짧거나 base64 불가능 길이
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(candidate, "base64");
+  } catch {
+    return false;
+  }
+  if (bytes.length < OUTPUT_SCAN_MIN_LENGTH) return false; // 디코딩 <12바이트 → 매치 불가
+  if (bytes.toString("base64").replace(/=+$/, "") !== noPad) return false; // 정준성
+  const text = bytes.toString("utf8");
+  if (!isMeaningfulText(text, bytes)) return false;
+  out.push(text);
+  return true;
+}
+
+/**
  * 출력 문자열들(+concat)에서 base64 run을 찾아 "의미있는 평문"으로 디코딩한 목록을 만든다.
  * 세탁(base64 인코딩) 민감을 포함검사가 볼 수 있게 하는 전처리. 결정론(Buffer + 문자열 검사만).
- * 게이트: charset/길이(정규식) → 정준성(재인코딩 일치) → 유효 UTF-8 → (호출부의 min-length).
+ *
+ * 세 경로(전부 tryDecodeBase64Candidate의 동일 게이트 통과):
+ *  1) 표준 base64 run.
+ *  2) ★ URL-safe base64(-_) — `-_`를 실제 포함한 run만(순수 영숫자는 표준 패스가 처리)
+ *     `-→+ _→/` 정규화 후. URL-safe는 `/`를 안 쓰므로 URL 경로에서 charset이 자연히
+ *     경계를 만들어(세그먼트 분할 불필요) 깨끗이 잡힌다.
+ *  3) ★ 리딩 URL 쓰레기 대응(미탐 ②) — 표준 run의 통짜 디코딩이 실패했을 때만, run 내부
+ *     각 `/` 뒤 접미부를 재시도(최대 OFFSET_SLASH_TRIES). `host/<b64>` 병합으로 앞부분이
+ *     쓰레기가 되는 경우, 내부 `/`를 유지한 접미부가 깨끗한 base64가 된다. 실패 시에만
+ *     돌므로 정상 base64 비용은 불변, 정준성 게이트가 정상 경로 텍스트를 거른다.
  */
 function decodeBase64Runs(strings: readonly string[]): string[] {
   const decoded: string[] = [];
   for (const s of strings) {
     for (const run of s.match(BASE64_RUN) ?? []) {
-      if (run.replace(/=+$/, "").length % 4 === 1) continue; // base64로 불가능한 길이
-      let bytes: Buffer;
-      try {
-        bytes = Buffer.from(run, "base64");
-      } catch {
-        continue;
+      if (tryDecodeBase64Candidate(run, decoded)) continue; // 통짜 성공이면 오프셋 불필요
+      let idx = run.indexOf("/");
+      for (let tries = 0; idx !== -1 && tries < OFFSET_SLASH_TRIES; tries++) {
+        tryDecodeBase64Candidate(run.slice(idx + 1), decoded);
+        idx = run.indexOf("/", idx + 1);
       }
-      if (bytes.length < OUTPUT_SCAN_MIN_LENGTH) continue; // 디코딩 <12바이트 → 매치 불가
-      // 정준성: 재인코딩이 원본 run과 일치해야(패딩 정규화 후) — 비정준/우연 base64 배제
-      if (bytes.toString("base64").replace(/=+$/, "") !== run.replace(/=+$/, "")) continue;
-      const text = bytes.toString("utf8");
-      if (!isMeaningfulText(text, bytes)) continue;
-      decoded.push(text);
+    }
+    for (const run of s.match(URLSAFE_B64_RUN) ?? []) {
+      if (!/[-_]/.test(run)) continue; // 순수 영숫자 run은 표준 패스가 이미 처리
+      tryDecodeBase64Candidate(run.replace(/-/g, "+").replace(/_/g, "/"), decoded);
     }
   }
   return decoded;
+}
+
+/**
+ * ★ 미탐 ① percent-decoding (안전) — `%40` 등으로 URL에 실린 민감값을 원문으로 되돌린다.
+ * 유효한 `%XX` 연속 런만 함께 디코딩하고(멀티바이트 UTF-8 왕복 대응), malformed 런은 그대로
+ * 둔다(throw 없음). 이중 인코딩(`%2540`) 대비 최대 2패스 — 원본과 같아지면 조기 종료.
+ * 정상 URL(퍼센트 없음/변화 없음)은 입력을 그대로 돌려주므로 호출부가 no-op으로 버린다.
+ */
+const PERCENT_RUN = /(?:%[0-9A-Fa-f]{2})+/g;
+function percentDecodeLoose(s: string): string {
+  let cur = s;
+  for (let pass = 0; pass < 2 && cur.includes("%"); pass++) {
+    const next = cur.replace(PERCENT_RUN, (m) => {
+      try {
+        return decodeURIComponent(m);
+      } catch {
+        return m; // malformed 시퀀스는 안전하게 원문 유지
+      }
+    });
+    if (next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
+
+/**
+ * ★ 미탐 ② URL 구조 세그먼트 분할 — base64가 URL 경로(`/<b64>.png`)에 실릴 때 `/`·`.`가
+ * base64 charset(`+/`)과 겹쳐 하나의 run으로 병합되면, 디코딩 결과 앞부분이 쓰레기 바이트가
+ * 되어 유효 UTF-8 검사에 걸려 run 전체가 폐기된다(그 안에 진짜 시크릿이 있어도). 구분자로
+ * 잘라 각 세그먼트를 깨끗한 base64 후보로 만든다. base64 run 최소 길이(16) 미만은 제외.
+ *
+ * `=`(base64 패딩)·`%`(percent-decoding이 담당)는 구분자에서 뺀다. 전체 문자열 스캔은
+ * 그대로 유지되므로(호출부), `/` 포함 정상 base64는 여전히 통짜로 잡혀 이 분할은 additive다.
+ */
+const URL_DELIM = /[/?&#.:@]+/;
+function urlSegments(s: string): string[] {
+  return s.split(URL_DELIM).filter((seg) => seg.length >= 16);
 }
 
 /**
@@ -140,11 +227,23 @@ export function scanOutputForSensitive(
   // 청크 재조립(parts[])도 커버한다. base64 세탁 전처리도 이 concat에서만 수행.
   const concat = outStrings.length > 1 ? outStrings.join("") : outStrings[0] ?? "";
   const containmentBases = concat.length > 0 ? [concat] : [];
-  const decodedStrings = decodeBase64Runs(containmentBases);
 
-  // 1. 포함검사: concat + 디코딩 평문을 haystack으로. min-length가 우연 매치를 막는다.
-  if (containmentBases.length > 0) {
-    const haystacks = [...containmentBases, ...decodedStrings];
+  // ★ 은닉 채널 세탁 전처리 (미탐 ①②). 전부 결정론·O(size), needle-regex 최적화 불변.
+  //  ① percent-decoding한 변형을 haystack 계열에 추가(변화 있을 때만 — 정상 URL은 no-op).
+  const percentDecoded: string[] = [];
+  for (const b of containmentBases) {
+    const d = percentDecodeLoose(b);
+    if (d !== b) percentDecoded.push(d);
+  }
+  const scanBases = [...containmentBases, ...percentDecoded]; // 포함검사·정규식이 볼 원문 계열
+  //  ② base64 디코딩 입력에 URL 세그먼트를 더한다 — 경로에 실린 base64를 깨끗한 경계로 잡는다.
+  //     (전체 문자열도 계속 입력이므로 `/` 포함 정상 base64는 통짜로도 잡혀 additive.)
+  const b64Sources = [...scanBases, ...scanBases.flatMap(urlSegments)];
+  const decodedStrings = decodeBase64Runs(b64Sources);
+
+  // 1. 포함검사: (concat·percent-decoded) + 디코딩 평문을 haystack으로. min-length가 우연 매치를 막는다.
+  if (scanBases.length > 0) {
+    const haystacks = [...scanBases, ...decodedStrings];
     // 정규화 폴백용 haystack은 "아주 긴 needle"이 나올 때만 지연 생성(대부분 생략 → 대용량 무손실 최적화).
     let normHaystacksLazy: string[] | null = null;
     const normHaystacks = (): string[] => (normHaystacksLazy ??= haystacks.map(normalizeText));
@@ -176,7 +275,7 @@ export function scanOutputForSensitive(
   const byRegex = secretDetection?.byRegex ?? [];
   if (byRegex.length > 0) {
     const regexOnly: SecretDetectionConfig = { bySource: false, byEntropy: null, byRegex };
-    for (const s of [...outStrings, ...decodedStrings]) {
+    for (const s of [...outStrings, ...percentDecoded, ...decodedStrings]) {
       const found = detectSecretsInString(s, regexOnly);
       if (found.length > 0) {
         return { kind: "regex", matchLen: found[0].value.length, valueHash: hashValue(found[0].value) };

@@ -64,6 +64,19 @@ export type HitlPolicy = "off" | "weak-only";
  */
 export type PruningPolicy = "off" | "declassified";
 
+/**
+ * 파괴적 액션 게이트 정책 — "삭제 자체"가 아니라 "비신뢰가 유발한 파괴"만 다룬다.
+ * 판정: destructiveTools 등록 도구 호출 AND 세션이 살아있는 비신뢰(U)에 노출.
+ * 사용자 직접 지시 삭제(깨끗한 세션)는 통과 — 비개발자의 정상 삭제를 방해하지 않는다.
+ * - "off" (기본): 게이트 비활성 (기존 동작 불변).
+ * - "hitl": 차단하되 항상 사람 승인 제안 발급 — "이 파일 보고 필요없으면 지워줘"
+ *   같은 애매 케이스(사용자가 시켰지만 비신뢰 내용이 결정에 관여)를 사람이 해소.
+ *   유출 HITL의 weak-only 규칙은 값-계보 연결 신뢰도 개념이라 여기 적용하지 않는다.
+ * - "block": 확정 차단 (승인 우회 없음).
+ * judgmentMode와 독립. 의미론은 formal/TaintDestructiveHITL.tla가 선행 확정 (위반 0).
+ */
+export type DestructivePolicy = "off" | "hitl" | "block";
+
 export interface PatternSpec {
   /** 토큰 이름에 들어가는 식별자 (대문자·숫자·언더스코어) */
   type: string;
@@ -106,6 +119,11 @@ export interface PolicyConfig {
   judgmentMode: JudgmentMode;
   hitlPolicy: HitlPolicy;
   pruningPolicy: PruningPolicy;
+  /** 파괴적 액션(DROP·대량삭제·파일삭제 등) 도구 목록 — SinkClass와 직교인 별도 축.
+   *  주의: 여기 등록한 도구도 sinks에 실제 등급("WRITE_INTERNAL" 등)을 명시할 것 —
+   *  안 하면 미선언 싱크 default-deny(OUTBOUND 취급)로 유출 축에도 걸린다. */
+  destructiveTools: ReadonlySet<string>;
+  destructivePolicy: DestructivePolicy;
   /** 사용자용 설명 계층에서 쓰는 도구의 사람 말 라벨 (예: read_secrets → "비밀 파일 읽기") */
   toolLabels: Record<string, string>;
   secretDetection: SecretDetectionConfig | null;
@@ -320,6 +338,17 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     fail(`"pruningPolicy"는 "off" | "declassified" 중 하나여야 합니다`);
   }
 
+  // 기본은 "off" — 파괴 게이트도 설정으로 명시해야만 켜진다 (기존 동작 불변)
+  const destructivePolicy = obj.destructivePolicy ?? "off";
+  if (destructivePolicy !== "off" && destructivePolicy !== "hitl" && destructivePolicy !== "block") {
+    fail(`"destructivePolicy"는 "off" | "hitl" | "block" 중 하나여야 합니다`);
+  }
+  const destructiveTools = new Set(
+    obj.destructiveTools === undefined
+      ? []
+      : assertStringArray(obj.destructiveTools, "destructiveTools")
+  );
+
   const domain = obj.domain ?? "default";
   if (typeof domain !== "string") fail(`"domain"은 문자열이어야 합니다`);
 
@@ -346,6 +375,8 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     judgmentMode,
     hitlPolicy,
     pruningPolicy,
+    destructiveTools,
+    destructivePolicy,
     toolLabels,
     secretDetection: parseSecretDetection(obj.secretDetection),
     piiPatterns: parsePatternList(obj.piiPatterns, "piiPatterns"),
