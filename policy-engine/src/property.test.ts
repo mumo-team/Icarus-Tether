@@ -96,6 +96,9 @@ class RefModel {
   byId = new Map<string, ModelNode>();
   records: ModelRecord[] = []; // index.ts payloadStore 미러
   sessionTags = new Set<ToolRiskTag>(); // index.ts sessionStore 미러 (정화 조건에만 사용)
+  // ★ 비신뢰 노출이력 (F1 세탁 방지) — index.ts sessionExposure 미러. grow-only,
+  //   정화(sanitize)로 안 꺼진다. own 태그에 U가 들어오는 순간 TRUE (addSessionTags 미러).
+  exposure = false;
 
   /** classifySourceTags 미러: 소스 분류 + default-deny(미분류 → UNTRUSTED) */
   ownTagsFor(tool: string): Set<ToolRiskTag> {
@@ -142,6 +145,7 @@ class RefModel {
     this.nodes.push(node);
     this.byId.set(id, node);
     for (const t of own) this.sessionTags.add(t);
+    if (own.has(U)) this.exposure = true; // ★ 노출이력 세팅 (addSessionTags 미러, grow-only)
     if (own.size > 0) this.records.push({ nodeId: id, tags: new Set(own), payloadKind });
     return node;
   }
@@ -178,8 +182,10 @@ class RefModel {
    * index.ts computeLineageDecision 미러 — ★비대칭 위협 모델:
    *   차단 ⇔ (값-계보에 민감 S) AND (세션에 살아있는 비신뢰 U).
    *   - 민감(S): 이 값이 실제로 민감 데이터를 담는가 → 값-계보(부모 태그 ∪ argTags).
-   *   - 비신뢰(U): 세션이 비신뢰에 노출됐는가 → 세션 전체 노드 중 U 보유 존재
-   *     (제어흐름 조작 위협이라 값에 본문이 없어도 성립). 값-축 U(argTags/부모)도 충분.
+   *   - 비신뢰(U): 세션이 비신뢰에 노출됐는가 → ★노출이력(exposure, 정화 불변).
+   *     이전 미러는 `nodes.some(n => n.tags.has(U))`(live-U)라 정화로 꺼졌고, 그게
+   *     F1 세탁 미탐(C1)의 참조모델판이었다. exposure는 grow-only라 정화 후에도
+   *     U축이 살아 "U 정화 후 무관 S 전송"이 차단된다. 값-축 U(argTags/부모)도 충분.
    * TLA+ per-value 트라이펙타보다 엄격한 보수적 확장이므로 SinkSafety를 위반하지 않는다.
    */
   predictAllowed(refIds: string[], argTags: ToolRiskTag[]): boolean {
@@ -187,7 +193,7 @@ class RefModel {
     const valueTags = new Set<ToolRiskTag>(argTags);
     for (const pid of parents) for (const t of this.byId.get(pid)!.tags) valueTags.add(t);
     const valueSensitive = valueTags.has(S);
-    const sessionUntrusted = valueTags.has(U) || this.nodes.some((n) => n.tags.has(U));
+    const sessionUntrusted = valueTags.has(U) || this.exposure;
     return !(valueSensitive && sessionUntrusted);
   }
 }

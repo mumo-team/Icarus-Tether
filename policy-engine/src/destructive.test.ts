@@ -118,25 +118,21 @@ test("비신뢰 노출 후 삭제: 차단 + 항상 승인 제안 (hitl)", () => 
   assert.ok(decision.approvalId);
 });
 
-test("★F1 알려진 미탐(파트2 대상): 정화로 U 세탁 시 파괴가 통과 — 현재 동작 기록", () => {
-  // ⚠ 이 통과는 "정답"이 아니라 헌팅 F1에서 확정된 미탐이다. 파괴 게이트의 U축은
-  // 세션-존재(sessionHasLiveTag)라, STRUCTURED_EXTRACTION이 U 노드를 declassify하면
-  // 세션 U축이 꺼져 정화와 무관한 삭제까지 통과한다. 파트1(explain SANITIZE 제거)은
-  // "엔진이 이 경로를 해결책으로 권하지 않는 것"까지만 고치고 판정은 불변으로 뒀다.
-  // 근본 수정(정화 불변 판정 or 노출 이력)은 유출축 C1과 함께 파트2에서 결정한다.
-  // 이 테스트는 그 미탐의 회귀 앵커다 — 파트2 수정이 들어가면 여기가 깨져
-  // "false로 업데이트하라"는 신호가 된다.
+test("★F1(P6 회귀): 정화로 U를 세탁해도 파괴는 차단 유지 — 노출이력 영구, HITL만 해제", () => {
+  // 파트2 근본 수정 반영: 파괴 게이트 발동은 노출이력(exposure, grow-only)이라
+  // STRUCTURED_EXTRACTION이 U 노드를 declassify해도 게이트가 안 열린다(P6 완전 차단).
+  // 정화는 "나가는 값을 안전하게" 만들 뿐, "이 삭제를 비신뢰가 유발했나"는 안 바꾸므로
+  // 파괴엔 논리적으로 무의미 — 해제는 HITL 승인(사람의 "진짜 삭제?" 판단)만 정당하다.
   const sid = "d3-sanitize";
   recordToolResult(sid, "fetch_web_page", undefined, { type: "bug", title: "safe title" });
   assert.equal(evaluateToolCall(ctx(sid, "delete_records", {})).allowed, false);
 
   const result = attemptSanitization(sid, SanitizationMethod.STRUCTURED_EXTRACTION);
-  assert.ok(!result.resultTags.includes(ToolRiskTag.UNTRUSTED_ORIGIN), "정화로 U가 해제됨");
-  assert.equal(
-    evaluateToolCall(ctx(sid, "delete_records", {})).allowed,
-    true,
-    "현재 동작(미탐): 정화로 세션 U가 꺼져 파괴가 통과 — 파트2에서 차단으로 전환 예정"
-  );
+  assert.ok(!result.resultTags.includes(ToolRiskTag.UNTRUSTED_ORIGIN), "정화로 U 노드 태그는 해제됨");
+  const after = evaluateToolCall(ctx(sid, "delete_records", {}));
+  assert.equal(after.allowed, false, "F1: 정화가 파괴 축을 세탁하지 못함 — 차단 유지");
+  assert.equal(after.canOverride, true, "해제 경로는 HITL 승인만 (정화 아님)");
+  assert.ok(after.approvalId);
 
   // 실패 경로: 스키마 밖 페이로드 → 정화 실패(fail-safe) → 계속 차단 (이건 정상)
   const sid2 = "d3-sanitize-fail";

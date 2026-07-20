@@ -16,7 +16,6 @@ import {
   getTaintNode,
   getTombstoneTags,
   previewParentLinks,
-  sessionHasLiveTag,
   type LinkMethod,
 } from "./lineage.js";
 import { containsVaultOriginal } from "./sanitization.js";
@@ -107,7 +106,8 @@ export function collectLineageEvidence(ctx: ToolCallContext): LineageEvidence {
 export function runShadowEvaluation(
   ctx: ToolCallContext,
   sinkClass: SinkClass,
-  toyAllowed: boolean
+  toyAllowed: boolean,
+  sessionExposed: boolean
 ): void {
   try {
     let entry: ShadowLogEntry;
@@ -121,11 +121,12 @@ export function runShadowEvaluation(
       //   (argTags는 여기서 unionTags에 포함되지 않으므로 값-축 U는 unionTags만으로 본다.)
       const valueSensitive =
         unionTags.has(ToolRiskTag.SENSITIVE) || containsVaultOriginal(ctx.args);
+      // ★ 실제 판정부와 동일하게 U축을 노출이력으로 예측(F1 수정 반영) —
+      // sessionExposed는 호출부(index.ts)가 isSessionExposed로 넘긴다.
       const realBlocked =
         sinkClass === SinkClass.OUTBOUND_SINK &&
         valueSensitive &&
-        (unionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) ||
-          sessionHasLiveTag(ctx.sessionId, ToolRiskTag.UNTRUSTED_ORIGIN));
+        (unionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) || sessionExposed);
       const realAllowed = !realBlocked;
       const match = realAllowed === toyAllowed;
 

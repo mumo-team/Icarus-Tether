@@ -39,7 +39,6 @@ import {
   collectLiveTagHolders,
   createTaintNode,
   declassifyNodeTag,
-  sessionHasLiveTag,
   type TaintNode,
 } from "./lineage.js";
 import { collectLineageEvidence, runShadowEvaluation, type LineageEvidence } from "./shadow.js";
@@ -184,6 +183,26 @@ function classifySourceTags(toolName: string): ToolRiskTag[] {
 
 const sessionStore = new Map<string, SessionTaintState>();
 
+/**
+ * ★ 비신뢰 노출이력 (F1 세탁 방지) — grow-only. 세션이 UNTRUSTED_ORIGIN을 한 번이라도
+ * 획득하면 여기에 기록되고, 이후 절대 제거되지 않는다(정화 불변). 정화(attemptSanitization)
+ * 는 session.tags·계보 노드 태그만 떼고 이 집합은 건드리지 않으므로, "정화로 세션 U축을
+ * 꺼서 무관한 유출·삭제를 여는" 미탐(C1/P6)이 막힌다.
+ *
+ * 판정에서의 역할 (비대칭 위협 모델의 U축을 이걸로 판정):
+ *  - 유출: sessionUntrusted = 노출이력. 단 valueSensitive AND 유지 → S를 토큰화하면
+ *    통과(RE35), U-only는 S가 없어 통과(RE36), "U 정화 후 무관 S 전송"(C1)만 차단.
+ *  - 파괴: 발동 = 노출이력 (정화로 못 품, HITL 승인만 해제 — P6 완전 차단).
+ * 형식모델: TaintLineage.tla exposure(ExfilSafety·ExposureMonotone),
+ * TaintDestructiveHITL.tla exposure(DestructiveSafety·ExposureMonotone) — TLC 위반 0.
+ */
+const sessionExposure = new Set<string>();
+
+/** 세션이 비신뢰에 노출된 적 있는가 (정화 불변). shadow.ts 등 판정 밖 소비자용 읽기 접근. */
+export function isSessionExposed(sessionId: string): boolean {
+  return sessionExposure.has(sessionId);
+}
+
 function getOrCreateSession(sessionId: string): SessionTaintState {
   const existing = sessionStore.get(sessionId);
   if (existing) return existing;
@@ -196,6 +215,9 @@ function addSessionTags(session: SessionTaintState, tags: ToolRiskTag[]): void {
   for (const tag of tags) {
     if (!session.tags.includes(tag)) session.tags.push(tag);
   }
+  // ★ 노출이력 세팅 (grow-only) — U가 세션에 들어오는 단일 통로가 여기다.
+  // 정화는 session.tags를 직접 필터링(이 함수 미경유)하므로 노출이력은 정화 불변.
+  if (tags.includes(ToolRiskTag.UNTRUSTED_ORIGIN)) sessionExposure.add(session.sessionId);
   session.updatedAt = new Date().toISOString();
 }
 
@@ -380,7 +402,10 @@ function computeSessionDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
   }
 
   const hasSensitive = effectiveTags.has(ToolRiskTag.SENSITIVE);
-  const hasUntrusted = effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN);
+  // ★ U축은 노출이력(정화 불변)으로 판정 — 정화로 session.tags의 U가 빠져도
+  // 노출됐던 세션은 여전히 U로 본다 (F1 세탁 방지). argTags/이 호출의 U도 포함.
+  const hasUntrusted =
+    effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) || sessionExposure.has(ctx.sessionId);
 
   if (hasSensitive && hasUntrusted) {
     const unclassified = !isClassifiedTool(getPolicyConfig(), ctx.toolName);
@@ -446,9 +471,11 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
 
     const valueSensitive =
       effectiveTags.has(ToolRiskTag.SENSITIVE) || resendsSanitizedOriginal || outputScanFinding !== null;
+    // ★ U축 = 노출이력(정화 불변, F1 세탁 방지). 이전엔 sessionHasLiveTag(정화로
+    // 꺼짐)라, 공격자가 비신뢰 노드를 정화해 U축을 세탁하면 무관한 S 유출이 열렸다(C1).
+    // valueSensitive AND는 유지되므로 S 토큰화 시엔 여전히 통과(RE35 과차단 없음).
     const sessionUntrusted =
-      effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) ||
-      sessionHasLiveTag(ctx.sessionId, ToolRiskTag.UNTRUSTED_ORIGIN);
+      effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) || sessionExposure.has(ctx.sessionId);
 
     if (valueSensitive && sessionUntrusted) {
       const hitlPolicy = getPolicyConfig().hitlPolicy;
@@ -582,11 +609,11 @@ function destructiveGateState(ctx: ToolCallContext): DestructiveGateState | null
   const cfg = getPolicyConfig();
   if (cfg.destructivePolicy === "off" || !cfg.destructiveTools.has(ctx.toolName)) return null;
 
+  // ★ 발동 = 노출이력(정화 불변, 모드 무관). 정화로 live U를 다 떼도 노출됐던
+  // 세션의 삭제는 여전히 차단 — HITL 승인만 해제(P6 완전 차단). holders는 여전히
+  // 승인 지문(evidence)용으로 현재 live U를 스냅샷한다(TOCTOU freshness — 모델 dSnap=uSet).
   const holders = collectLiveTagHolders(ctx.sessionId, ToolRiskTag.UNTRUSTED_ORIGIN);
-  const sessionUntrusted =
-    cfg.judgmentMode === "lineage"
-      ? holders.length > 0 // sessionHasLiveTag와 동일 범위 — holders가 곧 그 목록
-      : getOrCreateSession(ctx.sessionId).tags.includes(ToolRiskTag.UNTRUSTED_ORIGIN);
+  const sessionUntrusted = sessionExposure.has(ctx.sessionId);
   if (!sessionUntrusted && !ctx.argTags.includes(ToolRiskTag.UNTRUSTED_ORIGIN)) return null;
 
   // 스냅샷을 LineageEvidence 모양으로 접어 기존 lineageFingerprintOf에 태운다 —
@@ -754,7 +781,7 @@ export function evaluateToolCall(ctx: ToolCallContext): PolicyDecision {
     emitTrifectaEvent(ctx, sinkClass, exfil.matchedTags);
   }
   // runShadowEvaluation은 void + 전체 try/catch + 읽기 전용이라 decision에 관여 불가.
-  runShadowEvaluation(ctx, sinkClass, exfil.allowed);
+  runShadowEvaluation(ctx, sinkClass, exfil.allowed, sessionExposure.has(ctx.sessionId));
   if (!exfil.allowed) return exfil;
   return applyDestructiveGate(ctx) ?? exfil;
 }
