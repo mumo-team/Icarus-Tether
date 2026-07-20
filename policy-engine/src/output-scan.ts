@@ -11,7 +11,23 @@
  *     키를 잡는다. ★엔트로피(byEntropy)는 쓰지 않는다 — 고엔트로피 정상값(git SHA·UUID·
  *     JWT·integrity 해시)을 대량 과차단하기 때문(그 착시를 벤치가 숨긴다).
  *
+ * 은닉 채널(covert channel) 세탁 전처리 — 위 두 검사가 볼 haystack을 확장한다:
+ *  ① percent-decoding — 마크다운/이미지 URL에 `%40`처럼 인코딩돼 실린 민감값을
+ *     원문으로 되돌린다(malformed는 안전 스킵, 이중 인코딩 2패스). 정상 URL은 no-op.
+ *  ② URL 세그먼트 분할 — base64가 URL 경로(`/<b64>.png`)에 실릴 때 `/`·`.`가 base64
+ *     charset(+/)과 겹쳐 run에 병합돼 디코딩이 깨지는 것을 막는다. 구분자로 잘라
+ *     세그먼트별 base64 후보를 만든다. 전체 문자열 스캔은 유지하므로 `/` 포함 정상
+ *     base64는 그대로 잡혀 순수 additive(쿼리 `?d=` 탐지 회귀 없음).
+ *
  * 프라이버시: finding에 원본을 싣지 않는다 (길이 + sha256 접두만).
+ *
+ * ★ 문서화된 한계 (정직성 — fail-open 한계들과 동일 취급):
+ *  - AI 응답 텍스트: 프록시는 도구 호출(tools/call) args만 검사한다. LLM 호스트가
+ *    사용자에게 직접 렌더하는 응답 텍스트의 마크다운 이미지/링크는 도구 호출이
+ *    아니라 게이트를 통과하지 않는다 — 이 스캐너의 범위 밖(설계 경계). 우리 방어는
+ *    "행동(도구 호출)의 길목"을 검사하는 것이므로, 응답-텍스트 exfil은 out of scope.
+ *  - URL-safe base64(`-_` charset)는 아직 디코딩하지 않는다(표준 `+/`만).
+ *  - min-length(12) 미만 짧은 민감값은 우연 매치 방지를 위해 제외 → evade 가능.
  */
 
 import { createHash } from "node:crypto";
@@ -122,6 +138,43 @@ function decodeBase64Runs(strings: readonly string[]): string[] {
 }
 
 /**
+ * ★ 미탐 ① percent-decoding (안전) — `%40` 등으로 URL에 실린 민감값을 원문으로 되돌린다.
+ * 유효한 `%XX` 연속 런만 함께 디코딩하고(멀티바이트 UTF-8 왕복 대응), malformed 런은 그대로
+ * 둔다(throw 없음). 이중 인코딩(`%2540`) 대비 최대 2패스 — 원본과 같아지면 조기 종료.
+ * 정상 URL(퍼센트 없음/변화 없음)은 입력을 그대로 돌려주므로 호출부가 no-op으로 버린다.
+ */
+const PERCENT_RUN = /(?:%[0-9A-Fa-f]{2})+/g;
+function percentDecodeLoose(s: string): string {
+  let cur = s;
+  for (let pass = 0; pass < 2 && cur.includes("%"); pass++) {
+    const next = cur.replace(PERCENT_RUN, (m) => {
+      try {
+        return decodeURIComponent(m);
+      } catch {
+        return m; // malformed 시퀀스는 안전하게 원문 유지
+      }
+    });
+    if (next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
+
+/**
+ * ★ 미탐 ② URL 구조 세그먼트 분할 — base64가 URL 경로(`/<b64>.png`)에 실릴 때 `/`·`.`가
+ * base64 charset(`+/`)과 겹쳐 하나의 run으로 병합되면, 디코딩 결과 앞부분이 쓰레기 바이트가
+ * 되어 유효 UTF-8 검사에 걸려 run 전체가 폐기된다(그 안에 진짜 시크릿이 있어도). 구분자로
+ * 잘라 각 세그먼트를 깨끗한 base64 후보로 만든다. base64 run 최소 길이(16) 미만은 제외.
+ *
+ * `=`(base64 패딩)·`%`(percent-decoding이 담당)는 구분자에서 뺀다. 전체 문자열 스캔은
+ * 그대로 유지되므로(호출부), `/` 포함 정상 base64는 여전히 통짜로 잡혀 이 분할은 additive다.
+ */
+const URL_DELIM = /[/?&#.:@]+/;
+function urlSegments(s: string): string[] {
+  return s.split(URL_DELIM).filter((seg) => seg.length >= 16);
+}
+
+/**
  * 나가는 값에서 세탁된 민감 유출을 탐지한다. 첫 finding에서 즉시 반환(차단엔 하나면 충분).
  * OUTBOUND_SINK 판정 경로에서만 호출됨 (핫패스 비용 제한).
  */
@@ -140,11 +193,23 @@ export function scanOutputForSensitive(
   // 청크 재조립(parts[])도 커버한다. base64 세탁 전처리도 이 concat에서만 수행.
   const concat = outStrings.length > 1 ? outStrings.join("") : outStrings[0] ?? "";
   const containmentBases = concat.length > 0 ? [concat] : [];
-  const decodedStrings = decodeBase64Runs(containmentBases);
 
-  // 1. 포함검사: concat + 디코딩 평문을 haystack으로. min-length가 우연 매치를 막는다.
-  if (containmentBases.length > 0) {
-    const haystacks = [...containmentBases, ...decodedStrings];
+  // ★ 은닉 채널 세탁 전처리 (미탐 ①②). 전부 결정론·O(size), needle-regex 최적화 불변.
+  //  ① percent-decoding한 변형을 haystack 계열에 추가(변화 있을 때만 — 정상 URL은 no-op).
+  const percentDecoded: string[] = [];
+  for (const b of containmentBases) {
+    const d = percentDecodeLoose(b);
+    if (d !== b) percentDecoded.push(d);
+  }
+  const scanBases = [...containmentBases, ...percentDecoded]; // 포함검사·정규식이 볼 원문 계열
+  //  ② base64 디코딩 입력에 URL 세그먼트를 더한다 — 경로에 실린 base64를 깨끗한 경계로 잡는다.
+  //     (전체 문자열도 계속 입력이므로 `/` 포함 정상 base64는 통짜로도 잡혀 additive.)
+  const b64Sources = [...scanBases, ...scanBases.flatMap(urlSegments)];
+  const decodedStrings = decodeBase64Runs(b64Sources);
+
+  // 1. 포함검사: (concat·percent-decoded) + 디코딩 평문을 haystack으로. min-length가 우연 매치를 막는다.
+  if (scanBases.length > 0) {
+    const haystacks = [...scanBases, ...decodedStrings];
     // 정규화 폴백용 haystack은 "아주 긴 needle"이 나올 때만 지연 생성(대부분 생략 → 대용량 무손실 최적화).
     let normHaystacksLazy: string[] | null = null;
     const normHaystacks = (): string[] => (normHaystacksLazy ??= haystacks.map(normalizeText));
@@ -176,7 +241,7 @@ export function scanOutputForSensitive(
   const byRegex = secretDetection?.byRegex ?? [];
   if (byRegex.length > 0) {
     const regexOnly: SecretDetectionConfig = { bySource: false, byEntropy: null, byRegex };
-    for (const s of [...outStrings, ...decodedStrings]) {
+    for (const s of [...outStrings, ...percentDecoded, ...decodedStrings]) {
       const found = detectSecretsInString(s, regexOnly);
       if (found.length > 0) {
         return { kind: "regex", matchLen: found[0].value.length, valueHash: hashValue(found[0].value) };

