@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { AuditLogEntry } from "@icarus-tether/types";
+import { ToolRiskTag, type AuditLogEntry } from "@icarus-tether/types";
 
 // 융합에 쓰는 최소 신호 — 대시보드가 이미 받는 것에서 파생한다(새 state 없음).
 interface InjectionSignal {
@@ -22,7 +22,7 @@ export default function ThreatFusionBanner({
     const lastInjection = injectionChecks[injectionChecks.length - 1];
 
     const signalLineage = tags.length > 0;
-    const signalTrifecta = tags.includes("SENSITIVE" as never) && tags.includes("UNTRUSTED_ORIGIN" as never);
+    const signalTrifecta = tags.includes(ToolRiskTag.SENSITIVE) && tags.includes(ToolRiskTag.UNTRUSTED_ORIGIN);
     const signalInjection = lastInjection?.isInjection ?? false;
 
     const count = [signalLineage, signalTrifecta, signalInjection].filter(Boolean).length;

@@ -16,7 +16,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { requestApproval, resolveApproval, attemptSanitization, getSessionLineage } from "@icarus-tether/policy-engine";
+import { requestApproval, resolveApproval, attemptSanitization, getSessionLineage, getOverrideAuditLog } from "@icarus-tether/policy-engine";
 import { SanitizationMethod, type PolicyDecision, type AuditLogEntry, type ToolRiskTag } from "@icarus-tether/types";
 
 const WS_PORT = 7331;
@@ -161,6 +161,8 @@ export function broadcastDecision(
     approvalId: decision.approvalId,
     timestamp,
   });
+  // 이 판정 과정에서 생긴 HITL 전이(OFFERED 등)를 함께 방송 — index.ts 무수정.
+  broadcastHitlAudit(sessionId);
 }
 
 /**
@@ -190,6 +192,22 @@ export function broadcastLineage(sessionId: string): void {
   console.error(`[bridge] 계보 방송  노드 ${nodes.length}개`);
 }
 
+/**
+ * 세션의 HITL 오버라이드 감사로그 전체를 대시보드에 방송한다 — AuditTimeline의
+ * hitlLog 소스. 엔진 hitl.ts의 getOverrideAuditLog가 프로세스 내 누적 로그를 주므로,
+ * 매번 세션 전체를 보내고 대시보드는 교체(append 아님)한다. broadcastDecision(매 판정)
+ * 과 approve/reject 처리 직후에 호출해 OFFERED~OVERRIDE_USED 전이가 실시간 반영된다.
+ */
+export function broadcastHitlAudit(sessionId: string): void {
+  const entries = getOverrideAuditLog(sessionId);
+  broadcastToDashboard({
+    type: "hitl_audit",
+    sessionId,
+    entries,
+    timestamp: new Date().toISOString(),
+  });
+}
+
 function handleDashboardMessage(text: string): void {
   const msg = JSON.parse(text) as {
     type?: string;
@@ -214,6 +232,7 @@ function handleDashboardMessage(text: string): void {
       resolvedBy: msg.resolvedBy ?? "dashboard",
       timestamp: new Date().toISOString(),
     });
+    broadcastHitlAudit(msg.sessionId); // REQUESTED/APPROVED/REJECTED 전이 반영
     return;
   }
 

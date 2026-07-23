@@ -26,7 +26,7 @@ export default function TrifectaApprovalModal({
       }}
     >
       <div style={{ background: "white", borderRadius: "8px", padding: "24px", maxWidth: "480px", width: "90%" }}>
-        <h2>🛑 {explanation.summary}</h2>
+        <h2>[차단] {explanation.summary}</h2>
         <p>{explanation.reason}</p>
 
         {explanation.risks.length > 0 && (
