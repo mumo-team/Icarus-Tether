@@ -30,7 +30,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const AUDIT_LOG_PATH = resolve(__dirname, "../audit.log");
 
 // 이 프로세스가 마지막으로 쓴 줄의 signature. 다음 줄의 prevHash가 된다.
-// 첫 줄은 제네시스라 undefined (체인의 시작점).
+// 프로세스 시작 시 기존 audit.log 마지막 줄에서 seed한다(seedLastSignatureFromLog) —
+// "데모 1회 = 1프로세스"라 리셋하면 세션 경계마다 제네시스 줄이 생겨 검증기가
+// CHAIN_BREAK 오탐을 낸다. 이어받으면 파일 전체가 연속 체인이 되어 오탐이 사라지고,
+// 세션 경계까지 서명으로 묶여 재정렬 탐지가 오히려 강해진다. 로그가 없으면 undefined
+// (진짜 제네시스).
 let lastSignature: string | undefined;
 
 // signature 계산 시 signature/prevHash 자신은 빼고, prevHash는 항상 포함한다 —
@@ -63,6 +67,29 @@ export function recordAudit(input: {
   appendFileSync(AUDIT_LOG_PATH, JSON.stringify(signed) + "\n");
   lastSignature = signature; // 다음 줄이 이 값을 prevHash로 물고 이어간다
 }
+
+/**
+ * 프로세스 시작 시 기존 audit.log의 마지막 줄 signature를 lastSignature에 seed한다.
+ * 이렇게 하면 새 세션의 첫 줄이 이전 세션 마지막 줄을 prevHash로 물어 파일 전체가
+ * 하나의 연속 체인이 된다 — 세션 경계 CHAIN_BREAK 오탐이 사라지고(검증기 무수정),
+ * 세션 경계 재정렬까지 탐지된다. 파일이 없거나(첫 실행) 파싱 실패면 undefined 유지
+ * = 진짜 제네시스로 시작.
+ *
+ * 주의: "데모 1회 = 1프로세스" 순차 실행 전제. 여러 proxy가 같은 파일에 동시 append
+ * 하면 seed 레이스가 생길 수 있으나, 현재 실행 모델(stdio 단일 클라이언트)에선 없다.
+ */
+function seedLastSignatureFromLog(): void {
+  try {
+    const raw = readFileSync(AUDIT_LOG_PATH, "utf8");
+    const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+    if (lines.length === 0) return;
+    const last = JSON.parse(lines[lines.length - 1]) as AuditLogEntry;
+    lastSignature = last.signature; // 새 세션 첫 줄이 이 값을 prevHash로 물고 이어간다
+  } catch {
+    // 파일 없음/파싱 실패 → lastSignature undefined 유지 (진짜 제네시스로 시작)
+  }
+}
+seedLastSignatureFromLog();
 
 // ── 감사 로그 무결성 검증 (책임 3의 "검사" 쪽) ────────────────────────
 // ⚠️ 이 검증 로직은 dashboard/server/src/verify-audit-log.ts(CLI)와 같은 규칙이다.
