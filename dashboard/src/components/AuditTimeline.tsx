@@ -6,7 +6,15 @@ export interface HitlAuditEntry {
   approvalId: string;
   sessionId: string;
   toolName: string;
-  action: "OFFERED" | "REQUESTED" | "APPROVED" | "REJECTED" | "OVERRIDE_USED";
+  // policy-engine hitl.ts의 OverrideAuditEntry.action과 동일하게 유지할 것.
+  action:
+    | "OFFERED"
+    | "REQUESTED"
+    | "APPROVED"
+    | "REJECTED"
+    | "OVERRIDE_USED"
+    | "SUPERSEDED"
+    | "OVERRIDE_STALE";
   actor?: string;
   timestamp: string;
 }
@@ -26,6 +34,8 @@ const HITL_ACTION_LABEL: Record<HitlAuditEntry["action"], string> = {
   APPROVED: "승인됨",
   REJECTED: "거부됨",
   OVERRIDE_USED: "승인으로 1회 통과",
+  SUPERSEDED: "제안 대체됨",
+  OVERRIDE_STALE: "낡은 승인 무효화",
 };
 
 interface AuditTimelineProps {
@@ -48,7 +58,7 @@ export default function AuditTimeline({ logs, hitlLog }: AuditTimelineProps) {
     timestamp: h.timestamp,
     sessionId: h.sessionId,
     toolName: h.toolName,
-    label: `${HITL_ACTION_LABEL[h.action]}${h.actor ? ` (${h.actor})` : ""}`,
+    label: `${HITL_ACTION_LABEL[h.action] ?? h.action}${h.actor ? ` (${h.actor})` : ""}`,
     source: "HITL",
   }));
 

@@ -13,7 +13,7 @@
  *   끝까지 전부 다시 계산해 사슬을 새로 맞추면 탐지 불가. 진짜 방어는 HMAC
  *   서명(비밀 키) — 키 관리 설계가 필요해 향후 과제로 둔다.
  * 
- * ⚠️ 검증 규칙은 proxy/src/dashboard-bridge.ts의 verifyAuditChain과 동일하다.
+ * [주의] 검증 규칙은 proxy/src/dashboard-bridge.ts의 verifyAuditChain과 동일하다.
  *    워크스페이스가 달라 의도적으로 중복 — 한쪽 규칙 변경 시 다른 쪽도 함께 고칠 것.
  *
  * 실행: npm run verify -w dashboard/server            (기본: proxy/audit.log)
@@ -108,10 +108,10 @@ console.error(`[verify] 검사 대상: ${logPath}\n`);
 const { total, problems } = verify(logPath);
 
 if (problems.length === 0) {
-  console.error(`✅ 무결 — ${total}줄 전부 서명·체인 정상.`);
+  console.error(`[정상] 무결 — ${total}줄 전부 서명·체인 정상.`);
   process.exit(0);
 } else {
-  console.error(`⛔ 무결성 위반 ${problems.length}건 (전체 ${total}줄):\n`);
+  console.error(`[위반] 무결성 위반 ${problems.length}건 (전체 ${total}줄):\n`);
   for (const p of problems) {
     console.error(`  ${p.line}번째 줄 [${p.kind}] ${p.detail}`);
   }
