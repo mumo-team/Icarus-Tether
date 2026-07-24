@@ -215,7 +215,13 @@ export interface AuditLogEntry {
   id: string;
   sessionId: string;
   toolName: string;
-  decision: "ALLOWED" | "BLOCKED";
+  /**
+   * - ALLOWED   : 엔진 판정을 거쳐 허용됨
+   * - BLOCKED   : 엔진 판정을 거쳐 차단됨
+   * - FORWARDED : 엔진 판정을 거치지 않고 다운스트림으로 중계됨
+   *   (tools/call이 아닌 MCP 메서드 등 — S5 fail-open 가시화용. matchedTags는 빈 배열)
+   */
+  decision: "ALLOWED" | "BLOCKED" | "FORWARDED";
   matchedTags: ToolRiskTag[];
   timestamp: string;
   /** 위변조 방지용 서명 (해시 등). MVP에서는 비워둬도 됨 */
