@@ -7,7 +7,7 @@
  */
 
 import { SinkClass } from "@icarus-tether/types";
-import { getPolicyConfig, loadPolicyConfig } from "./config.js";
+import { loadPolicyConfig } from "./config.js";
 
 export interface ToolRegistry {
   sensitiveSources: ReadonlySet<string>;
@@ -29,12 +29,3 @@ export function loadToolRegistry(filePath?: string): ToolRegistry {
   };
 }
 
-/** 활성 설정의 도구 분류 뷰 (프로세스당 1회 로드·캐시는 config.ts가 담당) */
-export function getToolRegistry(): ToolRegistry {
-  const cfg = getPolicyConfig();
-  return {
-    sensitiveSources: cfg.sensitiveSourceTools,
-    untrustedSources: cfg.untrustedSourceTools,
-    sinks: cfg.sinks,
-  };
-}

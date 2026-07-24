@@ -119,18 +119,12 @@ export interface SessionTaintState {
 }
 
 // ---------------------------------------------------------------------------
-// 4. 트라이펙타 탐지 이벤트 (브레인이 발행 → 대시보드·감사로그가 구독)
+// 4. (구) TrifectaEvent — 계약에서 제거됨 (2026-07 정리).
+//    발행 채널·소비자가 없었다: 엔진은 console.log만 했고, 대시보드는 import조차
+//    안 했으며, 실질 표시는 PolicyDecision.matchedTags(broadcastDecision 경로)가
+//    이미 담당한다. 엔진 내부 관측 로그용 구조는 policy-engine/src/index.ts의
+//    로컬 타입으로만 유지한다. 3자 중 아무도 이 타입을 쓰지 않아 제거해도 무해.
 // ---------------------------------------------------------------------------
-
-export interface TrifectaEvent {
-  id: string;
-  sessionId: string;
-  toolName: string;
-  /** 겹친 태그들. SENSITIVE + UNTRUSTED_ORIGIN 둘 다 있으면 트라이펙타 성립 */
-  matchedTags: ToolRiskTag[];
-  sinkClass: SinkClass;
-  timestamp: string;
-}
 
 // ---------------------------------------------------------------------------
 // 4b. 출력-스캔 이벤트 (TIER3 — 브레인이 발행 → 대시보드·감사로그가 구독)
@@ -205,6 +199,34 @@ export interface ApprovalRequest {
   resolvedAt?: string;
   /** 승인/거부한 사람 (데모에서는 임의 문자열이어도 됨) */
   resolvedBy?: string;
+}
+
+/**
+ * [HITL 오버라이드 감사] 오버라이드가 제안·승인·소비·무효화된 이력 한 줄.
+ * ① 엔진(policy-engine hitl.ts)이 누적하고 getOverrideAuditLog로 노출 → ② 프록시가
+ * broadcastHitlAudit로 중계 → ③ 대시보드(AuditTimeline)가 구독해 표시한다.
+ * action 유니온이 3자 계약의 핵심이라 여기가 단일 소스다 — 값이 바뀌면 세 파트가
+ * 함께 갱신돼야 하므로 팀 채팅에 먼저 알릴 것.
+ */
+export type OverrideAuditAction =
+  | "OFFERED"
+  | "REQUESTED"
+  | "APPROVED"
+  | "REJECTED"
+  | "OVERRIDE_USED"
+  /** 제안 후 계보가 달라져 새 제안으로 대체 (offer 시점 감지) */
+  | "SUPERSEDED"
+  /** 승인 소비 시도 시 계보 지문 불일치 → 낡은 승인 영구 무효 (소비 시점 감지) */
+  | "OVERRIDE_STALE";
+
+export interface OverrideAuditEntry {
+  approvalId: string;
+  sessionId: string;
+  toolName: string;
+  action: OverrideAuditAction;
+  /** 승인/거부한 사람 (resolveApproval의 resolvedBy) */
+  actor?: string;
+  timestamp: string;
 }
 
 // ---------------------------------------------------------------------------

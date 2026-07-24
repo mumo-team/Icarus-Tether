@@ -21,7 +21,6 @@ import {
   type ToolCallContext,
   type PolicyDecision,
   type SessionTaintState,
-  type TrifectaEvent,
   type OutputScanEvent,
   type SanitizationResult,
   SanitizationMethod,
@@ -93,7 +92,7 @@ export {
   type FieldSpec,
   type PatternSpec,
 } from "./config.js";
-export { loadToolRegistry, getToolRegistry, type ToolRegistry } from "./registry.js";
+export { loadToolRegistry, type ToolRegistry } from "./registry.js";
 export {
   detectSecrets,
   shannonEntropy,
@@ -105,9 +104,6 @@ export {
   extractStructured,
   tokenizePII,
   resolveToken,
-  ALLOWED_RECORD_TYPES,
-  NAME_MAX_LENGTH,
-  type ExtractedRecord,
   type SanitizeOutcome,
 } from "./sanitization.js";
 export {
@@ -1011,6 +1007,20 @@ export function evaluateOutboundContent(
   }
 }
 
+/**
+ * 엔진 내부 관측 로그용 트라이펙타 이벤트 구조 (구 shared/types TrifectaEvent).
+ * 계약에서 제거돼(발행 채널·소비자 없음) 로컬로만 유지한다 — 대시보드 표시는
+ * PolicyDecision.matchedTags가 담당하고, 이 값은 stderr 로그로만 쓰인다.
+ */
+interface TrifectaEvent {
+  id: string;
+  sessionId: string;
+  toolName: string;
+  matchedTags: ToolRiskTag[];
+  sinkClass: SinkClass;
+  timestamp: string;
+}
+
 function emitTrifectaEvent(
   ctx: ToolCallContext,
   sinkClass: SinkClass,
@@ -1024,7 +1034,7 @@ function emitTrifectaEvent(
     sinkClass,
     timestamp: new Date().toISOString(),
   };
-  // TODO(B/C): dashboard·audit-log 쪽으로 이 이벤트를 발행 (HTTP/이벤트버스 등)
+  // 관측 로그만 — 대시보드 표시는 PolicyDecision.matchedTags가 담당한다.
   console.log("[policy-engine] TrifectaEvent 발행:", event);
   return event;
 }
