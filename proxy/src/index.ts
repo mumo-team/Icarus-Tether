@@ -59,6 +59,22 @@ function writeAuditLog(entry: Omit<AuditLogEntry, "signature">): void {
   appendFileSync(AUDIT_LOG_PATH, JSON.stringify(signed) + "\n");
 }
 
+// tools 외 메서드를 무검사로 중계할 때, 최소한 그 사실을 감사로그에 남긴다.
+// 오염 추적은 아직 못 하지만, "무엇이 검사 없이 지나갔는지"는 보이게 한다(S5 대응 1단계).
+function logForwarded(sessionId: string, method: string): void {
+  const entry = {
+    id: randomUUID(),
+    sessionId,
+    method,
+    decision: "FORWARDED_UNCHECKED",
+    timestamp: new Date().toISOString(),
+  };
+  appendFileSync(
+    AUDIT_LOG_PATH,
+    JSON.stringify({ ...entry, signature: signEntry(entry) }) + "\n"
+  );
+}
+
 // [C 자리 스텁] 대시보드에서 사람이 승인하는 것을 흉내낸다.
 // 실전에선 C가 엔진의 requestApproval/resolveApproval을 호출한다.
 // 승인이 등록되면 에이전트가 같은 호출을 재시도할 때 엔진이 승인을 소비해 통과시킨다.
@@ -183,15 +199,28 @@ async function main() {
     return result;
   });
 
-  // [투명성] tools 외 모든 요청·알림은 손대지 않고 그대로 중계한다.
-  // 임의 메서드를 통과시키므로 타입 유니온을 우회(any)하고, 결과는 관대한 스키마로 받는다.
-  server.fallbackRequestHandler = async (req) =>
-    downstream.request({ method: req.method, params: req.params } as any, z.any());
-  server.fallbackNotificationHandler = async (n) => downstream.notification(n as any);
+  // [투명성] tools 외 모든 요청·알림은 그대로 중계한다.
+  // ⚠️ 알려진 한계: 이 경로는 정책 검사·오염 추적을 거치지 않는다. resources/read,
+  // prompts/get, sampling 등 데이터를 나르는 메서드가 여기로 빠지면 게이트웨이가
+  // 우회된다(S5 fail-open). 정식 해결(메서드 위험도 분류)은 별도 이슈. 그 전까지
+  // 최소한 "무엇이 무검사로 통과했는지"를 감사로그에 남겨 보이지 않는 우회를 막는다.
+  server.fallbackRequestHandler = async (req) => {
+    logForwarded(sessionId, req.method);
+    return downstream.request({ method: req.method, params: req.params } as any, z.any());
+  };
+  server.fallbackNotificationHandler = async (n) => {
+    logForwarded(sessionId, (n as { method?: string }).method ?? "notification");
+    return downstream.notification(n as any);
+  };
   // 역방향(서버→클라, 예: sampling/roots)도 통과.
-  downstream.fallbackRequestHandler = async (req) =>
-    server.request({ method: req.method, params: req.params } as any, z.any());
-  downstream.fallbackNotificationHandler = async (n) => server.notification(n as any);
+  downstream.fallbackRequestHandler = async (req) => {
+    logForwarded(sessionId, `↩${req.method}`);
+    return server.request({ method: req.method, params: req.params } as any, z.any());
+  };
+  downstream.fallbackNotificationHandler = async (n) => {
+    logForwarded(sessionId, `↩${(n as { method?: string }).method ?? "notification"}`);
+    return server.notification(n as any);
+  };
 
   // stdout은 에이전트와의 JSON-RPC 전용선이므로, 로그는 반드시 stderr(console.error)로.
   const upstreamTransport = new StdioServerTransport();
