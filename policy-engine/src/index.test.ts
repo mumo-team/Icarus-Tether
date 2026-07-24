@@ -73,10 +73,10 @@ test("트라이펙타 차단: 세션 태그 + 인자 전파(argTags) 조합으�
 // 시나리오 3. 정화 후 통과
 // ---------------------------------------------------------------------------
 
-test("정화 후 통과: 구조화 추출이 UNTRUSTED_ORIGIN을 해제해 세션이 다시 열림", () => {
+test("★F1(C1 회귀): U 구조화추출만으로는 재개방 안 됨 — 노출이력 영구 + S 잔존으로 차단 유지", () => {
   const sid = "s3-extract";
-  recordToolPayload(sid, "query_customer_db", { customer: "김민준", plan: "pro" });
-  recordToolPayload(sid, "fetch_web_page", { type: "ticket", name: "환불 문의" });
+  recordToolPayload(sid, "query_customer_db", { customer: "김민준", plan: "pro" }); // S
+  recordToolPayload(sid, "fetch_web_page", { type: "ticket", name: "환불 문의" });   // U
 
   // 정화 전에는 차단
   assert.equal(evaluateToolCall(ctx(sid, "send_email")).allowed, false);
@@ -86,10 +86,12 @@ test("정화 후 통과: 구조화 추출이 UNTRUSTED_ORIGIN을 해제해 세�
     [...result.originalTags].sort(),
     [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN].sort()
   );
-  assert.deepEqual(result.resultTags, [ToolRiskTag.SENSITIVE]); // UNTRUSTED만 해제
+  assert.deepEqual(result.resultTags, [ToolRiskTag.SENSITIVE]); // UNTRUSTED 노드 태그는 해제됨
 
-  // 트라이펙타가 깨졌으므로 통과
-  assert.equal(evaluateToolCall(ctx(sid, "send_email")).allowed, true);
+  // ★ F1: U를 추출해도 유출은 차단 유지 — 세션이 S를 들고 있고 노출이력(exposure)은
+  // 정화로 안 꺼지기 때문. (이전엔 U 해제로 세션이 열렸고, 그 "U 정화 후 S 전송"이
+  // 바로 C1 세탁 미탐이었다.) S축 재개방은 TOKENIZATION이 담당한다(아래 테스트).
+  assert.equal(evaluateToolCall(ctx(sid, "send_email")).allowed, false);
 });
 
 test("정화 후 통과: PII 토큰화가 SENSITIVE를 해제해 세션이 다시 열림", () => {

@@ -14,16 +14,19 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { randomUUID, createHash } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { startDashboardBridge, stopDashboardBridge, broadcastDecision, recordAudit, broadcastAuditIntegrity, broadcastLineage } from "./dashboard-bridge.js";
+import { checkInjection } from "./injection.js";
 import { z } from "zod";
+// 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
+import type { ToolCallContext } from "@icarus-tether/types";
+// ① 정책 엔진(B) — 판정과 오염 기록의 실제 구현.
 import {
   evaluateToolCall,
   recordToolResult,
   requestApproval,
   resolveApproval,
 } from "@icarus-tether/policy-engine";
-import type { ToolCallContext, AuditLogEntry } from "@icarus-tether/types";
 
 // ★ stdout 보호: stdio에서 stdout은 JSON-RPC 전용 채널인데, 정책 엔진은 로그를
 // console.log(stdout)로 찍는다. 그대로 두면 첫 로그가 프로토콜 스트림을 깨뜨리므로
@@ -36,7 +39,7 @@ const MOCK_SERVER_PATH = resolve(__dirname, "../test/mock-server.ts");
 // npx 대신 로컬 tsx를 절대경로로 직접 실행한다. npx는 cwd 기준으로 tsx를 찾기 때문에,
 // 에이전트가 임의의 cwd에서 프록시를 띄우면 tsx를 인터넷에서 새로 받으려 한다(느리고 오프라인 실패).
 const TSX_CLI = resolve(__dirname, "../../node_modules/tsx/dist/cli.mjs");
-const AUDIT_LOG_PATH = resolve(__dirname, "../audit.log");
+
 
 interface SessionState {
   id: string;
@@ -48,16 +51,6 @@ interface SessionState {
 // (오염 태그는 정책 엔진이 sessionId로 내부 추적하므로 여기서 들고 있지 않는다.)
 const sessions = new Map<string, SessionState>();
 
-// 기록 내용의 sha256 해시 = 위변조 방지 서명. 나중에 다시 계산해 비교하면 변조를 탐지.
-function signEntry(entry: unknown): string {
-  return createHash("sha256").update(JSON.stringify(entry)).digest("hex");
-}
-
-// 판정 하나를 서명 붙여 audit.log에 JSON 한 줄로 append. (C가 나중에 이 기록을 전시)
-function writeAuditLog(entry: Omit<AuditLogEntry, "signature">): void {
-  const signed: AuditLogEntry = { ...entry, signature: signEntry(entry) };
-  appendFileSync(AUDIT_LOG_PATH, JSON.stringify(signed) + "\n");
-}
 
 // tools 외 메서드를 무검사로 중계할 때, 최소한 그 사실을 감사로그에 남긴다.
 // 오염 추적은 아직 못 하지만, "무엇이 검사 없이 지나갔는지"는 보이게 한다(S5 대응 1단계).
@@ -98,6 +91,7 @@ async function main() {
     toolCalls: 0,
   });
   console.error(`[proxy] 세션 시작  session=${sessionId}`);
+  startDashboardBridge();
 
   const downstream = new Client({
     name: "icarus-tether-proxy-client",
@@ -124,7 +118,14 @@ async function main() {
       `[proxy] 세션 종료  session=${sessionId}  (도구호출 ${s?.toolCalls ?? 0}건)`
     );
     sessions.delete(sessionId);
-  });
+    // 세션 로그 전체를 검증해 무결성 결과를 대시보드에 방송한다.
+    broadcastAuditIntegrity();
+    // 방송이 소켓에 실제로 나갈 시간을 준 뒤 종료한다 — 즉시 exit하면 flush 전에 죽는다.
+    setTimeout(() => {
+      stopDashboardBridge();
+      process.exit(0);
+    }, 300);
+  })
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return await downstream.listTools();
@@ -149,14 +150,15 @@ async function main() {
     // 정책 엔진의 판정. 엔진이 세션 오염을 내부 추적하므로 태그를 따로 넘기지 않는다.
     const decision = evaluateToolCall(ctx);
 
-    writeAuditLog({
-      id: randomUUID(),
+    recordAudit({
       sessionId,
       toolName: name,
       decision: decision.allowed ? "ALLOWED" : "BLOCKED",
       matchedTags: decision.matchedTags,
-      timestamp: new Date().toISOString(),
     });
+
+    broadcastDecision(sessionId, name, decision, ctx.timestamp);
+    broadcastLineage(sessionId); // 판정 직후 현재 계보 스냅샷 방송 → TaintGraph 실시간 갱신
 
     if (!decision.allowed) {
       console.error(`[proxy] 차단  ${name}  reason=${decision.reason}`);
@@ -196,6 +198,11 @@ async function main() {
     }
 
     console.error(`[proxy] ⬅ 통과  ${name}`);
+
+    
+   // 비신뢰 출처 콘텐츠 인젝션 검사 (대상 판단·점수 산출·방송은 injection.ts가 한다).
+    await checkInjection(sessionId, name, result);
+
     return result;
   });
 

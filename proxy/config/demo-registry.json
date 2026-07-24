@@ -5,7 +5,12 @@
   "sinks": {
     "send_email": "OUTBOUND_SINK",
     "http_post": "OUTBOUND_SINK",
-    "write_external_file": "OUTBOUND_SINK"
+    "write_external_file": "OUTBOUND_SINK",
+    "fetch_web_page": "OUTBOUND_SINK",
+    "query_customer_db": "READ",
+    "read_internal_file": "READ",
+    "read_email": "READ",
+    "delete_customer_record": "WRITE_INTERNAL"
   },
   "unknownToolPolicy": "deny",
   "sensitiveSourcePolicy": "tag_all",
@@ -13,6 +18,8 @@
   "judgmentMode": "lineage",
   "hitlPolicy": "weak-only",
   "pruningPolicy": "off",
+  "destructivePolicy": "hitl",
+  "destructiveTools": ["delete_customer_record"],
   "toolLabels": {
     "query_customer_db": "고객 DB 조회",
     "read_internal_file": "내부 문서 읽기",
@@ -20,7 +27,8 @@
     "read_email": "이메일 읽기",
     "send_email": "이메일 보내기",
     "http_post": "외부로 전송",
-    "write_external_file": "외부 파일 쓰기"
+    "write_external_file": "외부 파일 쓰기",
+    "delete_customer_record": "고객 기록 삭제"
   },
   "secretDetection": {
     "bySource": true,

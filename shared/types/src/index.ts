@@ -99,6 +99,11 @@ export interface PolicyDecision {
    * reason(개발자용)은 그대로 유지되고, 이 필드는 UI 표시용 별도 계층이다.
    */
   explanation?: UserFacingExplanation;
+  /**
+   * [TIER3 출력-스캔] 나가는 값의 내용에서 세탁된 민감 원본/키가 감지돼 차단에
+   * 기여한 경우 채워진다. 없으면 스캔 미발동. 프록시가 대시보드로 그대로 전달한다.
+   */
+  outputScan?: OutputScanEvent;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +130,28 @@ export interface TrifectaEvent {
   matchedTags: ToolRiskTag[];
   sinkClass: SinkClass;
   timestamp: string;
+}
+
+// ---------------------------------------------------------------------------
+// 4b. 출력-스캔 이벤트 (TIER3 — 브레인이 발행 → 대시보드·감사로그가 구독)
+//     나가는 값 내용에서 세탁된 민감 원본/키가 감지됐을 때. 비밀 원본은 절대
+//     싣지 않는다 (해시·길이·종류만).
+// ---------------------------------------------------------------------------
+
+export interface OutputScanEvent {
+  id: string;
+  sessionId: string;
+  toolName: string;
+  sinkClass: SinkClass;
+  timestamp: string;
+  /** containment=세션이 읽은 민감 원본이 출력에 포함, regex=출력에 verbatim 키 패턴 */
+  kind: "containment" | "regex";
+  /** containment일 때, 그 민감 원본을 만든 소스 도구 이름 */
+  sourceTool?: string;
+  /** 매치된 값의 길이 (원본 대신 — 프라이버시) */
+  matchLen: number;
+  /** 매치된 값의 sha256 접두 (원본 역산 불가 — 감사 상관용) */
+  valueHash: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -181,4 +208,9 @@ export interface AuditLogEntry {
   timestamp: string;
   /** 위변조 방지용 서명 (해시 등). MVP에서는 비워둬도 됨 */
   signature?: string;
+    /**
+   * 직전 로그 항목의 signature. 각 줄을 사슬로 엮어, 나중에 줄을 지우거나
+   * 순서를 바꾸면 체인이 끊겨 탐지된다. 첫 줄은 제네시스라 값이 없다(선택).
+   */
+  prevHash?: string;
 }

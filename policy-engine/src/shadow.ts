@@ -12,7 +12,12 @@
  */
 
 import { SinkClass, ToolRiskTag, type ToolCallContext } from "@icarus-tether/types";
-import { getTaintNode, previewParentLinks, sessionHasLiveTag, type LinkMethod } from "./lineage.js";
+import {
+  getTaintNode,
+  getTombstoneTags,
+  previewParentLinks,
+  type LinkMethod,
+} from "./lineage.js";
 import { containsVaultOriginal } from "./sanitization.js";
 
 // ---------------------------------------------------------------------------
@@ -76,8 +81,14 @@ export function collectLineageEvidence(ctx: ToolCallContext): LineageEvidence {
   const { linkMethod, parentLinks } = previewParentLinks(ctx.sessionId, ctx.args);
   const nodes = parentLinks.flatMap((link) => {
     const node = getTaintNode(ctx.sessionId, link.nodeId);
-    return node
-      ? [{ nodeId: node.id, toolName: node.toolName, tags: [...node.tags], weak: link.weak }]
+    if (node) {
+      return [{ nodeId: node.id, toolName: node.toolName, tags: [...node.tags], weak: link.weak }];
+    }
+    // 재오염된 묘비도 판정 근거다 (교환성 수정 ①) — 깨끗한 묘비는 기존대로
+    // 태그 무기여라 제외한다 (evidence·지문 형태를 기존과 동일하게 유지).
+    const tombTags = getTombstoneTags(ctx.sessionId, link.nodeId);
+    return tombTags !== undefined && tombTags.size > 0
+      ? [{ nodeId: link.nodeId, toolName: "(pruned)", tags: [...tombTags], weak: link.weak }]
       : [];
   });
   const unionTags = new Set(nodes.flatMap((n) => n.tags));
@@ -95,7 +106,8 @@ export function collectLineageEvidence(ctx: ToolCallContext): LineageEvidence {
 export function runShadowEvaluation(
   ctx: ToolCallContext,
   sinkClass: SinkClass,
-  toyAllowed: boolean
+  toyAllowed: boolean,
+  sessionExposed: boolean
 ): void {
   try {
     let entry: ShadowLogEntry;
@@ -109,11 +121,12 @@ export function runShadowEvaluation(
       //   (argTags는 여기서 unionTags에 포함되지 않으므로 값-축 U는 unionTags만으로 본다.)
       const valueSensitive =
         unionTags.has(ToolRiskTag.SENSITIVE) || containsVaultOriginal(ctx.args);
+      // ★ 실제 판정부와 동일하게 U축을 노출이력으로 예측(F1 수정 반영) —
+      // sessionExposed는 호출부(index.ts)가 isSessionExposed로 넘긴다.
       const realBlocked =
         sinkClass === SinkClass.OUTBOUND_SINK &&
         valueSensitive &&
-        (unionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) ||
-          sessionHasLiveTag(ctx.sessionId, ToolRiskTag.UNTRUSTED_ORIGIN));
+        (unionTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) || sessionExposed);
       const realAllowed = !realBlocked;
       const match = realAllowed === toyAllowed;
 

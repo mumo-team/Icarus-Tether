@@ -7,19 +7,25 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "demo:attack": "TAINTGUARD_TOOL_REGISTRY=$PWD/config/demo-registry.json tsx test/mock-client.ts",
-    "demo:approve": "TAINTGUARD_TOOL_REGISTRY=$PWD/config/demo-registry.json APPROVAL_DECISION=approve tsx test/mock-client.ts",
-    "demo:safe": "TAINTGUARD_TOOL_REGISTRY=$PWD/config/demo-registry.json tsx test/mock-client-safe.ts",
-    "test:exfil": "TAINTGUARD_TOOL_REGISTRY=$PWD/config/demo-registry.json tsx test/mock-client-exfil.ts"
+    "demo:attack": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client.ts",
+    "demo:approve": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json APPROVAL_DECISION=approve tsx test/mock-client.ts",
+    "demo:safe": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-safe.ts",
+    "demo:hitl": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/demo-client-hitl.ts",
+    "test:bridge": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json AUTO_APPROVE=1 DEMO_PACE_MS=0 tsx test/demo-client-hitl.ts",
+    "test:exfil": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-exfil.ts"
   },
   "dependencies": {
     "@icarus-tether/policy-engine": "*",
     "@icarus-tether/types": "*",
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ws": "^8.18.0",
+    "@huggingface/transformers": "^3.0.0"
   },
-  "devDependencies": {
+ "devDependencies": {
     "typescript": "^5.6.0",
+    "cross-env": "^7.0.3",
     "tsx": "^4.19.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0"
   }
 }

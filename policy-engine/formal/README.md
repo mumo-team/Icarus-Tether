@@ -8,17 +8,46 @@
 | `TaintLineage.tla` | **값 단위 계보 판정(real)** — snapshot 전파 + 비대칭 정화 + 차단 규칙 |
 | `TaintLineageLive.tla` | **live 전파 확장** — addNodeTags+cascadeDown(사후 오염·하향 전파) + sink 재통과 |
 | `TaintHITL.tla` | **HITL 오버라이드 — TOCTOU 발견→수정 검증** ★ 1단계: 버그 재현(반례 5스텝) → 2단계: 소비 시점 계보 지문 대조 추가 후 위반 0 |
+| `TaintPruning.tla` | **가지치기 상태-점별 판정 보존(PruneSafety)** — 수정 전 의미론에서도 성립 (보존 기록) |
+| `TaintPruningCommute.tla` | **가지치기 교환성 — 발견→수정 검증** ★ 1단계: 반례 5스텝(git 이력) → 2단계: 재오염 가능 묘비 반영 후 위반 0 |
+| `TaintDestructiveHITL.tla` | **파괴적 액션 게이트 + HITL** — "비신뢰가 유발한 파괴"만 차단. 불변식 3종 위반 0 (구현보다 모델 선행 — model-first) |
 
-## 증명된 속성 (TaintLineage)
+## 증명된 속성 (TaintLineage) — ★F1 수정 반영판 (비대칭 + 노출이력)
 
-> **SinkSafety**: 어떤 실행 순서로도, SENSITIVE와 UNTRUSTED를 둘 다 가진 노드가
-> (정화되지 않은 채) sink에 도달하는 것은 불가능하다.
+> **ExfilSafety**: 어떤 실행 순서로도, 세션이 비신뢰에 노출된 상태(exposure)에서
+> 민감(SENSITIVE) 값이 sink에 도달하는 것은 불가능하다.
 
-- 검증 결과 (snapshot, TaintLineage): 노드 4개 기준 **16,852,481 상태 생성 /
-  3,637,018 고유 상태 전수 탐색, 위반 0** (TLC 2026.05, 76초).
-- sanity check: `ReachSink`의 차단 guard(`~Trifecta(tags[n])`)를 제거한 변형에서는
-  SinkSafety가 4스텝 반례로 **즉시 깨짐**을 확인 — 불변식이 공허하게 참이 아니라
-  실제로 차단 규칙 덕에 성립함을 보인다.
+★ 이전 모델은 U를 S와 대칭인 노드 태그로 두고 `Declassify`로 제거 가능하게 했다 —
+이것이 정확히 헌팅에서 발견한 **F1(정화 세탁 미탐)의 형식적 뿌리**였다: 실제 코드의
+비대칭 위협 모델은 U축을 "세션 존재"로 보는데, 정화가 그 U 노드를 떼면 세션 U축이
+통째로 꺼져(sessionHasLiveTag=false) 정화와 무관한 유출(C1)·삭제(P6)가 열렸다.
+
+수정: U축을 노드 태그가 아니라 **세션 노출이력(exposure, grow-only)**으로 모델링한다.
+- `exposure`: 어떤 노드든 U를 획득하면 TRUE, 이후 절대 FALSE 안 됨.
+- `Declassify`는 노드의 값-계보 태그(S)만 떼고 `exposure`는 UNCHANGED (정화 불변).
+- 차단 = `valueSensitive(S ∈ tags[n]) ∧ exposure`. S를 토큰화하면 통과(RE35),
+  U-only는 S가 없어 통과(RE36), "U 정화 후 무관 S 전송"(C1)만 차단.
+
+**양립 논증** (세탁방지 vs 과차단방지가 서로 다른 축이라 안 충돌): 세탁 방지는
+`ExposureMonotone`(정화가 U축을 못 끔), 과차단 방지는 차단식의 `valueSensitive ∧`
+항(S를 정화하면 통과) — 두 목표가 각각 다른 연산자 항에 걸려 상호 간섭이 없다.
+
+- 검증 결과 (TaintLineage, 수정판): 노드 4개 기준 **42,490,597 상태 생성 /
+  7,641,457 고유 상태 전수 탐색(깊이 19), 불변식 4종(TypeOK / ★ExfilSafety /
+  ParentsExist / Unborn) + 속성 ExposureMonotone 위반 0** (TLC 2026.07, 3분 17초).
+- ★ 버그 재현(F1 실재 증명): `ReachSink` guard를 옛 대칭판
+  `~(S ∈ tags[n] ∧ U ∈ tags[n])`로 되돌린 변형에서 **ExfilSafety가 반례로 깨짐** —
+  U 노드를 declassify한 뒤 S 값이 노출 세션을 통과(C1)한다. 수정판(exposure)에서는
+  그 통과가 비활성.
+- 비공허성 witness 2종(원본 무손상): `NoCleanSExit` 반례 = 노출 전 S 정상 통과
+  (RE35류, 과차단 아님); `NoExposedExit` 반례 = 노출 세션에서 S 없는 값 통과(RE36류).
+
+### (참고) 이전 대칭 SinkSafety의 위상
+
+수정 전 `SinkSafety(~Trifecta(tagsAtExit))`는 "S+U 노드가 함께 sink 도달 불가"를
+증명했다. 새 `ExfilSafety`는 그 조건을 **포함하며 더 강하다**: S+U 노드는 U 획득으로
+exposure를 켜므로 (S ∧ exposure)로 여전히 차단되고, 추가로 "U를 정화로 떼도 S 유출
+차단"(C1)까지 막는다. 즉 수정은 기존 안전성의 순확장(regression 없음)이다.
 
 ## live 전파 확장 (TaintLineageLive)
 
@@ -161,6 +190,167 @@ ConsumeStale 전이)한 뒤:
      단 새 제안 발급 → 재승인하면 통과 (A였다면 낡은 승인이 그대로 통과했을 케이스).
    - T4 정상 케이스: 계보 무변화 → 승인 그대로 1회 통과.
 
+## 가지치기(묘비 압축) — PruneSafety 증명 + 교환성 발견→수정 (TaintPruning / TaintPruningCommute)
+
+`pruneSessionLineage`(lineage.ts)의 핵심 안전성 "가지치기 전후 판정 불변"을 두 층으로
+전수 증명했다. fast-check(★판정 보존, pruning.test.ts)의 설계판이자, 그 테스트가
+못 보던 구멍의 발견→수정 기록이다.
+
+### 1층 — 상태-점별 보존 (TaintPruning.tla): 위반 0
+
+> **PruneSafety**: 모든 도달 가능 상태 × 모든 프로브(무참조 폴백 / `_taintRef` 명시
+> 참조 / 값 매칭)에서, "묘비 압축된 실세계"와 "아무것도 안 지운 이상세계"의 sink
+> 판정이 같다. Prune 전이는 pruned만 바꾸고 이상세계 판정은 pruned와 무관하므로
+> "Prune 직전 판정 = 직후 판정"(테스트의 ★속성)이 따름정리로 나온다.
+
+- 검증 결과: 노드 4개 기준 **2,775,761 상태 생성 / 352,346 고유 상태 전수 탐색
+  (깊이 12), 위반 0** (35초, TLC 2026.07). 불변식 5종(TypeOK / ★PruneSafety /
+  PrunedClean / ParentsExist / Unborn) 전부 cfg 활성.
+- 모델링 결정: 판정을 ReachSink 전이 + exfiltrated 스냅샷 대신 **상태 함수**
+  `Blocked(kind, R)`로 — "가지치기 전 스냅샷 보관"이 필요 없어 상태가 작고,
+  모든 상태에서 모든 프로브를 동시 검사하므로 더 강하다. 묘비의 id+resultTokens
+  보존은 "pruned 노드에 대한 참조가 여전히 해소된다"(R ⊆ created)로 표현.
+- 비공허성 witness 3종(스크래치패드 변형, 반례 트레이스로 확보): 가지치기 발생 후에도
+  frontier 차단 유지 / 무참조는 차단인데 묘비 참조는 통과 / 자식 먼저→부모 승격 연쇄.
+- mutation sanity 2종 — 불변식이 살아있음을 양방향으로: clean guard 제거 →
+  묘비가 오염을 숨겨 **유출 방향** 3스텝 반례. 묘비 없는 완전 삭제 → 깨끗 참조가
+  폴백 강등돼 **과차단 방향** 4스텝 반례 ("노드를 통째로 지우면 통과→차단"이라는
+  묘비 주석의 형식적 확인).
+
+### 2층 — 교환성 구멍: 발견 (1단계, 반례) → 수정 → 재증명 (TaintPruningCommute)
+
+1층은 "묘비가 그래프에 **있던** 정보를 잃지 않음"이다. 더 강한 질문 — "prune과
+**미래** 연산이 교환하는가"(가지치기 낀 세션 ≡ 없던 세션) — 에는 수정 전 코드가
+반례를 갖고 있었다. fast-check는 prune을 항상 시퀀스 마지막에 두므로 관측 불가.
+
+**1단계 (버그 재현판 — git 이력)**: 두-세계 lockstep(태그 두 벌: 절단 vs 관통)에서
+**CommuteSafety 위반, 최단 반례 5스텝** 양방향:
+
+```text
+유출:   Create(n1 깨끗 루트) → Create(n2, 부모 n1) → Create(n3 {U})
+        → Prune(n2) → AddTag(n1, S)   ⇒ REF{n2}: 이상세계 차단 / 실세계 통과
+        수정 전 prune이 childIndex 엣지를 지워 cascade가 묘비에서 절단 —
+        묘비는 resultTokens로 참조가 여전히 해소되므로 그 값이 조용히 나간다.
+과차단: 같은 골격에서 MATCH{n2} — "묘비=무조건 깨끗" 취급이라 재오염 묘비를
+        잡은 값 매칭에서 안전 바닥(fail-open 3차 수정)이 오발동해 차단.
+```
+
+- 코드 재현 확인: 쌍둥이 세션(가지치기 유/무) 프로브 — 수정 전 `allowed: true` vs
+  `false`로 실측 발산 (현 `pruning.commute.test.ts` T1이 그 시나리오의 회귀 테스트).
+- 모델 건전성: CommuteSafety 제외 불변식(TypeOK/WorldMono/ParentsExist/Unborn)은
+  35,290 상태 위반 0. WorldMono(실세계 태그 ⊆ 이상세계)가 "절단은 덜 퍼뜨리는
+  방향으로만 발산 = 유출 방향"임을 구조적으로 보였다.
+
+**2단계 (수정 — "재오염 가능 묘비", model-first)**: 코드보다 모델을 먼저 고쳐
+TLC로 의미론을 확정한 뒤 이식했다. 더 약한 안(cascade 관통만, 묘비 tags 없이)은
+묘비 자기 참조 프로브가 여전히 발산함을 손 시뮬레이션으로 확인하고 기각.
+
+- 묘비 = `{resultTokens, tags, parents}` — tags는 prune 시점 항상 `{}`(clean guard),
+  이후 **cascadeDown 관통으로만 증가** (grow-only, 정화 불가 — fail-closed).
+- prune이 childIndex 엣지 유지, childless 판정은 "live 자식 없음" (연쇄 fixpoint 유지).
+- 판정 5곳이 묘비 태그 반영: ① evidence unionTags(shadow.ts) ② 안전 바닥
+  resolvedTaint ③ 생성 상속 ④ sessionHasLiveTag ⑤ frontier(후보+커버).
+  안전 바닥과의 관계는 충돌이 아니라 정확화 — 바닥의 의도("오염 출처 미식별 =
+  의심 = 차단")에서 재오염 묘비를 잡은 매칭은 "출처 식별"이므로 바닥을 건너뛴다.
+  묘비 tags는 평소 비어 있어 기존 fail-open 3차 수정 동작은 그대로다.
+- 묘비 직접 `addNodeTags`는 여전히 throw(fail-closed) — 조용한 경로(cascade)만 관통.
+
+**2단계 결과**:
+
+1. **모델 (위반 0)**: 두-저장소 메커니즘(tagsL=live, tagsT=묘비 vs 이상세계 단일
+   저장소)을 정직하게 모델링 — **33,514 상태 생성 / 6,906 고유 전수 탐색(깊이 13),
+   불변식 7종(★CommuteSafety / CommuteNoLeak / CommuteNoOverblock /
+   ★StoreFaithful(태그 수준 동치) / TypeOK / ParentsExist / Unborn) 위반 0**.
+   비공허성 witness: 묘비가 cascade로 실제 태그를 받는 상태 도달(4스텝 트레이스).
+2. **구현 테스트**: 기존 127개 무수정 통과 + 신규 4개(`src/pruning.commute.test.ts`)
+   = **131 pass / 0 fail**: ★T1 유출 회귀(반례 시나리오 → 차단) / T2 묘비 너머
+   live 자손까지 관통 전파 / T3 과차단 해소(재오염 묘비 잡은 매칭 = 바닥 미발동) /
+   ★T4 fast-check 강화판 — prune을 시퀀스 **중간**에 끼우고 쌍둥이 세션과 전 프로브
+   판정 비교 (기존 fast-check가 못 보던 계열의 상시 감시).
+3. **과차단·성능 회귀 없음**: 벤치마크 오탐률 수정 전후 동일 — lineage 정상 오탐
+   5/50 = **10.0%** (boundary 5/10, easy 0/40), 미탐 4.3%, 승패 케이스 목록 불변.
+
+### 1층 모델의 의미론 시점
+
+TaintPruning.tla는 **수정 전(절단) 의미론의 보존 기록**이다 — 수정 전 코드에서도
+상태-점별 보존은 성립했다(fast-check ★판정 보존이 통과하던 이유가 바로 이것).
+현재 lineage.ts와의 전이 대응은 TaintPruningCommute.tla(수정판)를 기준으로 볼 것.
+
+## 파괴적 액션 게이트 — model-first 신규 설계 (TaintDestructiveHITL)
+
+기존 모델들이 "발견→수정"이었다면 이건 **설계 선행**이다: 구현 전에 모델을 먼저
+작성·검증해 의미론을 확정하고 코드로 이식했다(가지치기 2단계와 같은 관례).
+게이트의 요구사항은 "삭제 자체가 아니라 **비신뢰 출처가 유발한 파괴**만 차단" —
+판정 술어는 `destructiveTools 등록 도구 AND 세션 U-집합 비어있지 않음`이고,
+HITL(destructivePolicy:"hitl")은 승인 시점 U-집합 스냅샷을 지문으로 저장해
+소비 시점과 대조한다(TaintHITL 2단계 메커니즘의 동형 재사용 — 단 상태 공간이
+값-계보 strength가 아니라 **U-집합의 증가/감소**).
+
+기존 TaintHITL이 커버 못 하는 새 축 3가지가 이 모델의 존재 이유: ① 판정 술어가
+다르고(트라이펙타 vs 세션 U-존재) ② 변이 알파벳이 다르고(strength 승격 vs
+ReadUntrusted/DeclassifyU) ③ 기계가 둘이다(유출·파괴 게이트의 offers 저장소
+교차 간섭은 단일 기계 모델로 표현 불가).
+
+### 검증된 불변식 (본 실행: SharedKeys=FALSE, 위반 0) — ★F1 수정 반영판
+
+★ **F1 수정 (정화 세탁 미탐 P6)**: 이전 모델은 `DExecNoU`(승인 없는 삭제)를
+`uSet = {}`(살아있는 U 없음)에 활성화했다. 그런데 `DeclassifyU`(정화)가 uSet을 비울
+수 있어, 공격자가 비신뢰 콘텐츠를 정화해 uSet을 비운 뒤 승인 없이 삭제가 실행됐다.
+즉 이전 `DestructiveSafety("NO_U는 uAtExit={}이면 안전")`가 F1을 안전으로 **잘못
+모델링**하고 있었다. 수정: 세션 노출이력 `exposure`(grow-only, DeclassifyU가 못 끔)를
+두고, `DExecNoU`는 `~exposure`일 때만, `DOffer`(HITL)는 `exposure`일 때 활성화한다.
+
+> **DestructiveSafety** (F1 강화): 노출된 세션(exposureAtExit)의 파괴 실행은 전부
+> 사람 승인(OVERRIDE) 경유. 역방향 — 승인 없는(NO_U) 실행은 반드시 **노출이력 없는**
+> 세션 = 사용자 직접 지시 삭제만 승인 없이 통과(과차단 아님). ★이전판은 "uAtExit={}"
+> 라 정화로 uSet을 비운 NO_U 실행을 안전으로 오판했다(P6) — 이제 exposureAtExit로 판정.
+>
+> **ExposureMonotone**: `exposure`는 한 번 TRUE가 되면 어떤 전이(DeclassifyU 포함)도
+> FALSE로 못 돌린다 — 정화가 파괴 축을 세탁하지 못함의 형식적 근거.
+>
+> **ApprovalFreshness** (TOCTOU): 승인 경유 실행은 실행 시점 U-집합 = 제안 시점
+> 스냅샷일 때만. id 신선성(정화된 노드 id 재사용 불가 = 코드 tn_uuid) 덕에 "달라졌다
+> 되돌아온 집합"은 존재 불가.
+>
+> **GateIsolation**: 파괴 게이트의 어떤 행동도 유출 offer를 봉인(SUPERSEDED)·
+> 소각(STALE)하지 못하고 역방향도 동일 — 코드 수정(hitl.ts 지문에 gate 판별자
+> 포함 = offer 공간 서로소)의 모델판. **TaintHITL의 전제("유출 offers는 유출
+> 게이트만 만진다")가 파괴 게이트 추가 후에도 유지되는 근거.**
+
+- 검증 결과 (수정판): UNodes 2 × Calls 2 기준 **20,641,001 상태 생성 / 3,695,500
+  고유 상태 전수 탐색(깊이 41), 불변식 5종(TypeOK / ★DestructiveSafety /
+  ★ApprovalFreshness / ★GateIsolation / SnapConsistency) + 속성 ExposureMonotone
+  위반 0** (28초, TLC 2026.07).
+- ★ **F1 버그 재현**: `DExecNoU` guard를 옛 `uSet = {}`로 되돌린 변형에서
+  **DestructiveSafety가 4스텝 반례로 깨짐**: `ReadUntrusted(u1) → DeclassifyU(u1) →
+  DExecNoU(c1)` — 정화로 uSet을 비운 뒤 승인 없는 삭제(exposureAtExit=TRUE, via=NO_U).
+  수정판(`~exposure`)에서 그 스텝이 비활성 = 차단. (P6의 형식판.)
+- **버그 재현 (설계 검토에서 발견한 구멍의 실재 증명)**: 수정 전 설계(지문에 gate
+  없음 = naive 공유 키)는 별도 git 이력이 아니라 **모델 내 `SharedKeys` 상수**로
+  보존했다. `SharedKeys=TRUE` 변형(스크래치 cfg)에서 GateIsolation이 **4스텝
+  반례로 즉시 깨진다**: `ReadUntrusted(u1) → DOffer(c1) → CrossSupersedeByE(c1)`
+  — 유출 게이트의 제안이 진행 중인 파괴 제안을 지문 충돌로 봉인(사람이 승인
+  중이던 approvalId가 소리 없이 죽는 시나리오).
+- 비공허성 witness 2종 (스크래치 cfg, 원본 무수정): `NoOverrideExit` 반례 5스텝 =
+  정상 승인 흐름 통과(`Read → DOffer → DApprove → DConsume`, U-그림 무변화);
+  `NoNoUExit` 반례 2스텝 = 직접 삭제가 승인 없이 통과(`DExecNoU`) — "무조건 막는
+  게이트가 아님"의 형식적 확인.
+- mutation sanity: DConsume의 지문 대조 guard(`uSet = dSnap[c]`) 제거 변형에서
+  ApprovalFreshness가 **5스텝 반례**로 깨진다: 승인 후 `DeclassifyU`로 U-그림이
+  변했는데도 실행 — guard가 공허하지 않게 실제로 일하고 있다.
+- 구현 대응: config.ts(`destructivePolicy`/`destructiveTools`), index.ts
+  `computeDestructiveDecision`·`evaluateToolCall` 합성(승인 소각 방지 peek
+  프로토콜), hitl.ts gate 판별자 + `peekApprovalMatches`, lineage.ts
+  `collectLiveTagHolders`(U-스냅샷 = 승인 지문 입력). ★F1 수정 후 파괴 게이트
+  발동은 노출이력(`sessionExposure`, index.ts)이라 정화로 못 품 — HITL 승인만 해제.
+- **F1 근본 수정(노출이력) 총괄**: 유출·파괴 양축의 U 판정을 세션 노출이력
+  (`sessionExposure`, grow-only)으로 통일. U 태깅(`addSessionTags`)에서 세팅,
+  정화는 못 끔. 유출은 `valueSensitive AND exposure`(RE35/RE36 과차단 없음),
+  파괴는 `exposure`(HITL만 해제). 회귀 테스트: `f1-exposure.test.ts`(C1 차단 +
+  RE35/RE36 유지 + 단조성), `destructive*.test.ts` P6 앵커, property.test.ts
+  RefModel 오라클도 노출이력으로 정정. 전체 **199 pass / 0 fail**. 벤치마크
+  lineage 오탐/미탐 F1 전과 동일(RB01-05 흐름분리·RS09 회귀 불변).
+
 ## 구현 검증 (fast-check)
 
 TLA+가 "설계"의 SinkSafety를 증명했다면, `src/property.test.ts`는 같은 속성을
@@ -223,10 +413,14 @@ cd policy-engine/formal
 java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintLineage.tla
 java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintLineageLive.tla
 java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintHITL.tla
+java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintPruning.tla
+java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintPruningCommute.tla
+java -cp <tla2tools.jar 경로> tlc2.TLC -deadlock -workers auto TaintDestructiveHITL.tla
 ```
 
 - TaintHITL은 **위반 0이 정상** (2단계 수정 반영판 — 위 섹션). 1단계 버그
-  재현판(반례 5스텝)은 git 이력 참조. 반례/witness의 최단 트레이스를 보려면
+  재현판(반례 5스텝)은 git 이력 참조. TaintPruning·TaintPruningCommute도
+  **위반 0이 정상** — Commute의 1단계 재현판(반례 5스텝) 역시 git 이력 참조. 반례/witness의 최단 트레이스를 보려면
   `-workers 1`로 (병렬 BFS는 같은 깊이의 다른 반례를 먼저 보고할 수 있다).
   TLC가 남기는 `*_TTrace_*.tla/.bin`과 `states/`의 새 타임스탬프 디렉토리는
   생성물이니 커밋하지 말 것.
