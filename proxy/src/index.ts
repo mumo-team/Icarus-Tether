@@ -52,6 +52,70 @@ interface SessionState {
 const sessions = new Map<string, SessionState>();
 
 
+// ── (사) 메서드 위험도 분류 ──────────────────────────────────────────────
+// tools/call은 evaluateToolCall로 검사하지만, 그 외 메서드는 fallback으로 빠져
+// 무검사 중계된다(S5 fail-open). 메서드 이름도 도구처럼 위험도로 나눠, 최소한
+// 어떤 성격의 통신이 오갔는지 판정·기록할 수 있게 한다.
+//   SINK     : 데이터가 밖으로 나갈 수 있는 메서드 → tools/call처럼 검사 대상
+//   HARMLESS : 목록·메타·수명주기 조회 → 데이터를 나르지 않음, 그냥 통과 OK
+//   (그 외)  : 미분류 → 일단 통과하되 정식 기록 (SOURCE 오염 추적은 B 몫: 사-B)
+// resources/read·prompts/get은 '데이터 유입(SOURCE)'이라 오염 태깅이 필요한데,
+// 그 태깅은 엔진(B) 내부 로직이므로 여기서는 미분류로 두고 처리는 이슈로 넘긴다.
+
+// 외부로 데이터가 나갈 수 있는 메서드.
+const SINK_METHODS = new Set<string>([
+  "sampling/createMessage", // 서버가 클라의 LLM에 컨텍스트를 보냄 = 외부 유출구
+]);
+
+// 데이터를 나르지 않는 메타/목록/수명주기 메서드 (무검사 통과해도 안전).
+const HARMLESS_METHODS = new Set<string>([
+  "ping",
+  "initialize",
+  "tools/list",
+  "resources/list",
+  "resources/templates/list",
+  "prompts/list",
+  "roots/list",
+  "logging/setLevel",
+  "completion/complete",
+]);
+
+type MethodRisk = "SINK" | "HARMLESS" | "UNCLASSIFIED";
+
+// 메서드명 → 위험도. 알림(notifications/*)은 상태 통지일 뿐이라 무해로 본다.
+function classifyMethod(method: string): MethodRisk {
+  if (SINK_METHODS.has(method)) return "SINK";
+  if (HARMLESS_METHODS.has(method)) return "HARMLESS";
+  if (method.startsWith("notifications/")) return "HARMLESS";
+  return "UNCLASSIFIED";
+}
+
+// tools 외 메서드를 무검사로 중계할 때, 최소한 그 사실을 눈에 보이게 남긴다(S5 대응 1단계).
+// audit.log는 dashboard-bridge가 해시 체인(ALLOWED/BLOCKED 판정)으로 관리하므로,
+// 여기서 파일에 직접 append하면 체인이 깨진다 → stderr 로그로만 남긴다.
+// (정식 해결: 메서드 위험도 분류로 이 경로도 판정·기록 — 별도 작업 (사))
+function logForwarded(sessionId: string, method: string, risk: MethodRisk = "UNCLASSIFIED"): void {
+  // SINK는 눈에 띄게, 미분류(?)는 주의 표시, 무해는 표식 없음.
+  const mark = risk === "SINK" ? "⚠SINK " : risk === "UNCLASSIFIED" ? "? " : "";
+  console.error(`[proxy] ↪ 무검사 중계 ${mark} method=${method}  session=${sessionId}`);
+}
+
+// fallback로 빠지는 메서드를 분류해 audit.log에 정식 기록하고 stderr에도 남긴다.
+// C의 recordAudit는 decision이 ALLOWED|BLOCKED뿐이라, '무검사 통과'는 ALLOWED로 매핑한다.
+// (SINK 완전 차단은 세션 오염 정보가 필요 → 사-B(B) 이후. 지금은 SINK도 통과시키되
+//  stderr에 ⚠SINK로 눈에 띄게 남긴다. matchedTags 타입은 B 소관이라 늘리지 않는다.)
+function auditForward(sessionId: string, method: string, reverse = false): void {
+  const risk = classifyMethod(method); // 분류는 항상 순수 메서드명으로 (↩ 방향표시 제거된 값)
+  const label = reverse ? `↩${method}` : method; // 로그·기록엔 방향을 남긴다
+  logForwarded(sessionId, label, risk);
+  recordAudit({
+    sessionId,
+    toolName: label, // 'resources/read'처럼 '/'가 있어 실제 도구명과 구분된다
+    decision: "ALLOWED", // 무검사 통과 = 허용된 것으로 기록 (C 타입 그대로 사용)
+    matchedTags: [],
+  });
+}
+
 // [C 자리 스텁] 대시보드에서 사람이 승인하는 것을 흉내낸다.
 // 실전에선 C가 엔진의 requestApproval/resolveApproval을 호출한다.
 // 승인이 등록되면 에이전트가 같은 호출을 재시도할 때 엔진이 승인을 소비해 통과시킨다.
@@ -190,15 +254,31 @@ async function main() {
     return result;
   });
 
-  // [투명성] tools 외 모든 요청·알림은 손대지 않고 그대로 중계한다.
-  // 임의 메서드를 통과시키므로 타입 유니온을 우회(any)하고, 결과는 관대한 스키마로 받는다.
-  server.fallbackRequestHandler = async (req) =>
-    downstream.request({ method: req.method, params: req.params } as any, z.any());
-  server.fallbackNotificationHandler = async (n) => downstream.notification(n as any);
-  // 역방향(서버→클라, 예: sampling/roots)도 통과.
-  downstream.fallbackRequestHandler = async (req) =>
-    server.request({ method: req.method, params: req.params } as any, z.any());
-  downstream.fallbackNotificationHandler = async (n) => server.notification(n as any);
+  // [투명성] tools 외 모든 요청·알림은 그대로 중계한다.
+  // ⚠️ 알려진 한계(S5 fail-open): 이 경로는 정책 검사·오염 추적을 거치지 않는다.
+  // 그 전까지의 완화책(작업 사-A): 요청은 메서드 위험도로 분류해 audit.log에 정식
+  // 기록하고, SINK(sampling 등)는 stderr에 ⚠로 드러낸다. 근본 해결(resources/read
+  // 결과의 SOURCE 오염 태깅)은 엔진(B) 몫 → 사-B 이슈. 알림은 데이터를 안 나르고
+  // 양이 많아 stderr 로그만 남긴다(audit 기록은 요청만).
+  server.fallbackRequestHandler = async (req) => {
+    auditForward(sessionId, req.method);
+    return downstream.request({ method: req.method, params: req.params } as any, z.any());
+  };
+  server.fallbackNotificationHandler = async (n) => {
+    const m = (n as { method?: string }).method ?? "notification";
+    logForwarded(sessionId, m, classifyMethod(m));
+    return downstream.notification(n as any);
+  };
+  // 역방향(서버→클라, 예: sampling/createMessage·roots)도 통과. sampling은 SINK다.
+  downstream.fallbackRequestHandler = async (req) => {
+    auditForward(sessionId, req.method, true);
+    return server.request({ method: req.method, params: req.params } as any, z.any());
+  };
+  downstream.fallbackNotificationHandler = async (n) => {
+    const m = (n as { method?: string }).method ?? "notification";
+    logForwarded(sessionId, `↩${m}`, classifyMethod(m));
+    return server.notification(n as any);
+  };
 
   // stdout은 에이전트와의 JSON-RPC 전용선이므로, 로그는 반드시 stderr(console.error)로.
   const upstreamTransport = new StdioServerTransport();
