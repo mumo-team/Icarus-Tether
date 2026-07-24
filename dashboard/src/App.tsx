@@ -1,15 +1,16 @@
 import { useState,useEffect, useRef } from "react";
-import type { AuditLogEntry, ApprovalRequest, PolicyDecision, UserAction } from "@icarus-tether/types";
+import type { AuditLogEntry, ApprovalRequest, PolicyDecision, UserAction, OutputScanEvent } from "@icarus-tether/types";
 import MetricCards from "./components/MetricCards";
 import TrifectaWarningBanner from "./components/TrifectaWarningBanner";
 import ThreatFusionBanner from "./components/ThreatFusionBanner";
 import EventLogTimeline from "./components/EventLogTimeline";
 import ApprovalQueue from "./components/ApprovalQueue";
 import SanitizationCompareView from "./components/SanitizationCompareView";
-import { type LineageNode } from "./components/TaintGraph";
+import TaintGraph, { type LineageNode } from "./components/TaintGraph";
 import ForensicReplay from "./components/ForensicReplay";
 import TrifectaApprovalModal from "./components/TrifectaApprovalModal";
 import AuditTimeline, { type HitlAuditEntry } from "./components/AuditTimeline";
+import OutputScanPanel from "./components/OutputScanPanel";
 
 interface InjectionCheckEntry {
   id: string;
@@ -18,6 +19,7 @@ interface InjectionCheckEntry {
   isInjection: boolean;
   score: number;
   timestamp: string;
+  evaluated: boolean;
 }
 
 const SAMPLE_BLOCKED_DECISION: PolicyDecision = {
@@ -65,6 +67,7 @@ export default function App() {
     ok: boolean;
   } | null>(null);
   const [snapshots, setSnapshots] = useState<LineageNode[][]>([]);
+  const [outputScans, setOutputScans] = useState<OutputScanEvent[]>([]);
 
     useEffect(() => {
     let disposed = false; // 언마운트 후 재연결 타이머가 되살아나는 것 방지
@@ -93,6 +96,7 @@ export default function App() {
             timestamp: data.timestamp,
           };
           setLogs((prev) => [...prev, entry]);
+          if (data.outputScan) setOutputScans((prev) => [...prev, data.outputScan]);
           // 승인 가능한 차단이 오면 모달을 자동으로 띄운다 — 발표 3단계 "와우 포인트".
           if (data.allowed === false && data.canOverride && data.approvalId) {
             setModalDecision({
@@ -151,6 +155,7 @@ export default function App() {
             isInjection: data.isInjection,
             score: data.score,
             timestamp: data.timestamp,
+            evaluated: data.evaluated ?? true,
           };
           setInjectionChecks((prev) => [...prev, entry]);
         }
@@ -257,7 +262,9 @@ export default function App() {
         console.log("[대시보드] 정화 요청:", action.detail);
       } else {
         console.error("[대시보드] proxy 연결이 없어 정화를 요청할 수 없습니다");
-      }
+      } 
+    } else if (action.kind === "INSPECT_SOURCE") {
+      document.getElementById("taint-graph-panel")?.scrollIntoView({ behavior: "smooth" });
     } else {
       console.log("[대시보드] 아직 미배선 액션:", action.kind, action.label);
     }
@@ -273,6 +280,10 @@ export default function App() {
       <p style={{ color: wsConnected ? "#2e7d32" : "#d32f2f", fontWeight: "bold" }}>
         {wsConnected ? "[연결됨] proxy 연결됨" : "[대기] proxy 대기 중 — 데모를 실행하면 자동 연결됩니다"}
       </p>
+      <section id="taint-graph-panel">
+        <h2>실시간 오염 계보</h2>
+        <TaintGraph lineage={snapshots[snapshots.length - 1] ?? []} />
+      </section>
       <ThreatFusionBanner logs={logs} injectionChecks={injectionChecks} />
       <TrifectaWarningBanner logs={logs} />
       <MetricCards logs={logs} approvals={approvals} />
@@ -316,12 +327,13 @@ export default function App() {
           <ul>
             {injectionChecks.map((c) => (
               <li key={c.id} style={{ color: c.isInjection ? "#d32f2f" : "#2e7d32" }}>
-                {c.isInjection ? "[위험]" : "[안전]"} — {c.toolName} (score={c.score.toFixed(4)})
+                {c.isInjection ? "[위험]" : "[안전]"}{!c.evaluated && " [평가실패]"} — {c.toolName} (score={c.score.toFixed(4)})
               </li>
             ))}
           </ul>
         )}
       </section>
+      <OutputScanPanel scans={outputScans} />
       <ApprovalQueue approvals={approvals} onDecide={handleDecide} />
       <SanitizationCompareView sanitization={sanitization} />
       <ForensicReplay snapshots={snapshots} />
