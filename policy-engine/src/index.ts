@@ -29,7 +29,13 @@ import {
 } from "@icarus-tether/types";
 import { getPolicyConfig, type PolicyConfig } from "./config.js";
 import { detectSecrets } from "./secret-detection.js";
-import { extractStructured, tokenizePII, containsVaultOriginal } from "./sanitization.js";
+import {
+  extractStructured,
+  tokenizePII,
+  containsVaultOriginal,
+  countVaultTokens,
+  hasNonTokenContent,
+} from "./sanitization.js";
 import {
   scanOutputForSensitive,
   type OutputScanFinding,
@@ -347,6 +353,9 @@ export function attemptSanitization(
   const records = (payloadStore.get(sessionId) ?? []).filter((r) => r.tags.includes(targetTag));
 
   let sanitized = false;
+  // 보고 전용(판정 무관): TOKENIZATION 성공 시에만 채워진다.
+  let maskedCount: number | undefined;
+  let residualSensitiveData: boolean | undefined;
   if (session.tags.includes(targetTag) && records.length > 0) {
     const outcomes = records.map((r) =>
       method === SanitizationMethod.TOKENIZATION
@@ -369,12 +378,29 @@ export function attemptSanitization(
       // 검증 통과 — 페이로드를 정화된 값으로 교체하고 태그 해제
       records.forEach((record, i) => {
         const outcome = outcomes[i];
-        if (outcome.ok) record.payload = outcome.value;
+        if (outcome.ok) {
+          // ★ 정화 보고 정직화 (판정 영향 0 — 보고 전용 계산):
+          //  - maskedCount: 이번 치환으로 늘어난 토큰 자리 수.
+          //  - residualSensitiveData: 출처 기반(tag_all) 민감 페이로드에서 토큰 밖 내용이
+          //    남았는가 = 패턴으로 못 가린 비중화 민감 잔존("부분 정화"). 내용 기반
+          //    SENSITIVE(비밀 탐지)는 비밀만 가리면 완화되므로 잔존 판정에서 제외한다.
+          if (method === SanitizationMethod.TOKENIZATION) {
+            maskedCount = (maskedCount ?? 0) + countVaultTokens(outcome.value) - countVaultTokens(record.payload);
+            if (
+              classifySourceTags(record.toolName).includes(ToolRiskTag.SENSITIVE) &&
+              hasNonTokenContent(outcome.value)
+            ) {
+              residualSensitiveData = true;
+            }
+          }
+          record.payload = outcome.value;
+        }
         record.tags = record.tags.filter((t) => t !== targetTag);
         // 계보 연동: 정화 검증을 통과한 "그 노드"의 태그만 해제.
         // 자식 노드는 절대 건드리지 않는다 — 각자 정화를 통과해야 풀린다 (비대칭).
         if (record.nodeId) declassifyNodeTag(sessionId, record.nodeId, targetTag);
       });
+      if (method === SanitizationMethod.TOKENIZATION) residualSensitiveData ??= false;
       session.tags = session.tags.filter((t) => t !== targetTag);
       session.updatedAt = new Date().toISOString();
       sanitized = true;
@@ -387,6 +413,9 @@ export function attemptSanitization(
     method,
     resultTags: [...session.tags],
     timestamp: new Date().toISOString(),
+    // 정화 성공(TOKENIZATION) 시에만 채워지는 보고 필드 — 실패/타 방법이면 생략
+    ...(maskedCount !== undefined ? { maskedCount } : {}),
+    ...(residualSensitiveData !== undefined ? { residualSensitiveData } : {}),
   };
 }
 
