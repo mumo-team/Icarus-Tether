@@ -317,6 +317,65 @@ export function recordToolResult(
   return node;
 }
 
+/**
+ * ★ 도구가 아닌 외부 콘텐츠 유입(SOURCE) 진입점 — resources/read·prompts/get 대응.
+ *
+ * 배경(파트1 확정): 프록시는 tools/call만 엔진에 넘기고 resources/read·prompts/get은
+ * 무검사 중계했다 → 외부 비신뢰 콘텐츠가 exposure(U축)를 못 켜서, 같은 lethal-trifecta
+ * 유출이 채널만 바꾸면 통과했다(출력스캔까지 무력화 — U축 의존). 이 API가 그 콘텐츠를
+ * recordToolResult와 동일한 파이프라인(태깅 → addSessionTags[exposure] → createTaintNode)
+ * 에 흘려보내 미탐을 막는다.
+ *
+ * 태깅(미탐-0 = default-deny, 원칙 4): trusted가 아니면 UNTRUSTED_ORIGIN(외부 콘텐츠는
+ * 기본 비신뢰 → exposure 진입). 추가로 content에 비밀 패턴이 있으면 SENSITIVE도
+ * (computeResultTags와 동일 내용 기반 규칙). trusted:true는 명시적 신뢰(내부 리소스 등)로
+ * U를 붙이지 않는다.
+ *
+ * ★ tools/call 판정 로직 무변경(완전 additive) — recordToolResult가 타는 것과 같은 전이다.
+ * 형식모델: TaintLineage.tla CreateNode(exposure' = exposure ∨ UNTRUSTED∈newTags)가 이미
+ * 이 의미론을 커버한다(own 비결정 → own={UNTRUSTED} 생성은 모델된 전이). 모델 무수정.
+ *
+ * 프록시(②)는 fallbackRequestHandler에서 resources/read·prompts/get 응답을 받은 직후
+ * 이 함수를 부르면 된다(값-계보를 위해 content 원형을 그대로 넘긴다). uri는 감사·계보 라벨.
+ */
+export function recordExternalContent(
+  sessionId: string,
+  channel: "resources/read" | "prompts/get",
+  uri: string,
+  content: unknown,
+  opts?: { trusted?: boolean }
+): TaintNode {
+  const tags = computeExternalContentTags(content, opts?.trusted ?? false);
+  addSessionTags(getOrCreateSession(sessionId), tags);
+
+  // 라벨은 채널+uri — '/'·':'를 포함해 실제 도구명과 충돌하지 않는다(감사로그·계보 표시용).
+  const label = `${channel}:${uri}`;
+  // args가 없어 계보 연결은 3순위(안전바닥)/NONE으로 떨어진다 — 도구 소스와 동일 취급.
+  // content는 result로 넘겨 resultTokens를 뽑는다(이후 이 콘텐츠가 나갈 때 VALUE_MATCH용).
+  const node = createTaintNode(sessionId, label, tags, { result: content });
+
+  if (tags.length > 0) {
+    const records = payloadStore.get(sessionId) ?? [];
+    records.push({ toolName: label, tags, payload: content, nodeId: node.id });
+    payloadStore.set(sessionId, records);
+  }
+  return node;
+}
+
+/**
+ * 외부 콘텐츠(resources/read·prompts/get)의 태그 계산 — default-deny + 내용 기반 SENSITIVE.
+ * classifySourceTags(도구명 기반)와 달리 도구 레지스트리를 안 본다: 리소스/프롬프트는
+ * "도구"가 아니므로 URI 분류가 아직 없으면 기본 비신뢰다(안전 바닥). URI 기반 신뢰/민감
+ * 정련은 후속(설정 trustedResourceUris 등) — 1단계는 미탐만 먼저 막는다.
+ */
+function computeExternalContentTags(content: unknown, trusted: boolean): ToolRiskTag[] {
+  const tags: ToolRiskTag[] = [];
+  if (!trusted) tags.push(ToolRiskTag.UNTRUSTED_ORIGIN);
+  const det = getPolicyConfig().secretDetection;
+  if (det && detectSecrets(content, det).length > 0) tags.push(ToolRiskTag.SENSITIVE);
+  return tags;
+}
+
 // ---------------------------------------------------------------------------
 // 검증된 정화 (declassification)
 // ---------------------------------------------------------------------------
