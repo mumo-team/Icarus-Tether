@@ -33,7 +33,7 @@ export default function SanitizationCompareView({
             fontSize: "14px",
           }}
         >
-          {live.ok ? "✅" : "⚠️"} 실제 정화됨 ({live.method}) — 세션 오염 태그{" "}
+          {live.ok ? "[성공]" : "[주의]"} 실제 정화됨 ({live.method}) — 세션 오염 태그{" "}
           <TagList tags={live.originalTags} tone="danger" /> →{" "}
           <TagList tags={live.resultTags} tone="safe" />
           {live.ok && live.resultTags.length < 2 && "  (트라이펙타 미성립 → 재전송 통과)"}

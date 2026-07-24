@@ -6,7 +6,7 @@ import ThreatFusionBanner from "./components/ThreatFusionBanner";
 import EventLogTimeline from "./components/EventLogTimeline";
 import ApprovalQueue from "./components/ApprovalQueue";
 import SanitizationCompareView from "./components/SanitizationCompareView";
-import TaintGraph, { type LineageNode } from "./components/TaintGraph";
+import { type LineageNode } from "./components/TaintGraph";
 import ForensicReplay from "./components/ForensicReplay";
 import TrifectaApprovalModal from "./components/TrifectaApprovalModal";
 import AuditTimeline, { type HitlAuditEntry } from "./components/AuditTimeline";
@@ -50,6 +50,7 @@ export default function App() {
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [modalDecision, setModalDecision] = useState<PolicyDecision | null>(null);
   const [injectionChecks, setInjectionChecks] = useState<InjectionCheckEntry[]>([]);
+  const [hitlLog, setHitlLog] = useState<HitlAuditEntry[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const [auditIntegrity, setAuditIntegrity] = useState<{
@@ -104,11 +105,41 @@ export default function App() {
               canOverride: data.canOverride,
               approvalId: data.approvalId,
             });
+            // 큐에도 동일 항목을 쌓는다 — 모달과 같은 데이터로 ApprovalQueue·대기 카운트를 살린다.
+            // (broadcastDecision이 args를 안 실으므로 args는 비운다 — 큐는 도구명·상태만 표시.)
+            setApprovals((prev) =>
+              prev.some((a) => a.id === data.approvalId)
+                ? prev
+                : [
+                    ...prev,
+                    {
+                      id: data.approvalId,
+                      sessionId: data.sessionId,
+                      toolName: data.toolName,
+                      args: {},
+                      status: "PENDING",
+                      requestedAt: data.timestamp,
+                    },
+                  ]
+            );
           }
         }
         if (data.type === "approval_resolved") {
           console.log(
             `[대시보드] 승인 처리됨: ${data.approvalId} → ${data.approved ? "승인" : "거부"}`
+          );
+          // 큐 항목 상태를 실제 처리 결과로 갱신 (모달·큐 어느 쪽으로 처리했든 반영).
+          setApprovals((prev) =>
+            prev.map((a) =>
+              a.id === data.approvalId
+                ? {
+                    ...a,
+                    status: data.approved ? "APPROVED" : "REJECTED",
+                    resolvedAt: data.timestamp,
+                    resolvedBy: data.resolvedBy,
+                  }
+                : a
+            )
           );
         }
 
@@ -140,6 +171,10 @@ export default function App() {
         if (data.type === "lineage") {
           setSnapshots((prev) => [...prev, data.nodes ?? []]);
         }
+        if (data.type === "hitl_audit") {
+          // 세션 전체 HITL 감사로그(엔진 누적) — append가 아니라 교체.
+          setHitlLog(data.entries ?? []);
+        }
       };
 
       // onerror 뒤에는 항상 onclose가 따라오므로, 재연결은 onclose 한 곳에서만 건다.
@@ -166,6 +201,20 @@ export default function App() {
   }, []);
 
     function handleDecide(id: string, status: "APPROVED" | "REJECTED", resolvedBy: string) {
+    // 큐 버튼도 엔진까지 전달한다 — 승인 상태는 proxy 프로세스의 엔진 메모리에 있어
+    // 브라우저가 직접 못 부르므로, 모달 경로(handleActionClick)와 동일하게 WS로 보낸다.
+    const ws = wsRef.current;
+    const appr = approvals.find((a) => a.id === id);
+    if (ws && ws.readyState === WebSocket.OPEN && appr) {
+      ws.send(
+        JSON.stringify({
+          type: status === "APPROVED" ? "approve" : "reject",
+          sessionId: appr.sessionId,
+          approvalId: id,
+          resolvedBy,
+        })
+      );
+    }
     setApprovals((prev) =>
       prev.map((a) =>
         a.id === id
@@ -228,7 +277,7 @@ export default function App() {
       <TrifectaWarningBanner logs={logs} />
       <MetricCards logs={logs} approvals={approvals} />
       <EventLogTimeline logs={logs} />
-      <AuditTimeline logs={logs} hitlLog={[]} />
+      <AuditTimeline logs={logs} hitlLog={hitlLog} />
       <section
         style={{
           margin: "12px 0",
@@ -239,16 +288,16 @@ export default function App() {
           background: !auditIntegrity ? "#f5f5f5" : auditIntegrity.ok ? "#e8f5e9" : "#ffebee",
         }}
       >
-        <strong>🛡️ 감사 로그 무결성</strong>{" "}
+        <strong>[무결성] 감사 로그</strong>{" "}
         {!auditIntegrity ? (
           <span style={{ color: "#616161" }}>세션 종료 시 검증됩니다</span>
         ) : auditIntegrity.ok ? (
           <span style={{ color: "#2e7d32" }}>
-            ✅ 무결 — {auditIntegrity.total}줄 전부 서명·체인 정상
+            [정상] 무결 — {auditIntegrity.total}줄 전부 서명·체인 정상
           </span>
         ) : (
           <span style={{ color: "#d32f2f" }}>
-            ⛔ 위변조 감지 — {auditIntegrity.problems.length}건 (전체 {auditIntegrity.total}줄)
+            [위반] 위변조 감지 — {auditIntegrity.problems.length}건 (전체 {auditIntegrity.total}줄)
             <ul style={{ margin: "6px 0 0" }}>
               {auditIntegrity.problems.map((p, i) => (
                 <li key={i}>
@@ -267,7 +316,7 @@ export default function App() {
           <ul>
             {injectionChecks.map((c) => (
               <li key={c.id} style={{ color: c.isInjection ? "#d32f2f" : "#2e7d32" }}>
-                {c.isInjection ? "🚨 위험" : "✅ 안전"} — {c.toolName} (score={c.score.toFixed(4)})
+                {c.isInjection ? "[위험]" : "[안전]"} — {c.toolName} (score={c.score.toFixed(4)})
               </li>
             ))}
           </ul>
