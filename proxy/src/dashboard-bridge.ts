@@ -66,6 +66,7 @@ export function recordAudit(input: {
   const signed: AuditLogEntry = { ...unsigned, signature };
   appendFileSync(AUDIT_LOG_PATH, JSON.stringify(signed) + "\n");
   lastSignature = signature; // 다음 줄이 이 값을 prevHash로 물고 이어간다
+  broadcastAuditIntegrity();
 }
 
 /**
@@ -186,6 +187,7 @@ export function broadcastDecision(
     explanation: decision.explanation,
     canOverride: decision.canOverride ?? false,
     approvalId: decision.approvalId,
+    outputScan: decision.outputScan,
     timestamp,
   });
   // 이 판정 과정에서 생긴 HITL 전이(OFFERED 등)를 함께 방송 — index.ts 무수정.
