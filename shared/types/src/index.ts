@@ -175,6 +175,18 @@ export interface SanitizationResult {
   /** 정화 후 남는 태그 (보통 비어있음 = 태그 해제 성공) */
   resultTags: ToolRiskTag[];
   timestamp: string;
+  /**
+   * (TOKENIZATION 성공 시) 익명 토큰으로 실제 치환된 값 자리 수.
+   * 판정에는 영향 없는 보고 전용 — "부분 정화" UX 구분용 (아래 residualSensitiveData 참조).
+   */
+  maskedCount?: number;
+  /**
+   * (TOKENIZATION 성공 시) 출처 기반(tag_all) 민감 데이터가 토큰화 후에도 잔존하는가.
+   * true = "부분 정화": 패턴으로 못 찾는 내용(예: 이름·등급 같은 비정형 값)이 남아 있어,
+   * 태그는 해제됐어도 안전바닥 등 다른 가드가 이후 전송을 계속 막을 수 있다.
+   * 대시보드는 이 값으로 "정화 완료" 대신 "부분 정화됨"을 표시할 것.
+   */
+  residualSensitiveData?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +215,13 @@ export interface AuditLogEntry {
   id: string;
   sessionId: string;
   toolName: string;
-  decision: "ALLOWED" | "BLOCKED";
+  /**
+   * - ALLOWED   : 엔진 판정을 거쳐 허용됨
+   * - BLOCKED   : 엔진 판정을 거쳐 차단됨
+   * - FORWARDED : 엔진 판정을 거치지 않고 다운스트림으로 중계됨
+   *   (tools/call이 아닌 MCP 메서드 등 — S5 fail-open 가시화용. matchedTags는 빈 배열)
+   */
+  decision: "ALLOWED" | "BLOCKED" | "FORWARDED";
   matchedTags: ToolRiskTag[];
   timestamp: string;
   /** 위변조 방지용 서명 (해시 등). MVP에서는 비워둬도 됨 */

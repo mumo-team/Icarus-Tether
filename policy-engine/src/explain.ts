@@ -97,7 +97,11 @@ export function buildUserExplanation(input: ExplainInput): UserFacingExplanation
         ? {
             kind: "SANITIZE",
             label: "민감 정보를 가리고 보내기",
-            description: "이름·이메일 같은 개인정보와 비밀 값을 익명 토큰으로 바꿔서 보냅니다.",
+            // ★ 거짓 약속 금지: "가리면 통과됩니다"라고 단언하지 않는다. 출처 전체가
+            // 민감으로 표시된 데이터(tag_all)는 규칙으로 못 찾는 내용이 남아(부분 정화)
+            // 다른 안전장치가 계속 막을 수 있다 — 그 가능성을 있는 그대로 알린다.
+            description:
+              "이름·이메일처럼 규칙으로 찾을 수 있는 값을 익명 토큰으로 바꿉니다. 출처 자체가 민감으로 표시된 데이터라면 규칙에 안 걸리는 내용이 남아, 가린 뒤에도 계속 막힐 수 있어요.",
             available: true,
             detail: SanitizationMethod.TOKENIZATION,
           }

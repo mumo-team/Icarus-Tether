@@ -243,10 +243,17 @@ export function scanOutputForSensitive(
     if (d !== b) percentDecoded.push(d);
   }
   const scanBases = [...containmentBases, ...percentDecoded]; // 포함검사·정규식이 볼 원문 계열
-  //  ② base64 디코딩 입력에 URL 세그먼트를 더한다 — 경로에 실린 base64를 깨끗한 경계로 잡는다.
-  //     (전체 문자열도 계속 입력이므로 `/` 포함 정상 base64는 통짜로도 잡혀 additive.)
-  const b64Sources = [...scanBases, ...scanBases.flatMap(urlSegments)];
-  const decodedStrings = decodeBase64Runs(b64Sources);
+  //  ② base64 디코딩 입력을 구성한다. concat(청크 재조립 parts[] 커버)에 더해 ★개별 인자
+  //     문자열(outStrings)도 넣는다 — 여러 인자를 구분자 없이 이어붙인 concat에서는 앞 인자의
+  //     ASCII 꼬리가 base64 run에 접합돼 4바이트 정렬이 깨지고 정준성 게이트에서 폐기된다
+  //     (send_email({to,subject,body:<b64>}) 같은 필드 단위 세탁 미탐 — e2e 발견). 개별 필드는
+  //     깨끗한 경계를 줘 그대로 디코딩된다. URL 세그먼트도 더해 경로에 실린 base64를 잡는다.
+  //     전부 정준성 게이트(재인코딩 왕복)를 통과해야 하므로 순수 additive(과차단 0). 단일 필드일
+  //     땐 concat===outStrings[0]이라 개별 추가가 무의미하므로 다필드일 때만 더한다(핫패스 비용 불변).
+  const b64Inputs = outStrings.length > 1 ? [...scanBases, ...outStrings] : scanBases;
+  const b64Sources = [...b64Inputs, ...b64Inputs.flatMap(urlSegments)];
+  // dedup: concat과 개별 필드가 같은 run을 중복 디코딩할 수 있어 haystack 비용을 여기서 상한한다.
+  const decodedStrings = [...new Set(decodeBase64Runs(b64Sources))];
 
   // 1. 포함검사: (concat·percent-decoded) + 디코딩 평문을 haystack으로. min-length가 우연 매치를 막는다.
   if (scanBases.length > 0) {
