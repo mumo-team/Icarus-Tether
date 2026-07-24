@@ -5,8 +5,8 @@
   "description": "Icarus-Tether — MCP 행동 오염흐름 추적 보안 게이트웨이",
   "workspaces": [
     "shared/types",
-    "proxy",
     "policy-engine",
+    "proxy",
     "dashboard",
     "dashboard/server"
   ],

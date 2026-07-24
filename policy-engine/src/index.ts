@@ -29,7 +29,13 @@ import {
 } from "@icarus-tether/types";
 import { getPolicyConfig, type PolicyConfig } from "./config.js";
 import { detectSecrets } from "./secret-detection.js";
-import { extractStructured, tokenizePII, containsVaultOriginal } from "./sanitization.js";
+import {
+  extractStructured,
+  tokenizePII,
+  containsVaultOriginal,
+  countVaultTokens,
+  hasNonTokenContent,
+} from "./sanitization.js";
 import {
   scanOutputForSensitive,
   type OutputScanFinding,
@@ -311,6 +317,65 @@ export function recordToolResult(
   return node;
 }
 
+/**
+ * ★ 도구가 아닌 외부 콘텐츠 유입(SOURCE) 진입점 — resources/read·prompts/get 대응.
+ *
+ * 배경(파트1 확정): 프록시는 tools/call만 엔진에 넘기고 resources/read·prompts/get은
+ * 무검사 중계했다 → 외부 비신뢰 콘텐츠가 exposure(U축)를 못 켜서, 같은 lethal-trifecta
+ * 유출이 채널만 바꾸면 통과했다(출력스캔까지 무력화 — U축 의존). 이 API가 그 콘텐츠를
+ * recordToolResult와 동일한 파이프라인(태깅 → addSessionTags[exposure] → createTaintNode)
+ * 에 흘려보내 미탐을 막는다.
+ *
+ * 태깅(미탐-0 = default-deny, 원칙 4): trusted가 아니면 UNTRUSTED_ORIGIN(외부 콘텐츠는
+ * 기본 비신뢰 → exposure 진입). 추가로 content에 비밀 패턴이 있으면 SENSITIVE도
+ * (computeResultTags와 동일 내용 기반 규칙). trusted:true는 명시적 신뢰(내부 리소스 등)로
+ * U를 붙이지 않는다.
+ *
+ * ★ tools/call 판정 로직 무변경(완전 additive) — recordToolResult가 타는 것과 같은 전이다.
+ * 형식모델: TaintLineage.tla CreateNode(exposure' = exposure ∨ UNTRUSTED∈newTags)가 이미
+ * 이 의미론을 커버한다(own 비결정 → own={UNTRUSTED} 생성은 모델된 전이). 모델 무수정.
+ *
+ * 프록시(②)는 fallbackRequestHandler에서 resources/read·prompts/get 응답을 받은 직후
+ * 이 함수를 부르면 된다(값-계보를 위해 content 원형을 그대로 넘긴다). uri는 감사·계보 라벨.
+ */
+export function recordExternalContent(
+  sessionId: string,
+  channel: "resources/read" | "prompts/get",
+  uri: string,
+  content: unknown,
+  opts?: { trusted?: boolean }
+): TaintNode {
+  const tags = computeExternalContentTags(content, opts?.trusted ?? false);
+  addSessionTags(getOrCreateSession(sessionId), tags);
+
+  // 라벨은 채널+uri — '/'·':'를 포함해 실제 도구명과 충돌하지 않는다(감사로그·계보 표시용).
+  const label = `${channel}:${uri}`;
+  // args가 없어 계보 연결은 3순위(안전바닥)/NONE으로 떨어진다 — 도구 소스와 동일 취급.
+  // content는 result로 넘겨 resultTokens를 뽑는다(이후 이 콘텐츠가 나갈 때 VALUE_MATCH용).
+  const node = createTaintNode(sessionId, label, tags, { result: content });
+
+  if (tags.length > 0) {
+    const records = payloadStore.get(sessionId) ?? [];
+    records.push({ toolName: label, tags, payload: content, nodeId: node.id });
+    payloadStore.set(sessionId, records);
+  }
+  return node;
+}
+
+/**
+ * 외부 콘텐츠(resources/read·prompts/get)의 태그 계산 — default-deny + 내용 기반 SENSITIVE.
+ * classifySourceTags(도구명 기반)와 달리 도구 레지스트리를 안 본다: 리소스/프롬프트는
+ * "도구"가 아니므로 URI 분류가 아직 없으면 기본 비신뢰다(안전 바닥). URI 기반 신뢰/민감
+ * 정련은 후속(설정 trustedResourceUris 등) — 1단계는 미탐만 먼저 막는다.
+ */
+function computeExternalContentTags(content: unknown, trusted: boolean): ToolRiskTag[] {
+  const tags: ToolRiskTag[] = [];
+  if (!trusted) tags.push(ToolRiskTag.UNTRUSTED_ORIGIN);
+  const det = getPolicyConfig().secretDetection;
+  if (det && detectSecrets(content, det).length > 0) tags.push(ToolRiskTag.SENSITIVE);
+  return tags;
+}
+
 // ---------------------------------------------------------------------------
 // 검증된 정화 (declassification)
 // ---------------------------------------------------------------------------
@@ -347,6 +412,9 @@ export function attemptSanitization(
   const records = (payloadStore.get(sessionId) ?? []).filter((r) => r.tags.includes(targetTag));
 
   let sanitized = false;
+  // 보고 전용(판정 무관): TOKENIZATION 성공 시에만 채워진다.
+  let maskedCount: number | undefined;
+  let residualSensitiveData: boolean | undefined;
   if (session.tags.includes(targetTag) && records.length > 0) {
     const outcomes = records.map((r) =>
       method === SanitizationMethod.TOKENIZATION
@@ -369,12 +437,29 @@ export function attemptSanitization(
       // 검증 통과 — 페이로드를 정화된 값으로 교체하고 태그 해제
       records.forEach((record, i) => {
         const outcome = outcomes[i];
-        if (outcome.ok) record.payload = outcome.value;
+        if (outcome.ok) {
+          // ★ 정화 보고 정직화 (판정 영향 0 — 보고 전용 계산):
+          //  - maskedCount: 이번 치환으로 늘어난 토큰 자리 수.
+          //  - residualSensitiveData: 출처 기반(tag_all) 민감 페이로드에서 토큰 밖 내용이
+          //    남았는가 = 패턴으로 못 가린 비중화 민감 잔존("부분 정화"). 내용 기반
+          //    SENSITIVE(비밀 탐지)는 비밀만 가리면 완화되므로 잔존 판정에서 제외한다.
+          if (method === SanitizationMethod.TOKENIZATION) {
+            maskedCount = (maskedCount ?? 0) + countVaultTokens(outcome.value) - countVaultTokens(record.payload);
+            if (
+              classifySourceTags(record.toolName).includes(ToolRiskTag.SENSITIVE) &&
+              hasNonTokenContent(outcome.value)
+            ) {
+              residualSensitiveData = true;
+            }
+          }
+          record.payload = outcome.value;
+        }
         record.tags = record.tags.filter((t) => t !== targetTag);
         // 계보 연동: 정화 검증을 통과한 "그 노드"의 태그만 해제.
         // 자식 노드는 절대 건드리지 않는다 — 각자 정화를 통과해야 풀린다 (비대칭).
         if (record.nodeId) declassifyNodeTag(sessionId, record.nodeId, targetTag);
       });
+      if (method === SanitizationMethod.TOKENIZATION) residualSensitiveData ??= false;
       session.tags = session.tags.filter((t) => t !== targetTag);
       session.updatedAt = new Date().toISOString();
       sanitized = true;
@@ -387,6 +472,9 @@ export function attemptSanitization(
     method,
     resultTags: [...session.tags],
     timestamp: new Date().toISOString(),
+    // 정화 성공(TOKENIZATION) 시에만 채워지는 보고 필드 — 실패/타 방법이면 생략
+    ...(maskedCount !== undefined ? { maskedCount } : {}),
+    ...(residualSensitiveData !== undefined ? { residualSensitiveData } : {}),
   };
 }
 
