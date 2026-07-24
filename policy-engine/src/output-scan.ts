@@ -18,6 +18,11 @@
  *     `/`·`.`가 base64 charset(+/)과 겹쳐 run에 병합돼 디코딩이 깨지는 것을 막는다. 구분자
  *     분할 + URL-safe(-_) 정규화 + 리딩 쓰레기 오프셋 재시도(decodeBase64Runs). 전체 문자열
  *     스캔은 유지하므로 정상 base64는 그대로 잡혀 순수 additive(쿼리 `?d=` 탐지 회귀 없음).
+ *  ③ hex 인코딩 (RS13) — ★ 방향을 뒤집는다: 임의 hex를 디코딩(decode-haystack)하면
+ *     SHA·UUID·색상코드 등 정상 hex가 도처에 있어 과차단이 터진다. 대신 민감값을
+ *     hex 인코딩해 원문에서 찾는다(encode-needle, 포함검사 (c)). 아는 시크릿의 hex만
+ *     needle이므로 과차단이 "구조적으로" 0 — base64 정준성 게이트의 hex판이다. hex는
+ *     바이트별이라 hex(v)가 hex(blob-of-v)의 부분문자열로 들어가 blob도 자동 커버.
  *
  * 프라이버시: finding에 원본을 싣지 않는다 (길이 + sha256 접두만).
  *
@@ -27,6 +32,8 @@
  *    아니라 게이트를 통과하지 않는다 — 이 스캐너의 범위 밖(설계 경계). 우리 방어는
  *    "행동(도구 호출)의 길목"을 검사하는 것이므로, 응답-텍스트 exfil은 out of scope.
  *  - min-length(12) 미만 짧은 민감값은 우연 매치 방지를 위해 제외 → evade 가능.
+ *  - 인코딩 "전에" 변형(압축·암호화)한 뒤 hex/base64 하는 세탁은 미탐 — 그건 hex/base64
+ *    인코딩이 아니라 별개 변환이라 결정론 디코더로는 원본 바이트가 남지 않는다.
  */
 
 import { createHash } from "node:crypto";
@@ -251,20 +258,38 @@ export function scanOutputForSensitive(
       const values: string[] = [];
       collectStrings(payload, values);
       for (const v of values) {
+        if (v.length < minLength) continue; // 짧은 값은 어떤 needle도 안 씀 (우연 매치 방지)
         // (a) 정확 포함검사 — 무손실. 원문/base64 그대로 실린 경우.
-        if (v.length >= minLength && haystacks.some((h) => h.includes(v))) {
+        if (haystacks.some((h) => h.includes(v))) {
           return { kind: "containment", sourceTool: toolName, matchLen: v.length, valueHash: hashValue(v) };
         }
         // (b) 정규화 포함검사 — 대소문자·구분자 재포맷을 견딘다. min-length는 normalize 후 길이에.
         //     짧은 needle은 needle-regex(대용량 haystack normalize 안 함), 초과분만 폴백(무손실).
         const nv = normalizeText(v);
-        if (nv.length < minLength) continue;
-        const matched =
-          nv.length <= NEEDLE_REGEX_MAX
-            ? matchNormalizedNeedle(nv, haystacks)
-            : normHaystacks().some((h) => h.includes(nv));
-        if (matched) {
-          return { kind: "containment", sourceTool: toolName, matchLen: nv.length, valueHash: hashValue(v), normalized: true };
+        if (nv.length >= minLength) {
+          const matched =
+            nv.length <= NEEDLE_REGEX_MAX
+              ? matchNormalizedNeedle(nv, haystacks)
+              : normHaystacks().some((h) => h.includes(nv));
+          if (matched) {
+            return { kind: "containment", sourceTool: toolName, matchLen: nv.length, valueHash: hashValue(v), normalized: true };
+          }
+        }
+        // (c) ★ hex 세탁 탐지 (RS13) — encode-needle: 민감값을 hex 인코딩해 원문에서 찾는다.
+        //     decode-haystack(임의 hex 디코딩)과 달리 SHA·UUID·색상코드 등 정상 hex를
+        //     디코딩하지 않으므로 과차단이 "구조적으로" 0이다(정준성 게이트의 hex판).
+        //     hex는 바이트별 인코딩이라 hex(v)가 hex(v를 품은 더 큰 블롭)의 부분문자열로
+        //     그대로 들어가므로, blob-of-secret도 별도 디코딩 없이 자동 커버된다.
+        //
+        //     ★ 정규화 haystack에 plain includes로 검색한다(matchNormalizedNeedle 정규식이
+        //     아니라). 이유: hex needle은 charset이 16심볼뿐이라 needle-regex
+        //     `4[^X]*d[^X]*5…`가 구분자 많은 haystack(`#a1 #b2 …`)에서 준일치 폭증으로
+        //     catastrophic backtracking을 일으킨다(실측 확인). 정규화(구분자 제거+소문자)
+        //     후 substring 검색은 O(size) 선형이고, 대소문자(4D..)·바이트 구분자
+        //     (4d:59, 4d 59)를 그대로 흡수해 동일 탐지력을 낸다. normHaystacks는 메모이즈.
+        const hv = Buffer.from(v, "utf8").toString("hex"); // 소문자, 길이 2·v.length ≥ 2·minLength
+        if (normHaystacks().some((h) => h.includes(hv))) {
+          return { kind: "containment", sourceTool: toolName, matchLen: hv.length, valueHash: hashValue(v), normalized: true };
         }
       }
     }
