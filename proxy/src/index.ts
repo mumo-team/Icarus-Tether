@@ -52,20 +52,12 @@ interface SessionState {
 const sessions = new Map<string, SessionState>();
 
 
-// tools 외 메서드를 무검사로 중계할 때, 최소한 그 사실을 감사로그에 남긴다.
-// 오염 추적은 아직 못 하지만, "무엇이 검사 없이 지나갔는지"는 보이게 한다(S5 대응 1단계).
+// tools 외 메서드를 무검사로 중계할 때, 최소한 그 사실을 눈에 보이게 남긴다(S5 대응 1단계).
+// audit.log는 dashboard-bridge가 해시 체인(ALLOWED/BLOCKED 판정)으로 관리하므로,
+// 여기서 파일에 직접 append하면 체인이 깨진다 → stderr 로그로만 남긴다.
+// (정식 해결: 메서드 위험도 분류로 이 경로도 판정·기록 — 별도 작업 (사))
 function logForwarded(sessionId: string, method: string): void {
-  const entry = {
-    id: randomUUID(),
-    sessionId,
-    method,
-    decision: "FORWARDED_UNCHECKED",
-    timestamp: new Date().toISOString(),
-  };
-  appendFileSync(
-    AUDIT_LOG_PATH,
-    JSON.stringify({ ...entry, signature: signEntry(entry) }) + "\n"
-  );
+  console.error(`[proxy] ↪ 무검사 중계  method=${method}  session=${sessionId}`);
 }
 
 // [C 자리 스텁] 대시보드에서 사람이 승인하는 것을 흉내낸다.
