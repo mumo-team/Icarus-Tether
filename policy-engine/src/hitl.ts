@@ -30,8 +30,13 @@ import {
   ToolRiskTag,
   type ApprovalRequest,
   type ToolCallContext,
+  type OverrideAuditEntry,
 } from "@icarus-tether/types";
 import type { LineageEvidence } from "./shadow.js";
+
+// OverrideAuditEntry는 shared/types로 승격됨(3자 계약). 기존 소비자(index.ts 재출력·
+// 대시보드)가 안 깨지게 여기서 그대로 re-export한다.
+export type { OverrideAuditEntry, OverrideAuditAction } from "@icarus-tether/types";
 
 // ---------------------------------------------------------------------------
 // 승인 가능 여부 — 결정론 규칙 (이 함수가 HITL의 문지기)
@@ -133,26 +138,8 @@ function lineageFingerprintOf(evidence: LineageEvidence, argTags: ToolRiskTag[])
 
 // ---------------------------------------------------------------------------
 // 감사 로그 — "누가 언제 뭘 승인했나" (대시보드 C 파트 연동 대비, 섀도 로그 패턴)
+// OverrideAuditEntry 타입은 shared/types(@icarus-tether/types)로 이동 — 위 import 참조.
 // ---------------------------------------------------------------------------
-
-export interface OverrideAuditEntry {
-  approvalId: string;
-  sessionId: string;
-  toolName: string;
-  action:
-    | "OFFERED"
-    | "REQUESTED"
-    | "APPROVED"
-    | "REJECTED"
-    | "OVERRIDE_USED"
-    /** 제안 후 계보가 달라져 새 제안으로 대체 (offer 시점 감지) */
-    | "SUPERSEDED"
-    /** 승인 소비 시도 시 계보 지문 불일치 → 낡은 승인 영구 무효 (소비 시점 감지) */
-    | "OVERRIDE_STALE";
-  /** 승인/거부한 사람 (resolveApproval의 resolvedBy) */
-  actor?: string;
-  timestamp: string;
-}
 
 const auditLog: OverrideAuditEntry[] = [];
 

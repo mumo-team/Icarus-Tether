@@ -21,7 +21,6 @@ import {
   type ToolCallContext,
   type PolicyDecision,
   type SessionTaintState,
-  type TrifectaEvent,
   type OutputScanEvent,
   type SanitizationResult,
   SanitizationMethod,
@@ -57,6 +56,7 @@ import {
 import {
   buildDestructiveExplanation,
   buildFailSafeExplanation,
+  buildOutboundExfilExplanation,
   buildUserExplanation,
 } from "./explain.js";
 
@@ -64,6 +64,7 @@ export {
   buildUserExplanation,
   buildFailSafeExplanation,
   buildDestructiveExplanation,
+  buildOutboundExfilExplanation,
   type ExplainInput,
   type DestructiveExplainInput,
 } from "./explain.js";
@@ -91,7 +92,7 @@ export {
   type FieldSpec,
   type PatternSpec,
 } from "./config.js";
-export { loadToolRegistry, getToolRegistry, type ToolRegistry } from "./registry.js";
+export { loadToolRegistry, type ToolRegistry } from "./registry.js";
 export {
   detectSecrets,
   shannonEntropy,
@@ -103,9 +104,6 @@ export {
   extractStructured,
   tokenizePII,
   resolveToken,
-  ALLOWED_RECORD_TYPES,
-  NAME_MAX_LENGTH,
-  type ExtractedRecord,
   type SanitizeOutcome,
 } from "./sanitization.js";
 export {
@@ -877,6 +875,152 @@ export function evaluateToolCall(ctx: ToolCallContext): PolicyDecision {
   return applyDestructiveGate(ctx) ?? exfil;
 }
 
+// ---------------------------------------------------------------------------
+// 역방향 아웃바운드 콘텐츠 판정 — tools/call이 아닌 채널로 "서버로 돌아가는 콘텐츠"의 유출 검사.
+//
+// 배경(전수 조사 D-1): 프록시는 tools/call만 evaluateToolCall로 검사하고,
+// sampling/createMessage 같은 역방향 요청은 fallbackRequestHandler에서 무검사 중계했다.
+// sampling은 서버→클라 LLM 역요청이고 그 응답(LLM 출력)이 서버로 돌아가므로, 오염 세션에서
+// 응답에 민감 데이터가 실리면 lethal-trifecta와 동형의 유출인데 판정이 전혀 안 돌았다
+// (출력스캔까지 무력화 — U축 의존). 이 API가 "서버로 나가는 콘텐츠"를 tools/call 유출 판정과
+// 같은 가드에 태워 미탐을 막는다.
+//
+// ★ 완전 additive — evaluateToolCall/computeLineageDecision 무변경. 판정을 tools/call
+// 유출 경로(computeLineageDecision)와 **동일 강도**로 맞춘다: 나가는 콘텐츠를 아웃바운드
+// 싱크 인자처럼 보고, 같은 프리미티브(collectLineageEvidence 값-계보 + 출력스캔 + 볼트원본)
+// 로 valueSensitive를 계산하고, U축은 노출이력으로 본다.
+//   valueSensitive = (콘텐츠 계보에 SENSITIVE) OR 출력스캔(containment/regex) OR 볼트원본재전송
+//   sessionUntrusted = 노출이력(grow-only, 정화 불변 F1)
+// 값-계보를 반드시 재사용하는 이유: LLM 요약은 민감 원본을 발췌·재포맷하므로 출력스캔
+// containment(전체 문자열 일치)만으로는 놓친다. tools/call은 이를 VALUE_MATCH로 잡는데,
+// 역방향(더 위험한 채널)이 그보다 느슨하면 방어 불가능한 비대칭이 된다. 계보 미스 시엔
+// TEMPORAL_FALLBACK이 오염 frontier에 연결해 "오염 세션의 아웃바운드는 보수적 차단"까지
+// tools/call과 동일하게 동작한다(과차단 대칭 — 깨끗한 세션은 노드가 없어 통과).
+//
+// 형식모델: TaintLineage.tla ReachSink(n) 가드 `~(SENSITIVE ∈ tags[n] ∧ exposure)`는
+// 채널 불문 "민감값이 노출 세션에서 sink 도달 시 차단"이라 이 전이를 이미 커버한다.
+// sampling은 sink 도달의 새 실현일 뿐 — 모델 무수정(recordExternalContent가 CreateNode의
+// 새 실현이었던 것과 동형).
+//
+// 차단 의미론(default-deny, 원칙 4): 역방향은 자연스러운 "재시도" 지점이 없어 HITL
+// 재개방을 제시하지 않는 하드 블록이다(computeLineageDecision의 weak-only offer 미사용).
+// 프록시(②)는 allowed=false면 LLM 응답을 서버에 돌려주지 말고 MCP 에러로 대체해야 한다.
+// 반환형은 PolicyDecision(toolName=channel) — shared/types 무변경, 프록시가
+// broadcastDecision/recordAudit를 그대로 재사용한다.
+// ---------------------------------------------------------------------------
+
+/** evaluateOutboundContent가 검사하는 역방향 채널. 유입(source)이 아니라 유출(sink) 축이다. */
+export type OutboundChannel = "sampling/createMessage";
+
+/**
+ * 서버로 돌아가려는 아웃바운드 콘텐츠(sampling 응답 등)를 유출 관점에서 판정한다.
+ *
+ * @param content 서버로 나가는 콘텐츠 원형(sampling 응답의 content 등). 문자열이 아니어도
+ *                되며(객체·배열) 내부 모든 문자열을 재귀 수집해 검사·계보 매칭한다.
+ * @returns PolicyDecision. allowed=false면 프록시가 응답 대신 에러를 서버로 반환할 것.
+ *
+ * 정상 케이스(오염 없는 세션)는 통과한다 — 과차단은 tools/call과 대칭이다.
+ */
+export function evaluateOutboundContent(
+  sessionId: string,
+  channel: OutboundChannel,
+  content: unknown
+): PolicyDecision {
+  // 나가는 콘텐츠를 아웃바운드 싱크의 "인자"처럼 취급한다 — 계보 값-매칭과 이벤트 방출기
+  // (ToolCallContext를 받음)가 그대로 재사용된다. 채널명을 toolName으로(‘/’ 포함 → 실제
+  // 도구명과 충돌 없음), content를 args로 접는다.
+  const ctx: ToolCallContext = {
+    sessionId,
+    toolName: channel,
+    args: { content } as Record<string, unknown>,
+    argTags: [],
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    // ① 값-계보: 콘텐츠 토큰이 어느 오염 노드에서 왔나 (computeLineageDecision과 동일).
+    const evidence = collectLineageEvidence(ctx);
+    // ② 출력스캔(TIER3): 세션이 읽은 민감 원본 포함(세탁·재조립) 또는 verbatim 비밀 키.
+    const outputScanFinding = scanOutputForSensitive(
+      getSensitivePayloads(sessionId),
+      content,
+      getPolicyConfig().secretDetection
+    );
+    // ③ 볼트 원본 재전송: 정화 후 원본을 그대로 되보내는 세탁 우회.
+    const resendsSanitizedOriginal = containsVaultOriginal(content);
+
+    const valueSensitive =
+      evidence.unionTags.has(ToolRiskTag.SENSITIVE) ||
+      resendsSanitizedOriginal ||
+      outputScanFinding !== null;
+    // U축 = 노출이력(grow-only, 정화 불변 — F1). tools/call U축과 동일.
+    const sessionUntrusted = sessionExposure.has(sessionId);
+
+    if (valueSensitive && sessionUntrusted) {
+      const taintedNodes = evidence.nodes.filter((n) => n.tags.length > 0);
+      const nodeDesc = taintedNodes
+        .map((n) => `${n.nodeId}(${n.toolName}: ${n.tags.join("+")})`)
+        .join(", ");
+      const resendNote = resendsSanitizedOriginal
+        ? " (정화 전 볼트 원본이 나가는 콘텐츠에 감지됨 — 원본 재전송)"
+        : "";
+      const outputScanNote = outputScanFinding
+        ? outputScanFinding.kind === "containment"
+          ? outputScanFinding.normalized
+            ? " (출력-스캔: 세션이 읽은 민감 원본이 재포맷/인코딩돼 나가는 콘텐츠에 포함됨)"
+            : " (출력-스캔: 세션이 읽은 민감 원본이 나가는 콘텐츠에 포함됨)"
+          : " (출력-스캔: 나가는 콘텐츠에서 비밀 키 패턴 감지)"
+        : "";
+      const decision: PolicyDecision = {
+        sessionId,
+        toolName: channel,
+        allowed: false,
+        reason:
+          `lethal trifecta 감지(역방향 아웃바운드 판정): 세션이 비신뢰 입력에 노출된 상태에서 ` +
+          `민감 데이터가 '${channel}' 응답으로 외부 서버에 되돌아가려 해 차단 — ${nodeDesc || "근거: 콘텐츠 값-민감"}` +
+          resendNote +
+          outputScanNote,
+        matchedTags: [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN],
+        canOverride: false, // 역방향은 재시도 의미론이 없어 하드 블록 (default-deny)
+        explanation: buildOutboundExfilExplanation(),
+      };
+      if (outputScanFinding) {
+        decision.outputScan = emitOutputScanEvent(ctx, SinkClass.OUTBOUND_SINK, outputScanFinding);
+      }
+      // 채널 불문 트라이펙타 사실 기록 — 대시보드가 tools/call과 동일하게 본다.
+      emitTrifectaEvent(ctx, SinkClass.OUTBOUND_SINK, decision.matchedTags);
+      return decision;
+    }
+
+    return { sessionId, toolName: channel, allowed: true, matchedTags: [] };
+  } catch (err) {
+    // fail-safe: 역방향도 실전 결정자이므로 계산 실패는 차단이다 (조용한 통과 금지).
+    console.error("[policy-engine] 역방향 아웃바운드 판정 계산 실패 — fail-safe 차단:", err);
+    return {
+      sessionId,
+      toolName: channel,
+      allowed: false,
+      reason: "역방향 아웃바운드 판정 계산 실패 — fail-safe 차단 (오류 시 통과 금지)",
+      matchedTags: [],
+      canOverride: false,
+      explanation: buildFailSafeExplanation(),
+    };
+  }
+}
+
+/**
+ * 엔진 내부 관측 로그용 트라이펙타 이벤트 구조 (구 shared/types TrifectaEvent).
+ * 계약에서 제거돼(발행 채널·소비자 없음) 로컬로만 유지한다 — 대시보드 표시는
+ * PolicyDecision.matchedTags가 담당하고, 이 값은 stderr 로그로만 쓰인다.
+ */
+interface TrifectaEvent {
+  id: string;
+  sessionId: string;
+  toolName: string;
+  matchedTags: ToolRiskTag[];
+  sinkClass: SinkClass;
+  timestamp: string;
+}
+
 function emitTrifectaEvent(
   ctx: ToolCallContext,
   sinkClass: SinkClass,
@@ -890,7 +1034,7 @@ function emitTrifectaEvent(
     sinkClass,
     timestamp: new Date().toISOString(),
   };
-  // TODO(B/C): dashboard·audit-log 쪽으로 이 이벤트를 발행 (HTTP/이벤트버스 등)
+  // 관측 로그만 — 대시보드 표시는 PolicyDecision.matchedTags가 담당한다.
   console.log("[policy-engine] TrifectaEvent 발행:", event);
   return event;
 }
