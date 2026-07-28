@@ -23,7 +23,9 @@ import type { ToolCallContext } from "@icarus-tether/types";
 // ① 정책 엔진(B) — 판정과 오염 기록의 실제 구현.
 import {
   evaluateToolCall,
+  evaluateOutboundContent,
   recordToolResult,
+  recordExternalContent,
   requestApproval,
   resolveApproval,
 } from "@icarus-tether/policy-engine";
@@ -35,7 +37,10 @@ console.log = (...args: unknown[]) => console.error(...args);
 
 // ESM엔 __dirname이 없어 import.meta.url로 계산 (실행 위치와 무관하게 경로 고정)
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MOCK_SERVER_PATH = resolve(__dirname, "../test/mock-server.ts");
+// 다운스트림 서버 경로. 기본은 데모용 mock-server. 테스트에서 PROXY_DOWNSTREAM으로 교체 가능.
+const MOCK_SERVER_PATH = process.env.PROXY_DOWNSTREAM
+  ? resolve(process.env.PROXY_DOWNSTREAM)
+  : resolve(__dirname, "../test/mock-server.ts");
 // npx 대신 로컬 tsx를 절대경로로 직접 실행한다. npx는 cwd 기준으로 tsx를 찾기 때문에,
 // 에이전트가 임의의 cwd에서 프록시를 띄우면 tsx를 인터넷에서 새로 받으려 한다(느리고 오프라인 실패).
 const TSX_CLI = resolve(__dirname, "../../node_modules/tsx/dist/cli.mjs");
@@ -79,6 +84,13 @@ const HARMLESS_METHODS = new Set<string>([
   "logging/setLevel",
   "completion/complete",
 ]);
+
+// 리소스 URI 신뢰 판정 (임시 휴리스틱). 로컬 파일(file://)은 내부 자원 → 신뢰,
+// 원격(http/https 등)은 외부 → 비신뢰. 정식 분류(URI 신뢰 레지스트리)는 엔진(B) 몫(별도 이슈).
+// prompts/get의 프롬프트명 등 file:// 아닌 것은 보수적으로 비신뢰(fail-safe).
+function isResourceTrusted(uri: string): boolean {
+  return uri.startsWith("file:///") || uri.startsWith("file://localhost/");
+}
 
 type MethodRisk = "SINK" | "HARMLESS" | "UNCLASSIFIED";
 
@@ -141,10 +153,14 @@ async function main() {
   console.error(`[proxy] 세션 시작  session=${sessionId}`);
   startDashboardBridge();
 
-  const downstream = new Client({
-    name: "icarus-tether-proxy-client",
-    version: "0.1.0",
-  });
+  const downstream = new Client(
+    { name: "icarus-tether-proxy-client", version: "0.1.0" },
+    // 서버가 sampling 같은 역방향 요청을 쓸 수 있게 신고한다. 이게 없으면 서버의
+    // createMessage가 "클라가 sampling 미지원"으로 거부돼 역방향 SINK 경로 자체가 죽는다.
+    // (역방향 요청은 그대로 실제 클라에 중계 — 실제 클라가 미지원이면 중계가 실패한다.
+    //  이상적으론 업스트림 클라 capability를 미러링해야 함: 후속 개선.)
+    { capabilities: { sampling: {} } }
+  );
   const downstreamTransport = new StdioClientTransport({
     command: process.execPath, // 지금 프록시를 돌리는 node 실행파일 (절대경로라 cwd 무관)
     args: [TSX_CLI, MOCK_SERVER_PATH],
@@ -261,18 +277,67 @@ async function main() {
   // 결과의 SOURCE 오염 태깅)은 엔진(B) 몫 → 사-B 이슈. 알림은 데이터를 안 나르고
   // 양이 많아 stderr 로그만 남긴다(audit 기록은 요청만).
   server.fallbackRequestHandler = async (req) => {
-    auditForward(sessionId, req.method);
-    return downstream.request({ method: req.method, params: req.params } as any, z.any());
+    const method = req.method;
+    // SOURCE 채널: 외부 콘텐츠가 세션으로 유입되는 경로. 결과를 받아 recordExternalContent로
+    // 오염 태깅해야 이후 이 콘텐츠가 send_email 등으로 나갈 때 차단된다 (S5 근본 차단).
+    if (method === "resources/read" || method === "prompts/get") {
+      const result = await downstream.request({ method, params: req.params } as any, z.any());
+      const uri = String(
+        (req.params as { uri?: unknown; name?: unknown })?.uri ??
+          (req.params as { name?: unknown })?.name ??
+          method
+      );
+      try {
+        // 로컬 파일은 신뢰, 원격은 비신뢰(임시 휴리스틱). 정식 URI 신뢰분류는 B 몫(별도 이슈).
+        recordExternalContent(sessionId, method, uri, result, { trusted: isResourceTrusted(uri) });
+      } catch (err) {
+        // fail-safe: 오염 추적 실패 시 추적 안 된 콘텐츠를 넘기지 않는다(tools/call과 동일).
+        console.error(`[proxy] 외부 콘텐츠 오염 기록 실패 — 전달 보류  ${method}:${uri}`, err);
+        throw new Error("안전장치: 외부 콘텐츠 오염 추적 실패로 전달을 보류합니다.");
+      }
+      console.error(`[proxy] ✅ 외부 콘텐츠 오염 기록  ${method}:${uri}  session=${sessionId}`);
+      recordAudit({ sessionId, toolName: `${method}:${uri}`, decision: "ALLOWED", matchedTags: [] });
+      return result;
+    }
+    auditForward(sessionId, method);
+    return downstream.request({ method, params: req.params } as any, z.any());
   };
   server.fallbackNotificationHandler = async (n) => {
     const m = (n as { method?: string }).method ?? "notification";
     logForwarded(sessionId, m, classifyMethod(m));
     return downstream.notification(n as any);
   };
-  // 역방향(서버→클라, 예: sampling/createMessage·roots)도 통과. sampling은 SINK다.
+  // 역방향(서버→클라). sampling/createMessage는 서버가 클라 LLM에 컨텍스트를 보내는
+  // 실제 유출구(SINK)라, 나가는 콘텐츠에 민감 오염이 실렸는지 판정해 하드 블록한다.
   downstream.fallbackRequestHandler = async (req) => {
-    auditForward(sessionId, req.method, true);
-    return server.request({ method: req.method, params: req.params } as any, z.any());
+    const method = req.method;
+    if (method === "sampling/createMessage") {
+      let decision;
+      try {
+        decision = evaluateOutboundContent(sessionId, "sampling/createMessage", req.params);
+      } catch (err) {
+        // fail-safe: 판정 자체가 실패하면 통과시키지 않는다.
+        console.error(`[proxy] 역방향 판정 실패 — 차단  ${method}`, err);
+        throw new Error("안전장치: 역방향 콘텐츠 판정 실패로 차단합니다.");
+      }
+      recordAudit({
+        sessionId,
+        toolName: `↩${method}`,
+        decision: decision.allowed ? "ALLOWED" : "BLOCKED",
+        matchedTags: decision.matchedTags,
+      });
+      broadcastDecision(sessionId, `↩${method}`, decision, new Date().toISOString());
+      if (!decision.allowed) {
+        console.error(`[proxy] 차단(역방향)  ${method}  reason=${decision.reason}`);
+        throw new Error(
+          `정책 차단: ${decision.explanation?.summary ?? decision.reason ?? "역방향 유출 차단"}`
+        );
+      }
+      console.error(`[proxy] ⬅ 검사 통과(역방향 SINK)  ${method}  session=${sessionId}`);
+      return server.request({ method, params: req.params } as any, z.any());
+    }
+    auditForward(sessionId, method, true);
+    return server.request({ method, params: req.params } as any, z.any());
   };
   downstream.fallbackNotificationHandler = async (n) => {
     const m = (n as { method?: string }).method ?? "notification";

@@ -12,7 +12,8 @@
     "demo:safe": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-safe.ts",
     "demo:hitl": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/demo-client-hitl.ts",
     "test:bridge": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json AUTO_APPROVE=1 DEMO_PACE_MS=0 tsx test/demo-client-hitl.ts",
-    "test:exfil": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-exfil.ts"
+    "test:exfil": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-exfil.ts",
+    "test:sampling": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-sampling.ts"
   },
   "dependencies": {
     "@icarus-tether/policy-engine": "*",
