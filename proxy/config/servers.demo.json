@@ -1,0 +1,7 @@
+{
+  "_comment": "Phase 2 페더레이션 라우팅 테이블. 키=서버명(도구 접두사), 값=연결정보. 'module'=stdio로 spawn할 tsx 모듈(proxy 기준 상대경로), 'url'=HTTP 다운스트림. PROXY_SERVERS_CONFIG로 이 파일을 가리키면 페더레이션 모드가 켜진다.",
+  "servers": {
+    "db": { "module": "test/servers/db-server.ts" },
+    "mail": { "module": "test/servers/mail-server.ts" }
+  }
+}
