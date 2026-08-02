@@ -126,6 +126,19 @@ export interface PolicyConfig {
   destructivePolicy: DestructivePolicy;
   /** 사용자용 설명 계층에서 쓰는 도구의 사람 말 라벨 (예: read_secrets → "비밀 파일 읽기") */
   toolLabels: Record<string, string>;
+  /**
+   * 신뢰 리소스 URI 접두사 목록 (C-7) — resources/read·prompts/get의 URI가 이 중
+   * 하나로 시작하면 신뢰(내부) 콘텐츠로 본다. 매칭 안 되면 비신뢰(원칙 4 default-deny).
+   * 기본 [] = 아무것도 신뢰하지 않음.
+   *
+   * ★ 위장 방지 규칙(로드 시 fail-closed 검증): 각 접두사는 "://"를 포함하고 "/"로
+   * 끝나야 한다. URL 파싱을 아예 하지 않는 순수 접두사 매칭이므로(파서 차이 공격 배제),
+   * 경계 없는 접두사("https://corp")는 "https://corp.evil.com"에도 매칭되는 확장 위장을
+   * 허용한다 — 그래서 구조적으로 금지한다. 예: ["file:///", "file://localhost/",
+   * "internal://", "https://intranet.corp.local/"].
+   * ("file:///"는 호스트 없는 로컬만 매칭 — "file://evil-host/"(원격 UNC)는 안 걸린다.)
+   */
+  trustedResourceUris: readonly string[];
   secretDetection: SecretDetectionConfig | null;
   piiPatterns: PatternSpec[];
   extractionSchema: ExtractionSchemaConfig | null;
@@ -364,6 +377,22 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     }
   }
 
+  // 신뢰 리소스 URI 접두사 (C-7) — 생략 시 [] (default-deny: 아무 URI도 신뢰 안 함)
+  const trustedResourceUris =
+    obj.trustedResourceUris === undefined
+      ? []
+      : assertStringArray(obj.trustedResourceUris, "trustedResourceUris");
+  for (const prefix of trustedResourceUris) {
+    // 위장 방지 경계 규칙: "://" 포함 + "/" 종료. "https://corp" 같은 경계 없는
+    // 접두사는 "https://corp.evil.com"에도 매칭(확장 위장)되므로 로드 자체를 거부한다.
+    if (!prefix.includes("://") || !prefix.endsWith("/")) {
+      fail(
+        `trustedResourceUris "${prefix}"는 "://"를 포함하고 "/"로 끝나야 합니다 ` +
+          `(경계 없는 접두사는 "corp" → "corp.evil.com" 확장 위장을 허용 — 예: "file:///", "internal://")`
+      );
+    }
+  }
+
   return {
     domain,
     sensitiveSourceTools,
@@ -378,6 +407,7 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     destructiveTools,
     destructivePolicy,
     toolLabels,
+    trustedResourceUris,
     secretDetection: parseSecretDetection(obj.secretDetection),
     piiPatterns: parsePatternList(obj.piiPatterns, "piiPatterns"),
     extractionSchema: parseExtractionSchema(obj.extractionSchema),
