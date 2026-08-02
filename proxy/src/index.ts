@@ -19,6 +19,8 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { startDashboardBridge, stopDashboardBridge, broadcastDecision, recordAudit, broadcastAuditIntegrity, broadcastLineage } from "./dashboard-bridge.js";
 import { checkInjection } from "./injection.js";
+// 순수 라우팅·분류 헬퍼 (Phase 4에서 퍼징 가능하도록 분리).
+import { classifyMethod, isResourceTrusted, splitAgentToolName, type MethodRisk } from "./routing.js";
 import { z } from "zod";
 // 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
 import type { ToolCallContext } from "@icarus-tether/types";
@@ -59,45 +61,12 @@ interface SessionState {
 const sessions = new Map<string, SessionState>();
 
 
-// ── (사) 메서드 위험도 분류 ──────────────────────────────────────────────
-// tools/call은 evaluateToolCall로 검사하지만, 그 외 메서드는 fallback으로 빠져
-// 무검사 중계된다(S5 fail-open). 메서드 이름도 도구처럼 위험도로 나눠, 최소한
-// 어떤 성격의 통신이 오갔는지 판정·기록할 수 있게 한다.
-//   SINK     : 데이터가 밖으로 나갈 수 있는 메서드 → tools/call처럼 검사 대상
-//   HARMLESS : 목록·메타·수명주기 조회 → 데이터를 나르지 않음, 그냥 통과 OK
-//   (그 외)  : 미분류 → 일단 통과하되 정식 기록 (SOURCE 오염 추적은 B 몫: 사-B)
-// resources/read·prompts/get은 '데이터 유입(SOURCE)'이라 오염 태깅이 필요한데,
-// 그 태깅은 엔진(B) 내부 로직이므로 여기서는 미분류로 두고 처리는 이슈로 넘긴다.
-
-// 외부로 데이터가 나갈 수 있는 메서드.
-const SINK_METHODS = new Set<string>([
-  "sampling/createMessage", // 서버가 클라의 LLM에 컨텍스트를 보냄 = 외부 유출구
-]);
-
-// 데이터를 나르지 않는 메타/목록/수명주기 메서드 (무검사 통과해도 안전).
-const HARMLESS_METHODS = new Set<string>([
-  "ping",
-  "initialize",
-  "tools/list",
-  "resources/list",
-  "resources/templates/list",
-  "prompts/list",
-  "roots/list",
-  "logging/setLevel",
-  "completion/complete",
-]);
-
-// 리소스 URI 신뢰 판정 (임시 휴리스틱). 로컬 파일(file://)은 내부 자원 → 신뢰,
-// 원격(http/https 등)은 외부 → 비신뢰. 정식 분류(URI 신뢰 레지스트리)는 엔진(B) 몫(별도 이슈).
-// prompts/get의 프롬프트명 등 file:// 아닌 것은 보수적으로 비신뢰(fail-safe).
-function isResourceTrusted(uri: string): boolean {
-  return uri.startsWith("file:///") || uri.startsWith("file://localhost/");
-}
-
 // ── Phase 2: 멀티서버 페더레이션 ──────────────────────────────────────────
 // PROXY_SERVERS_CONFIG(설정 파일 경로)가 있으면 페더레이션 모드: 여러 다운스트림 서버에
 // 붙어 도구를 '서버명.도구명'으로 합쳐 노출하고, 호출을 접두사로 라우팅한다.
 // 없으면 기존 단일 다운스트림 모드(모든 기존 테스트·데모 그대로).
+// (순수 분류·라우팅 헬퍼 classifyMethod/isResourceTrusted/splitAgentToolName은
+//  퍼징 가능하도록 ./routing.ts로 분리했다 — Phase 4.)
 interface ServerEntry {
   name: string;
   module?: string; // stdio: proxy 기준 상대경로 tsx 모듈
@@ -111,23 +80,6 @@ function loadServerConfig(): ServerEntry[] | null {
     servers: Record<string, { module?: string; url?: string }>;
   };
   return Object.entries(raw.servers).map(([name, v]) => ({ name, ...v }));
-}
-
-// 'db.query_customer_db' → ['db', 'query_customer_db']. 접두사(첫 '.') 기준. 없으면 ['', name].
-function splitAgentToolName(agentName: string): [string, string] {
-  const dot = agentName.indexOf(".");
-  if (dot < 0) return ["", agentName];
-  return [agentName.slice(0, dot), agentName.slice(dot + 1)];
-}
-
-type MethodRisk = "SINK" | "HARMLESS" | "UNCLASSIFIED";
-
-// 메서드명 → 위험도. 알림(notifications/*)은 상태 통지일 뿐이라 무해로 본다.
-function classifyMethod(method: string): MethodRisk {
-  if (SINK_METHODS.has(method)) return "SINK";
-  if (HARMLESS_METHODS.has(method)) return "HARMLESS";
-  if (method.startsWith("notifications/")) return "HARMLESS";
-  return "UNCLASSIFIED";
 }
 
 // tools 외 메서드를 무검사로 중계할 때, 최소한 그 사실을 눈에 보이게 남긴다(S5 대응 1단계).

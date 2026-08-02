@@ -15,7 +15,9 @@
     "test:exfil": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-exfil.ts",
     "test:sampling": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-sampling.ts",
     "test:http": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-http.ts",
-    "test:federation": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-federation.ts"
+    "test:federation": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-federation.ts",
+    "test:fuzz": "tsx test/fuzz-routing.ts",
+    "test:fuzz-framing": "tsx test/fuzz-framing.ts"
   },
   "dependencies": {
     "@icarus-tether/policy-engine": "*",
@@ -29,6 +31,7 @@
     "cross-env": "^7.0.3",
     "tsx": "^4.19.0",
     "express": "^5.2.1",
+    "fast-check": "^4.9.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
     "@types/express": "^5.0.0"
