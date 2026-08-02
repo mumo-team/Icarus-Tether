@@ -110,12 +110,17 @@ test("불일치 반대 방향: argTags로 toy만 차단 → TOY_BLOCK_REAL_ALLOW
 // real 계산 실패 — 판정은 정상, 로그에 error만
 // ---------------------------------------------------------------------------
 
-test("real 계산 실패(순환 참조 args)에도 evaluateToolCall은 정상 동작한다", () => {
+test("real 계산 실패(던지는 getter args)에도 evaluateToolCall은 정상 동작한다", () => {
   const sid = "sh5-crash";
-  const circular: Record<string, unknown> = {};
-  circular.self = circular; // collectStrings 재귀를 터뜨리는 입력
+  // 순환참조는 collectStrings 견고화(value-walk) 이후 더는 안 터지므로,
+  // 순회가 반드시 던지는 입력(getter throw)으로 fail-safe 경로를 검증한다.
+  const hostile = {
+    get boom(): string {
+      throw new Error("의도된 순회 실패");
+    },
+  } as unknown as Record<string, unknown>;
 
-  const decision = evaluateToolCall(ctx(sid, "send_email", circular));
+  const decision = evaluateToolCall(ctx(sid, "send_email", hostile));
   assert.equal(decision.allowed, true); // toy 판정은 args를 순회하지 않으므로 정상
 
   const entry = lastShadow(sid);
@@ -124,6 +129,20 @@ test("real 계산 실패(순환 참조 args)에도 evaluateToolCall은 정상 �
   assert.equal(entry.evidence, null);
   assert.ok(entry.error); // 실패가 기록됨
   assert.equal(entry.toyAllowed, true); // toy 결과는 기록됨
+});
+
+test("순환 참조 args는 이제 real 계산을 터뜨리지 않는다 (collectStrings 견고화 회귀)", () => {
+  const sid = "sh5-circular-ok";
+  const circular: Record<string, unknown> = { note: "안전한 값" };
+  circular.self = circular;
+
+  const decision = evaluateToolCall(ctx(sid, "send_email", circular));
+  assert.equal(decision.allowed, true);
+
+  const entry = lastShadow(sid);
+  assert.equal(entry.error, undefined); // 더는 실패 아님
+  assert.equal(entry.realAllowed, true); // real 판정이 실제로 수행됨
+  assert.equal(entry.match, true);
 });
 
 // ---------------------------------------------------------------------------

@@ -38,6 +38,7 @@
 
 import { createHash } from "node:crypto";
 import { detectSecretsInString } from "./secret-detection.js";
+import { collectStrings } from "./value-walk.js";
 import type { SecretDetectionConfig } from "./config.js";
 
 /**
@@ -90,13 +91,6 @@ function matchNormalizedNeedle(nv: string, haystacks: readonly string[]): boolea
   const pattern = Array.from(nv).join("[^\\p{L}\\p{N}]*");
   const re = new RegExp(pattern, "iu");
   return haystacks.some((h) => re.test(h));
-}
-
-function collectStrings(value: unknown, out: string[]): void {
-  if (typeof value === "string") out.push(value);
-  else if (Array.isArray(value)) for (const v of value) collectStrings(v, out);
-  else if (typeof value === "object" && value !== null)
-    for (const v of Object.values(value)) collectStrings(v, out);
 }
 
 function hashValue(v: string): string {
@@ -225,8 +219,7 @@ export function scanOutputForSensitive(
   secretDetection: SecretDetectionConfig | null | undefined,
   minLength: number = OUTPUT_SCAN_MIN_LENGTH
 ): OutputScanFinding | null {
-  const outStrings: string[] = [];
-  collectStrings(args, outStrings);
+  const outStrings = collectStrings(args);
 
   // ★ 성능(무손실): 포함검사 haystack은 "전체 concat" 하나면 충분하다. 개별 문자열의 내용은
   // 전부 concat의 부분문자열이므로(개별에 있으면 concat에도 있음), 개별을 따로 훑을 필요가 없다
@@ -262,8 +255,7 @@ export function scanOutputForSensitive(
     let normHaystacksLazy: string[] | null = null;
     const normHaystacks = (): string[] => (normHaystacksLazy ??= haystacks.map(normalizeText));
     for (const { toolName, payload } of sensitivePayloads) {
-      const values: string[] = [];
-      collectStrings(payload, values);
+      const values = collectStrings(payload);
       for (const v of values) {
         if (v.length < minLength) continue; // 짧은 값은 어떤 needle도 안 씀 (우연 매치 방지)
         // (a) 정확 포함검사 — 무손실. 원문/base64 그대로 실린 경우.

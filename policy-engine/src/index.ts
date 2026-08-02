@@ -399,6 +399,19 @@ const METHOD_CLEARS: Record<SanitizationMethod, ToolRiskTag> = {
  *    하나라도 실패하거나, 검증할 페이로드가 기록돼 있지 않거나, 설정에 해당
  *    방법의 근거(스키마·패턴)가 없으면 태그 유지 (fail-safe).
  */
+/**
+ * "토큰화가 실제로 값을 바꿨나" 비교 — attemptSanitization의 S4 no-op 게이트 전용.
+ * fail-safe: 직렬화가 던지면(순환 페이로드 — collectStrings 견고화로 기록은 가능)
+ * "안 바뀜"으로 보고해 태그 해제를 막는다. 오류로 태그가 벗겨지는 경로는 없어야 한다.
+ */
+function payloadChanged(before: unknown, after: unknown): boolean {
+  try {
+    return JSON.stringify(before) !== JSON.stringify(after);
+  } catch {
+    return false;
+  }
+}
+
 export function attemptSanitization(
   sessionId: string,
   method: SanitizationMethod
@@ -429,7 +442,7 @@ export function attemptSanitization(
     // 안전 증명이라(불변이어도 안전) 이 게이트를 적용하지 않는다.
     const tokenizationEffective =
       method !== SanitizationMethod.TOKENIZATION ||
-      records.every((r, i) => outcomes[i].ok && JSON.stringify(r.payload) !== JSON.stringify((outcomes[i] as { value: unknown }).value));
+      records.every((r, i) => outcomes[i].ok && payloadChanged(r.payload, (outcomes[i] as { value: unknown }).value));
 
     if (outcomes.every((o) => o.ok) && tokenizationEffective) {
       // 검증 통과 — 페이로드를 정화된 값으로 교체하고 태그 해제

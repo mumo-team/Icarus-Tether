@@ -30,6 +30,7 @@ import {
   stripVaultTokens,
   VAULT_TOKEN_PATTERN,
 } from "./secret-detection.js";
+import { collectStrings, mapValueStrings } from "./value-walk.js";
 
 // ---------------------------------------------------------------------------
 // 하위 호환 미러 — 값의 원본은 config/tool-registry.json (default 도메인).
@@ -136,21 +137,13 @@ const VAULT_MATCH_MIN_LENGTH = 8;
  */
 export function containsVaultOriginal(value: unknown): boolean {
   if (vault.size === 0) return false;
-  const strings: string[] = [];
-  collectStrings(value, strings);
+  const strings = collectStrings(value);
   if (strings.length === 0) return false;
   const haystack = strings.join("\0");
   for (const original of vault.values()) {
     if (original.length >= VAULT_MATCH_MIN_LENGTH && haystack.includes(original)) return true;
   }
   return false;
-}
-
-function collectStrings(value: unknown, out: string[]): void {
-  if (typeof value === "string") out.push(value);
-  else if (Array.isArray(value)) for (const v of value) collectStrings(v, out);
-  else if (typeof value === "object" && value !== null)
-    for (const v of Object.values(value)) collectStrings(v, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -160,8 +153,7 @@ function collectStrings(value: unknown, out: string[]): void {
 
 /** 값 안의 볼트 토큰 자리 수 — maskedCount(치환된 값 수) 보고용 */
 export function countVaultTokens(value: unknown): number {
-  const strings: string[] = [];
-  collectStrings(value, strings);
+  const strings = collectStrings(value);
   const re = new RegExp(VAULT_TOKEN_PATTERN.source, "g");
   return strings.reduce((n, s) => n + (s.match(re)?.length ?? 0), 0);
 }
@@ -172,8 +164,7 @@ export function countVaultTokens(value: unknown): number {
  * 걸린 부분만 가리므로, 토큰 밖에 내용이 남으면 비중화 민감 잔존으로 본다.
  */
 export function hasNonTokenContent(value: unknown): boolean {
-  const strings: string[] = [];
-  collectStrings(value, strings);
+  const strings = collectStrings(value);
   return strings.some((s) => /[\p{L}\p{N}]/u.test(stripVaultTokens(s)));
 }
 
@@ -204,30 +195,6 @@ function tokenizeEntropyRuns(text: string, cfg: EntropyConfig): string {
         : run
     )
   );
-}
-
-/** 문자열을 재귀적으로 치환하고, 결과 문자열들을 수집해 재검증에 쓴다 */
-function walkAndTokenize(
-  value: unknown,
-  tokenize: (s: string) => string,
-  collected: string[]
-): unknown {
-  if (typeof value === "string") {
-    const replaced = tokenize(value);
-    collected.push(replaced);
-    return replaced;
-  }
-  if (Array.isArray(value)) {
-    return value.map((v) => walkAndTokenize(v, tokenize, collected));
-  }
-  if (typeof value === "object" && value !== null) {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) {
-      out[k] = walkAndTokenize(v, tokenize, collected);
-    }
-    return out;
-  }
-  return value; // number/boolean/null 등은 그대로
 }
 
 /**
@@ -262,8 +229,9 @@ export function tokenizePII(payload: unknown): SanitizeOutcome {
     return result;
   };
 
-  const collected: string[] = [];
-  const value = walkAndTokenize(payload, tokenize, collected);
+  // 치환된 문자열(collected)은 아래 재검증에 쓴다. 순회는 value-walk의 비재귀 구현
+  // (순환·깊은 중첩 안전 — collectStrings와 동일 가드).
+  const { value, strings: collected } = mapValueStrings(payload, tokenize);
 
   // 검증 단계: 자체 토큰을 제거한 뒤 재스캔 — 잔여 PII/비밀이 있으면 실패 (fail-safe)
   for (const s of collected) {

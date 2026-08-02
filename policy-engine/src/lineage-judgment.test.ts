@@ -107,12 +107,16 @@ test("차단 reason에 오염 노드 id·도구명·태그와 해제 방법 힌�
 // fail-safe: real 계산 실패 = 차단 (조용한 통과 금지)
 // ---------------------------------------------------------------------------
 
-test("★fail-safe: real 계산 실패(순환 참조 args) 시 차단한다", () => {
+test("★fail-safe: real 계산 실패(던지는 getter args) 시 차단한다", () => {
   const sid = "j4-failsafe";
-  const circular: Record<string, unknown> = {};
-  circular.self = circular;
+  // 순환참조는 collectStrings 견고화 이후 안 터지므로, 던지는 getter로 실패를 유발한다
+  const hostile = {
+    get boom(): string {
+      throw new Error("의도된 순회 실패");
+    },
+  } as unknown as Record<string, unknown>;
 
-  const decision = evaluateToolCall(ctx(sid, "http_post", circular));
+  const decision = evaluateToolCall(ctx(sid, "http_post", hostile));
   assert.equal(decision.allowed, false); // 섀도(무개입)와 반대 — 실전 결정자는 실패 시 차단
   assert.ok(decision.reason?.includes("fail-safe"));
   assert.deepEqual(decision.matchedTags, []); // 탐지가 아닌 운영 오류 차단
