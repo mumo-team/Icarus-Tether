@@ -7,7 +7,9 @@
  * 불변식(퍼징이 지키는 성질):
  *  - classifyMethod:  어떤 문자열이 와도 예외 없이 "SINK"|"HARMLESS"|"UNCLASSIFIED" 중 하나 반환
  *  - splitAgentToolName: 어떤 문자열이 와도 예외 없이 [string, string] 반환, 두 조각이 원본을 복원
- *  - isResourceTrusted: 어떤 문자열이 와도 예외 없이 boolean 반환, file:// 로컬만 신뢰
+ *
+ * (URI 신뢰 판정 isResourceTrusted는 C-7로 엔진에 이관 — registry의 trustedResourceUris를
+ *  엔진의 isResourceUriTrusted가 판정한다. 프록시엔 더 이상 신뢰 휴리스틱이 없다.)
  */
 
 // ── (사) 메서드 위험도 분류 ──────────────────────────────────────────────
@@ -41,13 +43,6 @@ export function classifyMethod(method: string): MethodRisk {
   if (HARMLESS_METHODS.has(method)) return "HARMLESS";
   if (method.startsWith("notifications/")) return "HARMLESS";
   return "UNCLASSIFIED";
-}
-
-// 리소스 URI 신뢰 판정 (임시 휴리스틱). 로컬 파일(file://)은 내부 자원 → 신뢰,
-// 원격(http/https 등)은 외부 → 비신뢰. 정식 분류(URI 신뢰 레지스트리)는 엔진(B) 몫(별도 이슈).
-// prompts/get의 프롬프트명 등 file:// 아닌 것은 보수적으로 비신뢰(fail-safe).
-export function isResourceTrusted(uri: string): boolean {
-  return uri.startsWith("file:///") || uri.startsWith("file://localhost/");
 }
 
 // 'db.query_customer_db' → ['db', 'query_customer_db']. 접두사(첫 '.') 기준. 없으면 ['', name].

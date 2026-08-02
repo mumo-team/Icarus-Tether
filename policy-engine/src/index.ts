@@ -79,6 +79,7 @@ export {
 export {
   loadPolicyConfig,
   getPolicyConfig,
+  reloadPolicyConfig,
   NAMED_CHARSETS,
   type PolicyConfig,
   type UnknownToolPolicy,
@@ -335,6 +336,11 @@ export function recordToolResult(
  *
  * 프록시(②)는 fallbackRequestHandler에서 resources/read·prompts/get 응답을 받은 직후
  * 이 함수를 부르면 된다(값-계보를 위해 content 원형을 그대로 넘긴다). uri는 감사·계보 라벨.
+ *
+ * ★ C-7: opts.trusted를 안 넘기면 엔진이 설정(trustedResourceUris)의 URI 접두사로
+ * 신뢰를 판정한다 — URI 신뢰는 정책 판단이므로 registry가 소유한다("성질로 판단,
+ * 설정으로"). 프록시가 명시하면 그 값을 존중한다(하위호환 — 단 trusted:true 오전달은
+ * 프록시 책임: 엔진은 명시값을 검증하지 않는다).
  */
 export function recordExternalContent(
   sessionId: string,
@@ -343,7 +349,7 @@ export function recordExternalContent(
   content: unknown,
   opts?: { trusted?: boolean }
 ): TaintNode {
-  const tags = computeExternalContentTags(content, opts?.trusted ?? false);
+  const tags = computeExternalContentTags(content, opts?.trusted ?? isResourceUriTrusted(uri));
   addSessionTags(getOrCreateSession(sessionId), tags);
 
   // 라벨은 채널+uri — '/'·':'를 포함해 실제 도구명과 충돌하지 않는다(감사로그·계보 표시용).
@@ -358,6 +364,20 @@ export function recordExternalContent(
     payloadStore.set(sessionId, records);
   }
   return node;
+}
+
+/**
+ * ★ C-7: 리소스 URI 신뢰 판정 — registry(trustedResourceUris)의 접두사 매칭.
+ *
+ * 의도적으로 URL 파싱을 하지 않는다: 파서마다 해석이 갈리는 병리 URI(퍼센트 인코딩·
+ * 유저인포 `corp@evil.com`·대소문자 스킴 등)가 파서 차이 공격면이 되므로, 문자열
+ * 접두사 매칭만 쓴다. 위장의 위험 방향(원격을 신뢰로 오판)은 로드 시 경계 규칙
+ * ("://" 포함 + "/" 종료, config.ts)이 막고, 안전 방향(신뢰 자원을 비신뢰로 오판 —
+ * 예: "FILE:///" 대문자 스킴)은 default-deny라 과태깅으로 끝난다(우회 아님).
+ * 미매칭 = 비신뢰 (원칙 4 default-deny). 기본 설정은 빈 목록 — 아무것도 신뢰하지 않음.
+ */
+export function isResourceUriTrusted(uri: string): boolean {
+  return getPolicyConfig().trustedResourceUris.some((prefix) => uri.startsWith(prefix));
 }
 
 /**
@@ -399,6 +419,19 @@ const METHOD_CLEARS: Record<SanitizationMethod, ToolRiskTag> = {
  *    하나라도 실패하거나, 검증할 페이로드가 기록돼 있지 않거나, 설정에 해당
  *    방법의 근거(스키마·패턴)가 없으면 태그 유지 (fail-safe).
  */
+/**
+ * "토큰화가 실제로 값을 바꿨나" 비교 — attemptSanitization의 S4 no-op 게이트 전용.
+ * fail-safe: 직렬화가 던지면(순환 페이로드 — collectStrings 견고화로 기록은 가능)
+ * "안 바뀜"으로 보고해 태그 해제를 막는다. 오류로 태그가 벗겨지는 경로는 없어야 한다.
+ */
+function payloadChanged(before: unknown, after: unknown): boolean {
+  try {
+    return JSON.stringify(before) !== JSON.stringify(after);
+  } catch {
+    return false;
+  }
+}
+
 export function attemptSanitization(
   sessionId: string,
   method: SanitizationMethod
@@ -429,7 +462,7 @@ export function attemptSanitization(
     // 안전 증명이라(불변이어도 안전) 이 게이트를 적용하지 않는다.
     const tokenizationEffective =
       method !== SanitizationMethod.TOKENIZATION ||
-      records.every((r, i) => outcomes[i].ok && JSON.stringify(r.payload) !== JSON.stringify((outcomes[i] as { value: unknown }).value));
+      records.every((r, i) => outcomes[i].ok && payloadChanged(r.payload, (outcomes[i] as { value: unknown }).value));
 
     if (outcomes.every((o) => o.ok) && tokenizationEffective) {
       // 검증 통과 — 페이로드를 정화된 값으로 교체하고 태그 해제
@@ -909,8 +942,10 @@ export function evaluateToolCall(ctx: ToolCallContext): PolicyDecision {
 // broadcastDecision/recordAudit를 그대로 재사용한다.
 // ---------------------------------------------------------------------------
 
-/** evaluateOutboundContent가 검사하는 역방향 채널. 유입(source)이 아니라 유출(sink) 축이다. */
-export type OutboundChannel = "sampling/createMessage";
+/** evaluateOutboundContent가 검사하는 아웃바운드 채널. 유입(source)이 아니라 유출(sink) 축이다.
+ *  resources/read·prompts/get은 ③ 결정: 비신뢰 대상으로 나가는 "요청 자체"가 유출구다
+ *  (URI 쿼리에 데이터 싣기 등) — evaluateResourceRequest가 비신뢰일 때만 이 경로로 넘긴다. */
+export type OutboundChannel = "sampling/createMessage" | "resources/read" | "prompts/get";
 
 /**
  * 서버로 돌아가려는 아웃바운드 콘텐츠(sampling 응답 등)를 유출 관점에서 판정한다.
@@ -1005,6 +1040,34 @@ export function evaluateOutboundContent(
       explanation: buildFailSafeExplanation(),
     };
   }
+}
+
+/**
+ * ★ C-7 + ③: 리소스 요청(resources/read·prompts/get)을 "보내기 전" 판정한다.
+ *
+ * ③ 정책 결정(옵션 B — 비신뢰 대상만): 비신뢰 URI로 나가는 요청은 "읽기"라도 요청
+ * 자체가 경계 밖 통신이다 — URI 쿼리에 데이터를 실으면 유출구가 된다(마크다운 이미지
+ * URL 유출과 동형, tools/call·sampling을 막은 뒤 남는 마지막 열린 채널). 그래서
+ * 요청 params 전체(URI 포함)를 evaluateOutboundContent와 같은 강도로 sink 판정한다.
+ *
+ * 신뢰 URI(trustedResourceUris 매칭)는 내부 자원 — 요청이 경계를 안 나가므로 sink
+ * 검사 없이 통과한다(과차단 방지: 내부 경로 문자열이 우연히 민감값과 겹쳐도 무해).
+ * 판정 기준이 유입 태깅(recordExternalContent)과 동일한 registry 규칙이라, "신뢰면
+ * U 안 붙고 sink 검사도 없음 / 비신뢰면 U 붙고 sink 검사도 함"이 항상 일치한다.
+ *
+ * 프록시(②)는 요청을 중계하기 전에 이 함수를 부르고, allowed=false면 중계하지 않는다.
+ * params를 안 넘기면 URI만 검사한다(최소 보장).
+ */
+export function evaluateResourceRequest(
+  sessionId: string,
+  channel: "resources/read" | "prompts/get",
+  uri: string,
+  params?: unknown
+): PolicyDecision {
+  if (isResourceUriTrusted(uri)) {
+    return { sessionId, toolName: channel, allowed: true, matchedTags: [] };
+  }
+  return evaluateOutboundContent(sessionId, channel, params ?? { uri });
 }
 
 /**

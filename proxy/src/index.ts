@@ -20,7 +20,8 @@ import { readFileSync } from "node:fs";
 import { startDashboardBridge, stopDashboardBridge, broadcastDecision, recordAudit, broadcastAuditIntegrity, broadcastLineage } from "./dashboard-bridge.js";
 import { checkInjection } from "./injection.js";
 // 순수 라우팅·분류 헬퍼 (Phase 4에서 퍼징 가능하도록 분리).
-import { classifyMethod, isResourceTrusted, splitAgentToolName, type MethodRisk } from "./routing.js";
+// (URI 신뢰 판정은 C-7로 엔진에 이관 — isResourceTrusted 임시 휴리스틱 제거)
+import { classifyMethod, splitAgentToolName, type MethodRisk } from "./routing.js";
 import { z } from "zod";
 // 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
 import type { ToolCallContext } from "@icarus-tether/types";
@@ -28,6 +29,7 @@ import type { ToolCallContext } from "@icarus-tether/types";
 import {
   evaluateToolCall,
   evaluateOutboundContent,
+  evaluateResourceRequest,
   recordToolResult,
   recordExternalContent,
   requestApproval,
@@ -65,7 +67,7 @@ const sessions = new Map<string, SessionState>();
 // PROXY_SERVERS_CONFIG(설정 파일 경로)가 있으면 페더레이션 모드: 여러 다운스트림 서버에
 // 붙어 도구를 '서버명.도구명'으로 합쳐 노출하고, 호출을 접두사로 라우팅한다.
 // 없으면 기존 단일 다운스트림 모드(모든 기존 테스트·데모 그대로).
-// (순수 분류·라우팅 헬퍼 classifyMethod/isResourceTrusted/splitAgentToolName은
+// (순수 분류·라우팅 헬퍼 classifyMethod/splitAgentToolName은
 //  퍼징 가능하도록 ./routing.ts로 분리했다 — Phase 4.)
 interface ServerEntry {
   name: string;
@@ -303,15 +305,40 @@ async function main() {
     // SOURCE 채널: 외부 콘텐츠가 세션으로 유입되는 경로. 결과를 받아 recordExternalContent로
     // 오염 태깅해야 이후 이 콘텐츠가 send_email 등으로 나갈 때 차단된다 (S5 근본 차단).
     if (method === "resources/read" || method === "prompts/get") {
-      const result = await primary.request({ method, params: req.params } as any, z.any());
       const uri = String(
         (req.params as { uri?: unknown; name?: unknown })?.uri ??
           (req.params as { name?: unknown })?.name ??
           method
       );
+      // ★ C-7+③: 중계 전에 엔진이 요청 자체를 판정한다. 비신뢰 URI로 나가는 요청은
+      // "읽기"라도 경계 밖 통신(URI에 데이터를 실으면 유출구) — sink 강도로 검사된다.
+      let requestDecision;
       try {
-        // 로컬 파일은 신뢰, 원격은 비신뢰(임시 휴리스틱). 정식 URI 신뢰분류는 B 몫(별도 이슈).
-        recordExternalContent(sessionId, method, uri, result, { trusted: isResourceTrusted(uri) });
+        requestDecision = evaluateResourceRequest(sessionId, method, uri, req.params);
+      } catch (err) {
+        // fail-safe: 판정 실패 시 중계하지 않는다.
+        console.error(`[proxy] 리소스 요청 판정 실패 — 차단  ${method}:${uri}`, err);
+        throw new Error("안전장치: 리소스 요청 판정 실패로 차단합니다.");
+      }
+      if (!requestDecision.allowed) {
+        console.error(`[proxy] 차단(리소스 요청)  ${method}:${uri}  reason=${requestDecision.reason}`);
+        recordAudit({
+          sessionId,
+          toolName: `${method}:${uri}`,
+          decision: "BLOCKED",
+          matchedTags: requestDecision.matchedTags,
+        });
+        broadcastDecision(sessionId, `${method}:${uri}`, requestDecision, new Date().toISOString());
+        throw new Error(
+          `정책 차단: ${requestDecision.explanation?.summary ?? requestDecision.reason ?? "리소스 요청 유출 차단"}`
+        );
+      }
+
+      const result = await primary.request({ method, params: req.params } as any, z.any());
+      try {
+        // URI 신뢰 판정은 엔진 소유(C-7) — trusted를 넘기지 않으면 registry
+        // (trustedResourceUris)의 접두사 규칙으로 엔진이 판정한다.
+        recordExternalContent(sessionId, method, uri, result);
       } catch (err) {
         // fail-safe: 오염 추적 실패 시 추적 안 된 콘텐츠를 넘기지 않는다(tools/call과 동일).
         console.error(`[proxy] 외부 콘텐츠 오염 기록 실패 — 전달 보류  ${method}:${uri}`, err);

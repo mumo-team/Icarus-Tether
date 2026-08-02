@@ -34,6 +34,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ToolRiskTag } from "@icarus-tether/types";
 import { getPolicyConfig } from "./config.js";
+import { collectStrings } from "./value-walk.js";
 
 // ---------------------------------------------------------------------------
 // 타입
@@ -215,16 +216,6 @@ export function getTaintNode(sessionId: string, nodeId: string): TaintNode | und
 // 문자열 수집·토큰화·해시
 // ---------------------------------------------------------------------------
 
-function collectStrings(value: unknown, out: string[]): void {
-  if (typeof value === "string") {
-    out.push(value);
-  } else if (Array.isArray(value)) {
-    for (const v of value) collectStrings(v, out);
-  } else if (typeof value === "object" && value !== null) {
-    for (const v of Object.values(value)) collectStrings(v, out);
-  }
-}
-
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex").slice(0, 32);
 }
@@ -235,8 +226,7 @@ function isUsableToken(token: string): boolean {
 
 /** 값에서 매칭 근거가 될 토큰들을 추출해 해시 → 길이 맵으로 (원본은 버려진다) */
 function extractMatchTokens(value: unknown): Map<string, number> {
-  const strings: string[] = [];
-  collectStrings(value, strings);
+  const strings = collectStrings(value);
 
   // ★ 성능: 해시 전에 토큰 "문자열"을 먼저 유일화한다(대용량 최적화). 반복 콘텐츠(로그·
   // 코드)는 같은 run이 수만 번 나오는데, 예전엔 매 등장마다 sha256을 돌렸다. 유일 문자열만
@@ -338,8 +328,7 @@ function resolveParents(
   // 1순위 MCP_REF: 인자 어딘가에 세션 그래프(또는 묘비)의 노드 id가 있으면 명시 참조.
   // 묘비 참조도 성립해야 "가지치기 전 통과 → 후에도 통과"가 유지된다 (깨끗한 부모와 동치).
   if (input.args !== undefined) {
-    const argStrings: string[] = [];
-    collectStrings(input.args, argStrings);
+    const argStrings = collectStrings(input.args);
     const refIds = [
       ...new Set(
         argStrings.filter((s) => NODE_ID_PATTERN.test(s) && (graph.has(s) || tombstones.has(s)))

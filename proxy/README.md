@@ -42,7 +42,12 @@ AI 비서에게 *"어제 온 고객 문의 정리해서 답장해줘"* 라고 �
 
 `tools/*` 외의 요청·알림도 그냥 흘려보내지 않는다(S5 fail-open 대응):
 
-- `resources/read`·`prompts/get` → 결과를 `recordExternalContent`로 **오염 태깅**해 이후 유출을 추적·차단
+- `resources/read`·`prompts/get` → **① 중계 전** `evaluateResourceRequest`로 요청 자체를 판정 —
+  비신뢰 URI로 나가는 요청은 "읽기"라도 경계 밖 통신이라(URI에 데이터를 실으면 유출구)
+  sink 강도로 검사해 차단. **② 통과 시** 결과를 `recordExternalContent`로 **오염 태깅**해
+  이후 유출을 추적·차단. URI 신뢰 판정은 엔진 소유(C-7) — registry의 `trustedResourceUris`
+  접두사 규칙(예: `["file:///", "file://localhost/"]`, 미매칭 = 비신뢰 default-deny).
+  프록시의 임시 휴리스틱(`isResourceTrusted`)은 제거됐다.
 - `sampling/createMessage`(역방향 SINK) → `evaluateOutboundContent`로 **하드 블록**
 - 그 외 메서드 → 위험도 분류 후 **해시체인 감사로그에 정식 기록**하며 중계
 

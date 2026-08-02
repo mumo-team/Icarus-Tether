@@ -455,10 +455,14 @@ test("P4 ★fail-safe: real 계산이 실패해도 절대 통과(allowed:true)�
           quiet(() => attemptSanitization(sid, op.method));
         }
       }
-      // 순환 참조 args → 계보 순회가 예외를 던진다 → fail-safe는 차단이어야 한다
-      const circular: Record<string, unknown> = {};
-      circular.self = circular;
-      const decision = quiet(() => evaluateToolCall(ctx(sid, circular, [])));
+      // 던지는 getter args → 계보 순회가 예외를 던진다 → fail-safe는 차단이어야 한다
+      // (순환참조는 collectStrings 견고화 이후 더는 실패 유발 입력이 아니다)
+      const hostile = {
+        get boom(): string {
+          throw new Error("의도된 순회 실패");
+        },
+      } as unknown as Record<string, unknown>;
+      const decision = quiet(() => evaluateToolCall(ctx(sid, hostile, [])));
       assert.equal(decision.allowed, false, "★fail-safe 위반: 계산 실패가 조용히 통과됨");
       assert.ok(decision.reason?.includes("fail-safe"));
       stats.failSafeBlocked++;

@@ -149,10 +149,14 @@ test("개발자용 reason은 그대로 유지된다 (노드 id·기술 용어 �
 });
 
 test("fail-safe 차단(계산 실패)에도 단순 explanation이 붙는다", () => {
-  const circular: Record<string, unknown> = {};
-  circular.self = circular;
+  // 순환참조는 collectStrings 견고화 이후 안 터지므로, 던지는 getter로 실패를 유발한다
+  const hostile = {
+    get boom(): string {
+      throw new Error("의도된 순회 실패");
+    },
+  } as unknown as Record<string, unknown>;
 
-  const decision = evaluateToolCall(ctx("e7-failsafe", circular));
+  const decision = evaluateToolCall(ctx("e7-failsafe", hostile));
   assert.equal(decision.allowed, false);
   assert.ok(decision.explanation);
   assert.ok(decision.explanation!.summary.includes("막았어요"));
