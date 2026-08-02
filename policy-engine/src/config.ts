@@ -416,8 +416,34 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
 
 let cached: PolicyConfig | null = null;
 
-/** 활성 설정. 프로세스당 1회 로드해 캐시한다. */
+/** 활성 설정. 최초 호출 시 로드해 캐시한다 (reloadPolicyConfig로 핫리로드 가능). */
 export function getPolicyConfig(): PolicyConfig {
   cached ??= loadPolicyConfig();
   return cached;
+}
+
+/**
+ * 정책 핫리로드 — 설정을 다시 로드해 캐시를 교체한다. 프록시가 설정 파일 변경을
+ * 감지해 호출하면, 세션을 끊지 않고 다음 판정부터 새 정책이 적용된다.
+ *
+ * ★ 검증-후-교체(fail-closed): loadPolicyConfig가 새 설정을 "전부" 검증한 뒤에만
+ * 캐시를 교체한다 — 형식 오류·경계 규칙 위반(trustedResourceUris 등)이면 여기서
+ * throw하고 캐시는 건드리지 않으므로, 잘못된 설정으로 재로드해도 기존 정책이
+ * 그대로 유지된다(운영 중 프록시가 죽거나 무정책 상태가 되는 경로 없음).
+ *
+ * ★ 동시성: 엔진 판정 경로(evaluateToolCall·attemptSanitization 등)는 전부 동기라
+ * 이벤트루프를 놓지 않는다 — 재로드는 동기 블록 "사이"에서만 일어날 수 있어, 진행
+ * 중인 판정이 교체 전/후 설정을 섞어 읽는 상황이 구조적으로 불가능하다(단일 대입
+ * 교체로 충분). 판정 경로에 await를 넣게 되면 이 전제가 깨지므로 그때는 판정 시작
+ * 시 스냅샷으로 바꿔야 한다.
+ *
+ * 세션 상태(오염 그래프·노출이력·볼트)는 config와 별개 저장소라 영향받지 않는다.
+ *
+ * @param filePath 생략 시 표준 해석 순서(환경변수 → 기본 경로)로 다시 찾는다.
+ * @returns 적용된 새 설정.
+ */
+export function reloadPolicyConfig(filePath?: string): PolicyConfig {
+  const next = filePath === undefined ? loadPolicyConfig() : loadPolicyConfig(filePath);
+  cached = next; // 검증 통과 후에만 도달 — 원자적 교체(단일 대입)
+  return next;
 }

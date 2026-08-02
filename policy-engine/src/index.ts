@@ -79,6 +79,7 @@ export {
 export {
   loadPolicyConfig,
   getPolicyConfig,
+  reloadPolicyConfig,
   NAMED_CHARSETS,
   type PolicyConfig,
   type UnknownToolPolicy,
