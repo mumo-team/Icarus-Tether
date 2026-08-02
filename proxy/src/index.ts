@@ -8,6 +8,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -15,15 +16,20 @@ import {
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { startDashboardBridge, stopDashboardBridge, broadcastDecision, recordAudit, broadcastAuditIntegrity, broadcastLineage } from "./dashboard-bridge.js";
 import { checkInjection } from "./injection.js";
+// 순수 라우팅·분류 헬퍼 (Phase 4에서 퍼징 가능하도록 분리).
+import { classifyMethod, isResourceTrusted, splitAgentToolName, type MethodRisk } from "./routing.js";
 import { z } from "zod";
 // 검사함수가 주고받을 표준 계약. 세 파트 공용 타입(B가 이 모양으로 판정한다).
 import type { ToolCallContext } from "@icarus-tether/types";
 // ① 정책 엔진(B) — 판정과 오염 기록의 실제 구현.
 import {
   evaluateToolCall,
+  evaluateOutboundContent,
   recordToolResult,
+  recordExternalContent,
   requestApproval,
   resolveApproval,
 } from "@icarus-tether/policy-engine";
@@ -35,7 +41,10 @@ console.log = (...args: unknown[]) => console.error(...args);
 
 // ESM엔 __dirname이 없어 import.meta.url로 계산 (실행 위치와 무관하게 경로 고정)
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MOCK_SERVER_PATH = resolve(__dirname, "../test/mock-server.ts");
+// 다운스트림 서버 경로. 기본은 데모용 mock-server. 테스트에서 PROXY_DOWNSTREAM으로 교체 가능.
+const MOCK_SERVER_PATH = process.env.PROXY_DOWNSTREAM
+  ? resolve(process.env.PROXY_DOWNSTREAM)
+  : resolve(__dirname, "../test/mock-server.ts");
 // npx 대신 로컬 tsx를 절대경로로 직접 실행한다. npx는 cwd 기준으로 tsx를 찾기 때문에,
 // 에이전트가 임의의 cwd에서 프록시를 띄우면 tsx를 인터넷에서 새로 받으려 한다(느리고 오프라인 실패).
 const TSX_CLI = resolve(__dirname, "../../node_modules/tsx/dist/cli.mjs");
@@ -52,42 +61,25 @@ interface SessionState {
 const sessions = new Map<string, SessionState>();
 
 
-// ── (사) 메서드 위험도 분류 ──────────────────────────────────────────────
-// tools/call은 evaluateToolCall로 검사하지만, 그 외 메서드는 fallback으로 빠져
-// 무검사 중계된다(S5 fail-open). 메서드 이름도 도구처럼 위험도로 나눠, 최소한
-// 어떤 성격의 통신이 오갔는지 판정·기록할 수 있게 한다.
-//   SINK     : 데이터가 밖으로 나갈 수 있는 메서드 → tools/call처럼 검사 대상
-//   HARMLESS : 목록·메타·수명주기 조회 → 데이터를 나르지 않음, 그냥 통과 OK
-//   (그 외)  : 미분류 → 일단 통과하되 정식 기록 (SOURCE 오염 추적은 B 몫: 사-B)
-// resources/read·prompts/get은 '데이터 유입(SOURCE)'이라 오염 태깅이 필요한데,
-// 그 태깅은 엔진(B) 내부 로직이므로 여기서는 미분류로 두고 처리는 이슈로 넘긴다.
+// ── Phase 2: 멀티서버 페더레이션 ──────────────────────────────────────────
+// PROXY_SERVERS_CONFIG(설정 파일 경로)가 있으면 페더레이션 모드: 여러 다운스트림 서버에
+// 붙어 도구를 '서버명.도구명'으로 합쳐 노출하고, 호출을 접두사로 라우팅한다.
+// 없으면 기존 단일 다운스트림 모드(모든 기존 테스트·데모 그대로).
+// (순수 분류·라우팅 헬퍼 classifyMethod/isResourceTrusted/splitAgentToolName은
+//  퍼징 가능하도록 ./routing.ts로 분리했다 — Phase 4.)
+interface ServerEntry {
+  name: string;
+  module?: string; // stdio: proxy 기준 상대경로 tsx 모듈
+  url?: string; // http: Streamable HTTP 다운스트림
+}
 
-// 외부로 데이터가 나갈 수 있는 메서드.
-const SINK_METHODS = new Set<string>([
-  "sampling/createMessage", // 서버가 클라의 LLM에 컨텍스트를 보냄 = 외부 유출구
-]);
-
-// 데이터를 나르지 않는 메타/목록/수명주기 메서드 (무검사 통과해도 안전).
-const HARMLESS_METHODS = new Set<string>([
-  "ping",
-  "initialize",
-  "tools/list",
-  "resources/list",
-  "resources/templates/list",
-  "prompts/list",
-  "roots/list",
-  "logging/setLevel",
-  "completion/complete",
-]);
-
-type MethodRisk = "SINK" | "HARMLESS" | "UNCLASSIFIED";
-
-// 메서드명 → 위험도. 알림(notifications/*)은 상태 통지일 뿐이라 무해로 본다.
-function classifyMethod(method: string): MethodRisk {
-  if (SINK_METHODS.has(method)) return "SINK";
-  if (HARMLESS_METHODS.has(method)) return "HARMLESS";
-  if (method.startsWith("notifications/")) return "HARMLESS";
-  return "UNCLASSIFIED";
+function loadServerConfig(): ServerEntry[] | null {
+  const path = process.env.PROXY_SERVERS_CONFIG;
+  if (!path) return null;
+  const raw = JSON.parse(readFileSync(resolve(path), "utf8")) as {
+    servers: Record<string, { module?: string; url?: string }>;
+  };
+  return Object.entries(raw.servers).map(([name, v]) => ({ name, ...v }));
 }
 
 // tools 외 메서드를 무검사로 중계할 때, 최소한 그 사실을 눈에 보이게 남긴다(S5 대응 1단계).
@@ -141,21 +133,48 @@ async function main() {
   console.error(`[proxy] 세션 시작  session=${sessionId}`);
   startDashboardBridge();
 
-  const downstream = new Client({
-    name: "icarus-tether-proxy-client",
-    version: "0.1.0",
-  });
-  const downstreamTransport = new StdioClientTransport({
-    command: process.execPath, // 지금 프록시를 돌리는 node 실행파일 (절대경로라 cwd 무관)
-    args: [TSX_CLI, MOCK_SERVER_PATH],
-  });
-  await downstream.connect(downstreamTransport);
+  // 다운스트림 서버 하나에 연결하는 헬퍼. HTTP(url) 또는 stdio(module 상대경로) 전송.
+  // sampling capability를 신고해야 서버가 역방향 sampling을 쓸 수 있다(Phase 1에서 추가).
+  async function connectServer(entry: ServerEntry): Promise<Client> {
+    const client = new Client(
+      { name: `icarus-tether-proxy→${entry.name || "downstream"}`, version: "0.1.0" },
+      { capabilities: { sampling: {} } }
+    );
+    const transport = entry.url
+      ? new StreamableHTTPClientTransport(new URL(entry.url))
+      : new StdioClientTransport({
+          command: process.execPath, // cwd 무관 절대경로 node
+          args: [TSX_CLI, entry.module ? resolve(__dirname, "..", entry.module) : MOCK_SERVER_PATH],
+        });
+    await client.connect(transport);
+    return client;
+  }
+
+  // 페더레이션 모드면 설정의 여러 서버에, 아니면 단일 다운스트림에 연결한다.
+  const federationConfig = loadServerConfig();
+  const federated = federationConfig !== null;
+  const servers: { name: string; client: Client }[] = [];
+  if (federated) {
+    for (const entry of federationConfig!) {
+      servers.push({ name: entry.name, client: await connectServer(entry) });
+      console.error(
+        `[proxy] 다운스트림 연결: ${entry.name} (${entry.url ? `HTTP ${entry.url}` : `stdio ${entry.module}`})`
+      );
+    }
+  } else {
+    // 단일 모드: PROXY_DOWNSTREAM_URL(HTTP) 또는 MOCK_SERVER_PATH(stdio).
+    const entry: ServerEntry = { name: "", url: process.env.PROXY_DOWNSTREAM_URL };
+    servers.push({ name: "", client: await connectServer(entry) });
+    console.error(`[proxy] 다운스트림 전송: ${process.env.PROXY_DOWNSTREAM_URL ? `HTTP` : "stdio"}`);
+  }
+  // 프라이머리 = 첫 서버. tools 외 요청(resources/sampling 등)의 기본 중계 대상.
+  const primary = servers[0].client;
 
   // 저수준 Server를 쓰는 이유: 프록시는 도구를 미리 모르므로 임의 요청을 그대로 중계해야 한다.
-  // capabilities는 다운스트림이 노출하는 것을 그대로 신고 → 클라이언트가 그 기능들을 쓸 수 있게.
+  // capabilities는 프라이머리가 노출하는 것을 신고(페더레이션에선 모든 서버가 tools 제공).
   const server = new Server(
     { name: "icarus-tether-proxy", version: "0.1.0" },
-    { capabilities: downstream.getServerCapabilities() ?? { tools: {} } }
+    { capabilities: primary.getServerCapabilities() ?? { tools: {} } }
   );
 
   // 클라이언트가 stdin을 닫으면(EOF) 대화가 끝난 것 → 세션 정리.
@@ -176,20 +195,39 @@ async function main() {
   })
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return await downstream.listTools();
+    // 단일 모드: 그대로. 페더레이션: 모든 서버의 도구를 '서버명.도구명'으로 합쳐 노출.
+    if (!federated) return await primary.listTools();
+    const all: Awaited<ReturnType<Client["listTools"]>>["tools"] = [];
+    for (const { name, client } of servers) {
+      const { tools } = await client.listTools();
+      for (const t of tools) all.push({ ...t, name: `${name}.${t.name}` });
+    }
+    return { tools: all };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
+    const { name: agentName, arguments: args } = request.params;
+    // 페더레이션: 'db.query_customer_db' → 서버 'db' + 속이름 'query_customer_db'.
+    // 단일 모드: 접두사 없이 그대로.
+    const [prefix, bareName] = federated ? splitAgentToolName(agentName) : ["", agentName];
+    const target = federated ? servers.find((s) => s.name === prefix)?.client : primary;
+    if (!target) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `알 수 없는 서버 접두사: '${prefix}' (${agentName})` }],
+      };
+    }
+
     const session = sessions.get(sessionId);
     if (session) session.toolCalls += 1;
     console.error(
-      `[proxy] ⮕ ${name}  args=${JSON.stringify(args ?? {})}  session=${sessionId}`
+      `[proxy] ⮕ ${agentName}  args=${JSON.stringify(args ?? {})}  session=${sessionId}`
     );
 
+    // ★ 엔진 판정·오염기록은 '속이름'으로 한다 — 레지스트리는 접두사 붙은 이름을 모른다.
     const ctx: ToolCallContext = {
       sessionId,
-      toolName: name,
+      toolName: bareName,
       args: (args ?? {}) as Record<string, unknown>,
       argTags: [],
       timestamp: new Date().toISOString(),
@@ -200,16 +238,16 @@ async function main() {
 
     recordAudit({
       sessionId,
-      toolName: name,
+      toolName: agentName, // 감사엔 겉이름(어느 서버로 라우팅됐는지 보이게)
       decision: decision.allowed ? "ALLOWED" : "BLOCKED",
       matchedTags: decision.matchedTags,
     });
 
-    broadcastDecision(sessionId, name, decision, ctx.timestamp);
+    broadcastDecision(sessionId, agentName, decision, ctx.timestamp);
     broadcastLineage(sessionId); // 판정 직후 현재 계보 스냅샷 방송 → TaintGraph 실시간 갱신
 
     if (!decision.allowed) {
-      console.error(`[proxy] 차단  ${name}  reason=${decision.reason}`);
+      console.error(`[proxy] 차단  ${agentName}  reason=${decision.reason}`);
       // 오버라이드 가능한 차단이면 승인 id를 알려준다 — 사람이 승인 후 재시도하면 통과.
       if (decision.canOverride && decision.approvalId) {
         console.error(`[proxy] 오버라이드 가능  approvalId=${decision.approvalId}`);
@@ -226,14 +264,15 @@ async function main() {
       return { isError: true, content: [{ type: "text", text }] };
     }
 
-    const result = await downstream.callTool(request.params);
+    // 라우팅: 대상 서버에 '속이름'으로 실제 호출한다.
+    const result = await target.callTool({ name: bareName, arguments: args });
 
     // ★ 오염 기록 — 엔진의 세션 오염은 '기록된 결과'에서만 자란다. 빠뜨리면 fail-open.
     // 기록 실패 시엔 추적 안 된 데이터를 넘기지 않고 막는다 (fail-safe).
     try {
-      recordToolResult(sessionId, name, ctx.args, result);
+      recordToolResult(sessionId, bareName, ctx.args, result);
     } catch (err) {
-      console.error(`[proxy] 오염 기록 실패 — 결과 전달 보류  ${name}`, err);
+      console.error(`[proxy] 오염 기록 실패 — 결과 전달 보류  ${agentName}`, err);
       return {
         isError: true,
         content: [
@@ -245,11 +284,10 @@ async function main() {
       };
     }
 
-    console.error(`[proxy] ⬅ 통과  ${name}`);
+    console.error(`[proxy] ⬅ 통과  ${agentName}`);
 
-    
    // 비신뢰 출처 콘텐츠 인젝션 검사 (대상 판단·점수 산출·방송은 injection.ts가 한다).
-    await checkInjection(sessionId, name, result);
+    await checkInjection(sessionId, bareName, result);
 
     return result;
   });
@@ -261,24 +299,77 @@ async function main() {
   // 결과의 SOURCE 오염 태깅)은 엔진(B) 몫 → 사-B 이슈. 알림은 데이터를 안 나르고
   // 양이 많아 stderr 로그만 남긴다(audit 기록은 요청만).
   server.fallbackRequestHandler = async (req) => {
-    auditForward(sessionId, req.method);
-    return downstream.request({ method: req.method, params: req.params } as any, z.any());
+    const method = req.method;
+    // SOURCE 채널: 외부 콘텐츠가 세션으로 유입되는 경로. 결과를 받아 recordExternalContent로
+    // 오염 태깅해야 이후 이 콘텐츠가 send_email 등으로 나갈 때 차단된다 (S5 근본 차단).
+    if (method === "resources/read" || method === "prompts/get") {
+      const result = await primary.request({ method, params: req.params } as any, z.any());
+      const uri = String(
+        (req.params as { uri?: unknown; name?: unknown })?.uri ??
+          (req.params as { name?: unknown })?.name ??
+          method
+      );
+      try {
+        // 로컬 파일은 신뢰, 원격은 비신뢰(임시 휴리스틱). 정식 URI 신뢰분류는 B 몫(별도 이슈).
+        recordExternalContent(sessionId, method, uri, result, { trusted: isResourceTrusted(uri) });
+      } catch (err) {
+        // fail-safe: 오염 추적 실패 시 추적 안 된 콘텐츠를 넘기지 않는다(tools/call과 동일).
+        console.error(`[proxy] 외부 콘텐츠 오염 기록 실패 — 전달 보류  ${method}:${uri}`, err);
+        throw new Error("안전장치: 외부 콘텐츠 오염 추적 실패로 전달을 보류합니다.");
+      }
+      console.error(`[proxy] ✅ 외부 콘텐츠 오염 기록  ${method}:${uri}  session=${sessionId}`);
+      recordAudit({ sessionId, toolName: `${method}:${uri}`, decision: "ALLOWED", matchedTags: [] });
+      return result;
+    }
+    auditForward(sessionId, method);
+    // tools 외 요청(resources 등)은 프라이머리 서버로 중계 (페더레이션에선 미접두).
+    return primary.request({ method, params: req.params } as any, z.any());
   };
   server.fallbackNotificationHandler = async (n) => {
     const m = (n as { method?: string }).method ?? "notification";
     logForwarded(sessionId, m, classifyMethod(m));
-    return downstream.notification(n as any);
+    return primary.notification(n as any);
   };
-  // 역방향(서버→클라, 예: sampling/createMessage·roots)도 통과. sampling은 SINK다.
-  downstream.fallbackRequestHandler = async (req) => {
-    auditForward(sessionId, req.method, true);
-    return server.request({ method: req.method, params: req.params } as any, z.any());
-  };
-  downstream.fallbackNotificationHandler = async (n) => {
-    const m = (n as { method?: string }).method ?? "notification";
-    logForwarded(sessionId, `↩${m}`, classifyMethod(m));
-    return server.notification(n as any);
-  };
+  // 역방향(서버→클라). sampling/createMessage는 서버가 클라 LLM에 컨텍스트를 보내는
+  // 실제 유출구(SINK)라, 나가는 콘텐츠에 민감 오염이 실렸는지 판정해 하드 블록한다.
+  // 역방향 요청은 어느 다운스트림에서든 올 수 있어, 모든 클라이언트에 같은 핸들러를 건다.
+  for (const { client: dc } of servers) {
+    dc.fallbackRequestHandler = async (req) => {
+    const method = req.method;
+    if (method === "sampling/createMessage") {
+      let decision;
+      try {
+        decision = evaluateOutboundContent(sessionId, "sampling/createMessage", req.params);
+      } catch (err) {
+        // fail-safe: 판정 자체가 실패하면 통과시키지 않는다.
+        console.error(`[proxy] 역방향 판정 실패 — 차단  ${method}`, err);
+        throw new Error("안전장치: 역방향 콘텐츠 판정 실패로 차단합니다.");
+      }
+      recordAudit({
+        sessionId,
+        toolName: `↩${method}`,
+        decision: decision.allowed ? "ALLOWED" : "BLOCKED",
+        matchedTags: decision.matchedTags,
+      });
+      broadcastDecision(sessionId, `↩${method}`, decision, new Date().toISOString());
+      if (!decision.allowed) {
+        console.error(`[proxy] 차단(역방향)  ${method}  reason=${decision.reason}`);
+        throw new Error(
+          `정책 차단: ${decision.explanation?.summary ?? decision.reason ?? "역방향 유출 차단"}`
+        );
+      }
+      console.error(`[proxy] ⬅ 검사 통과(역방향 SINK)  ${method}  session=${sessionId}`);
+      return server.request({ method, params: req.params } as any, z.any());
+    }
+    auditForward(sessionId, method, true);
+    return server.request({ method, params: req.params } as any, z.any());
+    };
+    dc.fallbackNotificationHandler = async (n) => {
+      const m = (n as { method?: string }).method ?? "notification";
+      logForwarded(sessionId, `↩${m}`, classifyMethod(m));
+      return server.notification(n as any);
+    };
+  }
 
   // stdout은 에이전트와의 JSON-RPC 전용선이므로, 로그는 반드시 stderr(console.error)로.
   const upstreamTransport = new StdioServerTransport();

@@ -12,7 +12,14 @@
     "demo:safe": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-safe.ts",
     "demo:hitl": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/demo-client-hitl.ts",
     "test:bridge": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json AUTO_APPROVE=1 DEMO_PACE_MS=0 tsx test/demo-client-hitl.ts",
-    "test:exfil": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-exfil.ts"
+    "test:exfil": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-exfil.ts",
+    "test:sampling": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-sampling.ts",
+    "test:http": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-http.ts",
+    "test:federation": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-federation.ts",
+    "test:fuzz": "tsx test/fuzz-routing.ts",
+    "test:fuzz-framing": "tsx test/fuzz-framing.ts",
+    "bench": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/bench.ts",
+    "demo:killer": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-killer.ts"
   },
   "dependencies": {
     "@icarus-tether/policy-engine": "*",
@@ -25,7 +32,10 @@
     "typescript": "^5.6.0",
     "cross-env": "^7.0.3",
     "tsx": "^4.19.0",
+    "express": "^5.2.1",
+    "fast-check": "^4.9.0",
     "@types/node": "^22.0.0",
-    "@types/ws": "^8.5.0"
+    "@types/ws": "^8.5.0",
+    "@types/express": "^5.0.0"
   }
 }

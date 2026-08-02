@@ -35,12 +35,16 @@ AI 비서에게 *"어제 온 고객 문의 정리해서 답장해줘"* 라고 �
 
 1. 호출을 가로채 `ToolCallContext`로 포장
 2. `evaluateToolCall(ctx)` — 엔진에 판정 요청
-3. 판정을 **서명된 감사로그**(`audit.log`)에 기록
+3. 판정을 **해시체인 감사로그**(`audit.log`)에 기록 — 각 줄이 앞줄 서명을 물어(prevHash) 위변조(수정·삭제·재정렬)를 탐지
 4. **차단**이면 → 실제 서버를 호출하지 않고, 사람이 읽을 설명 + `approvalId`를 반환
 5. **통과**면 → 실제 서버 호출 후 `recordToolResult(...)`로 결과를 엔진에 기록 (오염 계보 추적)
    - 기록 실패 시 결과를 전달하지 않고 막는다 (**fail-safe** — 추적 안 된 데이터를 흘려보내지 않음)
 
-`tools/*` 외의 모든 요청·알림(resources·prompts·ping 등)은 **손대지 않고 그대로 중계**한다(fallback 핸들러).
+`tools/*` 외의 요청·알림도 그냥 흘려보내지 않는다(S5 fail-open 대응):
+
+- `resources/read`·`prompts/get` → 결과를 `recordExternalContent`로 **오염 태깅**해 이후 유출을 추적·차단
+- `sampling/createMessage`(역방향 SINK) → `evaluateOutboundContent`로 **하드 블록**
+- 그 외 메서드 → 위험도 분류 후 **해시체인 감사로그에 정식 기록**하며 중계
 
 ## 실행
 
@@ -53,8 +57,21 @@ cd proxy
 npm run demo:attack    # 공격 시나리오 → 차단 + approvalId 발급
 npm run demo:approve   # 차단 후 승인 → 재시도하면 통과
 npm run demo:safe      # 정상 흐름(비신뢰 입력 없음) → 통과 (오탐 없음 확인)
+npm run demo:killer    # 킬러샷: 세탁된 인젝션에 에이전트가 속아 실행 → 게이트웨이가 흐름으로 차단
 
-cat audit.log          # 서명된 판정 기록
+cat audit.log          # 해시체인으로 엮인 판정 기록 (위변조 탐지)
+```
+
+### 심화 데모·테스트
+
+```bash
+npm run test:exfil       # 유출 회귀 테스트
+npm run test:sampling    # 역방향 sampling 유출 차단 (SINK)
+npm run test:http        # Phase 1: stdio→프록시→HTTP 다운스트림 경유 차단
+npm run test:federation  # Phase 2: 멀티서버(db·mail) 라우팅 + 서버 경계를 넘는 오염 추적
+npm run test:fuzz         # Phase 4: 라우팅 헬퍼 속성 기반 퍼징 (fast-check)
+npm run test:fuzz-framing # Phase 4: 깨진 프레임 주입 후 프록시 생존·복구
+npm run bench             # Phase 6: 프록시 오버헤드 측정 (직접 vs 프록시 경유)
 ```
 
 > `demo:approve`의 환경변수 지정은 macOS/Linux 기준. Windows에서는 `set APPROVAL_DECISION=approve` 후 `npm run demo:attack`.
@@ -105,9 +122,18 @@ stdio 전송에서 **stdout은 JSON-RPC 전용 채널**이다. 여기에 로그�
 - 프록시의 모든 로그는 `console.error`(stderr)로 나간다.
 - 정책 엔진은 `console.log`를 쓰므로, `src/index.ts` 최상단에서 `console.log`를 stderr로 우회시킨다.
 
+## 확장 기능 (Phase)
+
+- **Phase 1 — 전송 브리징**: `PROXY_DOWNSTREAM_URL`을 주면 다운스트림을 HTTP(Streamable HTTP)로 연결. 에이전트는 stdio, 실제 서버는 HTTP인 프로토콜 통역. 보안 검사는 전송과 무관하게 그대로 작동.
+- **Phase 2 — 멀티서버 페더레이션**: `PROXY_SERVERS_CONFIG`(라우팅 테이블)를 주면 여러 다운스트림에 붙어 도구를 `서버명.도구명`으로 합쳐 노출하고 접두사로 라우팅. 엔진 판정·기록은 접두사 뗀 '속이름'으로. **오염 추적이 서버 경계를 넘는다.**
+- **Phase 4 — 프레이밍 하드닝**: 순수 라우팅 헬퍼(`src/routing.ts`)를 fast-check로 퍼징, 깨진 프레임 주입에도 프록시가 생존·복구.
+- **Phase 6 — 성능**: 프록시 오버헤드를 `perf_hooks`로 측정 (도구 호출당 약 0.4ms — 판정·해시체인 감사·오염 기록 포함).
+
 ## 현재 범위와 한계
 
-- 전송: **stdio ↔ stdio**만 (HTTP 브리징은 예정)
-- 세션: stdio에서는 프록시 프로세스 1개 = 클라이언트 1개 = 세션 1개
-- 승인 UI: 대시보드(C) 미연동 — 프록시 안의 스텁이 대신 승인
-- 감사로그: 파일(`audit.log`)에 기록 — C로의 전송은 미연동
+- 세션: stdio에서는 프록시 프로세스 1개 = 클라이언트 1개 = 세션 1개 (다중 세션은 HTTP 확장 시)
+- 대시보드: `dashboard-bridge`(WebSocket 7331)로 판정·계보·무결성을 실시간 방송해 연동됨. 승인 UI 자체는 아직 프록시 내 스텁이 대신 승인
+- 감사로그: 파일(`audit.log`)에 해시체인으로 기록 (검증 CLI: `dashboard/server/src/verify-audit-log.ts`)
+- 페더레이션에서 `resources`·`prompts`는 프라이머리 서버로만 중계 (리소스 네임스페이싱은 후속)
+- 리소스 URI 신뢰 분류는 임시 휴리스틱(로컬 `file://`=신뢰) — 정식 분류는 엔진(B) 후속
+- 프로세스 샌드박싱(Phase 5)·정책 핫리로드(Phase 3)는 예정 (각각 리눅스 환경·엔진 캐시 무효화 API 필요)

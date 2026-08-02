@@ -10,6 +10,7 @@
     "query_customer_db": "READ",
     "read_internal_file": "READ",
     "read_email": "READ",
+    "ask_llm": "READ",
     "delete_customer_record": "WRITE_INTERNAL"
   },
   "unknownToolPolicy": "deny",
@@ -28,6 +29,7 @@
     "send_email": "이메일 보내기",
     "http_post": "외부로 전송",
     "write_external_file": "외부 파일 쓰기",
+    "ask_llm": "LLM 요약 요청(sampling)",
     "delete_customer_record": "고객 기록 삭제"
   },
   "secretDetection": {
