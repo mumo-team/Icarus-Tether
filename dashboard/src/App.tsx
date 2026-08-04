@@ -1,5 +1,5 @@
 import { useState,useEffect, useRef } from "react";
-import type { AuditLogEntry, ApprovalRequest, PolicyDecision, UserAction, OutputScanEvent } from "@icarus-tether/types";
+import type { AuditLogEntry, ApprovalRequest, PolicyDecision, UserAction, OutputScanEvent, OverrideAuditEntry } from "@icarus-tether/types";
 import MetricCards from "./components/MetricCards";
 import TrifectaWarningBanner from "./components/TrifectaWarningBanner";
 import ThreatFusionBanner from "./components/ThreatFusionBanner";
@@ -9,7 +9,7 @@ import SanitizationCompareView from "./components/SanitizationCompareView";
 import TaintGraph, { type LineageNode } from "./components/TaintGraph";
 import ForensicReplay from "./components/ForensicReplay";
 import TrifectaApprovalModal from "./components/TrifectaApprovalModal";
-import AuditTimeline, { type HitlAuditEntry } from "./components/AuditTimeline";
+import AuditTimeline from "./components/AuditTimeline";
 import OutputScanPanel from "./components/OutputScanPanel";
 
 interface InjectionCheckEntry {
@@ -52,7 +52,7 @@ export default function App() {
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [modalDecision, setModalDecision] = useState<PolicyDecision | null>(null);
   const [injectionChecks, setInjectionChecks] = useState<InjectionCheckEntry[]>([]);
-  const [hitlLog, setHitlLog] = useState<HitlAuditEntry[]>([]);
+  const [hitlLog, setHitlLog] = useState<OverrideAuditEntry[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const [auditIntegrity, setAuditIntegrity] = useState<{
@@ -91,7 +91,7 @@ export default function App() {
             id: `${data.sessionId}-${data.toolName}-${data.timestamp}`,
             sessionId: data.sessionId,
             toolName: data.toolName,
-            decision: data.allowed ? "ALLOWED" : "BLOCKED",
+            decision: data.decision ?? (data.allowed ? "ALLOWED" : "BLOCKED"),
             matchedTags: data.matchedTags ?? [],
             timestamp: data.timestamp,
           };

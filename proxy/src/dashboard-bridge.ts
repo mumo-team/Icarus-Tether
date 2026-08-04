@@ -50,7 +50,7 @@ function signAuditEntry(entry: Omit<AuditLogEntry, "signature">): string {
 export function recordAudit(input: {
   sessionId: string;
   toolName: string;
-  decision: "ALLOWED" | "BLOCKED";
+  decision: "ALLOWED" | "BLOCKED" | "FORWARDED";
   matchedTags: ToolRiskTag[];
 }): void {
   const unsigned: Omit<AuditLogEntry, "signature"> = {
@@ -192,6 +192,23 @@ export function broadcastDecision(
   });
   // 이 판정 과정에서 생긴 HITL 전이(OFFERED 등)를 함께 방송 — index.ts 무수정.
   broadcastHitlAudit(sessionId);
+}
+
+export function broadcastForwarded(
+  sessionId: string,
+  toolName: string,
+  timestamp: string
+): void {
+  // 무검사 중계는 판정 객체가 없다 — decision 필드를 명시적으로 실어
+  // App.tsx가 불리언이 아니라 FORWARDED 3-상태로 기록하게 한다.
+  broadcastToDashboard({
+    type: "decision",
+    sessionId,
+    toolName,
+    decision: "FORWARDED",
+    matchedTags: [],
+    timestamp,
+  });
 }
 
 /**
