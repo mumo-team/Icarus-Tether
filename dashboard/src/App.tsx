@@ -118,7 +118,8 @@ export default function App() {
           if (data.outputScan) setOutputScans((prev) => pushCapped(prev, data.outputScan, MAX_EVENTS));
           // 승인 가능한 차단이 오면 모달을 자동으로 띄운다 — 발표 3단계 "와우 포인트".
           if (data.allowed === false && data.canOverride && data.approvalId) {
-            setModalDecision({
+            // 이미 모달이 떠 있으면 덮어쓰지 않는다 — 새 건은 아래 큐에만 쌓인다(setApprovals).
+            setModalDecision((cur) => cur ?? ({
               sessionId: data.sessionId,
               toolName: data.toolName,
               allowed: false,
@@ -127,7 +128,7 @@ export default function App() {
               explanation: data.explanation,
               canOverride: data.canOverride,
               approvalId: data.approvalId,
-            });
+            }));
             // 큐에도 동일 항목을 쌓는다 — 모달과 같은 데이터로 ApprovalQueue·대기 카운트를 살린다.
             // (broadcastDecision이 args를 안 실으므로 args는 비운다 — 큐는 도구명·상태만 표시.)
             setApprovals((prev) =>
@@ -374,6 +375,7 @@ export default function App() {
           decision={modalDecision}
           onActionClick={handleActionClick}
           onClose={() => setModalDecision(null)}
+          queuedCount={approvals.filter((a) => a.status === "PENDING" && a.id !== modalDecision.approvalId).length}
         />
       )}
     </div>

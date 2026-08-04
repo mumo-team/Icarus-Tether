@@ -196,7 +196,7 @@ function filterNested(key: string, value: unknown, dropped: string[]): unknown {
   }
   if (value && typeof value === "object") return one(value as Record<string, unknown>);
   return value;
-}
+} 
 
 /**
  * 대시보드로 이벤트 한 건 방송 — 전송 경계 화이트리스트.
