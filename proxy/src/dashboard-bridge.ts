@@ -167,6 +167,37 @@ const ALLOWED_FIELDS: Record<string, readonly string[]> = {
   injection_check: ["type", "sessionId", "toolName", "isInjection", "score", "evaluated", "timestamp"],
 };
 
+// 중첩 객체/배열의 필드별 허용 키 — 필드명으로 스키마를 찾아 재귀 적용한다.
+const NESTED_ALLOWED: Record<string, readonly string[]> = {
+  explanation: ["summary", "reason", "risks", "actions"],
+  actions: ["kind", "label", "description", "available", "detail"],
+  outputScan: ["id", "sessionId", "toolName", "sinkClass", "timestamp", "kind", "sourceTool", "matchLen", "valueHash"],
+  nodes: ["id", "toolName", "tags", "parents"],
+  parents: ["nodeId", "method", "weak"],
+  entries: ["approvalId", "sessionId", "toolName", "action", "actor", "timestamp"],
+  problems: ["line", "kind", "detail"],
+};
+
+// key에 해당하는 중첩 스키마가 있으면 value(객체/배열)를 재귀로 걸러 반환한다.
+// 스키마가 없으면(원시값·문자열 태그 배열 등) 그대로 통과. dropped엔 "key.subkey" 경로를 쌓는다.
+function filterNested(key: string, value: unknown, dropped: string[]): unknown {
+  const schema = NESTED_ALLOWED[key];
+  if (!schema) return value;
+  const one = (obj: Record<string, unknown>): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(obj)) {
+      if (!schema.includes(k)) { dropped.push(`${key}.${k}`); continue; }
+      out[k] = filterNested(k, obj[k], dropped);
+    }
+    return out;
+  };
+  if (Array.isArray(value)) {
+    return value.map((el) => (el && typeof el === "object" ? one(el as Record<string, unknown>) : el));
+  }
+  if (value && typeof value === "object") return one(value as Record<string, unknown>);
+  return value;
+}
+
 /**
  * 대시보드로 이벤트 한 건 방송 — 전송 경계 화이트리스트.
  * 이벤트 타입별 허용 필드만 통과시키고, 그 외 키는 drop + 경고.
@@ -183,8 +214,8 @@ export function broadcastToDashboard(event: Record<string, unknown>): void {
   const safe: Record<string, unknown> = {};
   const dropped: string[] = [];
   for (const key of Object.keys(event)) {
-    if (allowed.includes(key)) safe[key] = event[key];
-    else dropped.push(key);
+    if (!allowed.includes(key)) { dropped.push(key); continue; }
+    safe[key] = filterNested(key, event[key], dropped);
   }
   if (dropped.length > 0) {
     console.error(`[bridge] [경고] 화이트리스트 밖 필드 drop (${type}): ${dropped.join(", ")}`);
