@@ -157,9 +157,39 @@ export function broadcastAuditIntegrity(): void {
 let wss: WebSocketServer | null = null;
 const clients = new Set<WebSocket>();
 
-/** 대시보드로 이벤트 한 건 방송. 브리지가 꺼져 있으면 조용히 무시한다. */
+const ALLOWED_FIELDS: Record<string, readonly string[]> = {
+  decision: ["type", "sessionId", "toolName", "allowed", "decision", "reason", "matchedTags", "explanation", "canOverride", "approvalId", "outputScan", "timestamp"],
+  lineage: ["type", "sessionId", "nodes", "timestamp"],
+  hitl_audit: ["type", "sessionId", "entries", "timestamp"],
+  audit_integrity: ["type", "ok", "total", "problems", "timestamp"],
+  approval_resolved: ["type", "sessionId", "approvalId", "approved", "resolvedBy", "timestamp"],
+  sanitized: ["type", "sessionId", "method", "originalTags", "resultTags", "ok", "maskedCount", "residualSensitiveData", "timestamp"],
+  injection_check: ["type", "sessionId", "toolName", "isInjection", "score", "evaluated", "timestamp"],
+};
+
+/**
+ * 대시보드로 이벤트 한 건 방송 — 전송 경계 화이트리스트.
+ * 이벤트 타입별 허용 필드만 통과시키고, 그 외 키는 drop + 경고.
+ * 미등록 타입은 통째로 차단(fail-closed) — "깜빡하면 새어나간다"보다
+ * "깜빡하면 안 나간다"가 낫다는 의도된 비용.
+ */
 export function broadcastToDashboard(event: Record<string, unknown>): void {
-  const payload = JSON.stringify(event);
+  const type = typeof event.type === "string" ? event.type : undefined;
+  const allowed = type ? ALLOWED_FIELDS[type] : undefined;
+  if (!allowed) {
+    console.error(`[bridge] [경고] 미등록 이벤트 타입 방송 차단: ${String(event.type)}`);
+    return;
+  }
+  const safe: Record<string, unknown> = {};
+  const dropped: string[] = [];
+  for (const key of Object.keys(event)) {
+    if (allowed.includes(key)) safe[key] = event[key];
+    else dropped.push(key);
+  }
+  if (dropped.length > 0) {
+    console.error(`[bridge] [경고] 화이트리스트 밖 필드 drop (${type}): ${dropped.join(", ")}`);
+  }
+  const payload = JSON.stringify(safe);
   for (const client of clients) {
     if (client.readyState === client.OPEN) client.send(payload);
   }
