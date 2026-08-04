@@ -69,7 +69,7 @@ export default function App() {
   const [snapshots, setSnapshots] = useState<LineageNode[][]>([]);
   const [outputScans, setOutputScans] = useState<OutputScanEvent[]>([]);
   const [awaiting, setAwaiting] = useState<Record<string, "awaiting" | "timeout">>({});
-
+  const [recvErrors, setRecvErrors] = useState(0);
     useEffect(() => {
     let disposed = false; // 언마운트 후 재연결 타이머가 되살아나는 것 방지
     let retryTimer: number | undefined;
@@ -85,7 +85,15 @@ export default function App() {
       };
 
       ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch (err) {
+          // 조용히 멈추지 않는다 — 이 프레임만 건너뛰고 수신오류로 집계·표시.
+          console.error("[대시보드] 이벤트 파싱 실패 — 이 프레임만 건너뜀:", err);
+          setRecvErrors((n) => n + 1);
+          return;
+        }
 
         if (data.type === "decision") {
           const entry: AuditLogEntry = {
@@ -287,6 +295,11 @@ export default function App() {
       <p style={{ color: wsConnected ? "#2e7d32" : "#d32f2f", fontWeight: "bold" }}>
         {wsConnected ? "[연결됨] proxy 연결됨" : "[대기] proxy 대기 중 — 데모를 실행하면 자동 연결됩니다"}
       </p>
+      {recvErrors > 0 && (
+        <p style={{ color: "#d32f2f", fontWeight: "bold" }}>
+          [수신오류] 이벤트 수신 오류 {recvErrors}건 — 일부 프레임을 건너뛰었습니다
+        </p>
+      )}
       <section id="taint-graph-panel">
         <h2>실시간 오염 계보</h2>
         <TaintGraph lineage={snapshots[snapshots.length - 1] ?? []} />
