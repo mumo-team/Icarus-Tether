@@ -216,6 +216,37 @@ export function buildDestructiveExplanation(input: DestructiveExplainInput): Use
   return { summary: SUMMARY_DESTRUCTIVE, reason, risks: [RISK_DESTRUCTIVE], actions };
 }
 
+// ---------------------------------------------------------------------------
+// 역방향 아웃바운드 콘텐츠 차단 설명 — sampling/createMessage 응답 등 "도구 호출이
+// 아닌 채널로 민감 데이터가 서버로 되돌아가려는" 경우. 유출 템플릿과 성격이 비슷하나
+// 근거가 값-계보가 아니라 "나가는 콘텐츠 자체에서 민감이 감지됨"이라 별도 문구.
+// ---------------------------------------------------------------------------
+
+const SUMMARY_OUTBOUND = "민감한 정보가 도구 호출이 아닌 경로로 외부에 나가려 해서 막았어요.";
+
+/**
+ * 역방향 채널(예: 서버가 요청한 요약 생성) 차단의 사람 말 번역. HITL 재개방 경로가
+ * 없는 하드 블록이라(역방향은 자연스러운 재시도 의미론이 없다) 승인 액션을 제시하지
+ * 않고 출처 확인만 안내한다. buildUserExplanation과 동일한 노출 규칙(기술 용어 없음).
+ */
+export function buildOutboundExfilExplanation(): UserFacingExplanation {
+  return {
+    summary: SUMMARY_OUTBOUND,
+    reason:
+      "외부 서버가 요청한 생성 결과에 이 세션에서 다룬 민감한 정보가 담겨 있고, " +
+      "세션이 이미 외부에서 온 신뢰할 수 없는 내용에 노출된 상태예요.",
+    risks: [RISK_INJECTION],
+    actions: [
+      {
+        kind: "INSPECT_SOURCE",
+        label: "문제가 된 데이터 출처 확인하기",
+        description: "이 세션의 데이터 흐름을 확인할 수 있어요.",
+        available: true,
+      },
+    ],
+  };
+}
+
 /** fail-safe 차단용 — 계산 실패라 근거(evidence)가 없을 때의 단순 설명 */
 export function buildFailSafeExplanation(): UserFacingExplanation {
   return {

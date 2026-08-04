@@ -11,6 +11,7 @@
  */
 
 import type { EntropyConfig, SecretDetectionConfig } from "./config.js";
+import { collectStrings } from "./value-walk.js";
 
 // ---------------------------------------------------------------------------
 // Shannon 엔트로피
@@ -88,12 +89,7 @@ function detectByEntropy(text: string, cfg: EntropyConfig): DetectedSecret[] {
     .map((run) => ({ type: "HIGH_ENTROPY", value: run }));
 }
 
-/** 페이로드(문자열/객체/배열 중첩)를 재귀 순회하며 비밀을 수집한다 */
+/** 페이로드(문자열/객체/배열 중첩)의 모든 문자열에서 비밀을 수집한다 (순환·깊이 안전 순회) */
 export function detectSecrets(value: unknown, det: SecretDetectionConfig): DetectedSecret[] {
-  if (typeof value === "string") return detectSecretsInString(value, det);
-  if (Array.isArray(value)) return value.flatMap((v) => detectSecrets(v, det));
-  if (typeof value === "object" && value !== null) {
-    return Object.values(value).flatMap((v) => detectSecrets(v, det));
-  }
-  return [];
+  return collectStrings(value).flatMap((s) => detectSecretsInString(s, det));
 }

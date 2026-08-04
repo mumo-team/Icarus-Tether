@@ -126,6 +126,19 @@ export interface PolicyConfig {
   destructivePolicy: DestructivePolicy;
   /** 사용자용 설명 계층에서 쓰는 도구의 사람 말 라벨 (예: read_secrets → "비밀 파일 읽기") */
   toolLabels: Record<string, string>;
+  /**
+   * 신뢰 리소스 URI 접두사 목록 (C-7) — resources/read·prompts/get의 URI가 이 중
+   * 하나로 시작하면 신뢰(내부) 콘텐츠로 본다. 매칭 안 되면 비신뢰(원칙 4 default-deny).
+   * 기본 [] = 아무것도 신뢰하지 않음.
+   *
+   * ★ 위장 방지 규칙(로드 시 fail-closed 검증): 각 접두사는 "://"를 포함하고 "/"로
+   * 끝나야 한다. URL 파싱을 아예 하지 않는 순수 접두사 매칭이므로(파서 차이 공격 배제),
+   * 경계 없는 접두사("https://corp")는 "https://corp.evil.com"에도 매칭되는 확장 위장을
+   * 허용한다 — 그래서 구조적으로 금지한다. 예: ["file:///", "file://localhost/",
+   * "internal://", "https://intranet.corp.local/"].
+   * ("file:///"는 호스트 없는 로컬만 매칭 — "file://evil-host/"(원격 UNC)는 안 걸린다.)
+   */
+  trustedResourceUris: readonly string[];
   secretDetection: SecretDetectionConfig | null;
   piiPatterns: PatternSpec[];
   extractionSchema: ExtractionSchemaConfig | null;
@@ -364,6 +377,22 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     }
   }
 
+  // 신뢰 리소스 URI 접두사 (C-7) — 생략 시 [] (default-deny: 아무 URI도 신뢰 안 함)
+  const trustedResourceUris =
+    obj.trustedResourceUris === undefined
+      ? []
+      : assertStringArray(obj.trustedResourceUris, "trustedResourceUris");
+  for (const prefix of trustedResourceUris) {
+    // 위장 방지 경계 규칙: "://" 포함 + "/" 종료. "https://corp" 같은 경계 없는
+    // 접두사는 "https://corp.evil.com"에도 매칭(확장 위장)되므로 로드 자체를 거부한다.
+    if (!prefix.includes("://") || !prefix.endsWith("/")) {
+      fail(
+        `trustedResourceUris "${prefix}"는 "://"를 포함하고 "/"로 끝나야 합니다 ` +
+          `(경계 없는 접두사는 "corp" → "corp.evil.com" 확장 위장을 허용 — 예: "file:///", "internal://")`
+      );
+    }
+  }
+
   return {
     domain,
     sensitiveSourceTools,
@@ -378,6 +407,7 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     destructiveTools,
     destructivePolicy,
     toolLabels,
+    trustedResourceUris,
     secretDetection: parseSecretDetection(obj.secretDetection),
     piiPatterns: parsePatternList(obj.piiPatterns, "piiPatterns"),
     extractionSchema: parseExtractionSchema(obj.extractionSchema),
@@ -386,8 +416,34 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
 
 let cached: PolicyConfig | null = null;
 
-/** 활성 설정. 프로세스당 1회 로드해 캐시한다. */
+/** 활성 설정. 최초 호출 시 로드해 캐시한다 (reloadPolicyConfig로 핫리로드 가능). */
 export function getPolicyConfig(): PolicyConfig {
   cached ??= loadPolicyConfig();
   return cached;
+}
+
+/**
+ * 정책 핫리로드 — 설정을 다시 로드해 캐시를 교체한다. 프록시가 설정 파일 변경을
+ * 감지해 호출하면, 세션을 끊지 않고 다음 판정부터 새 정책이 적용된다.
+ *
+ * ★ 검증-후-교체(fail-closed): loadPolicyConfig가 새 설정을 "전부" 검증한 뒤에만
+ * 캐시를 교체한다 — 형식 오류·경계 규칙 위반(trustedResourceUris 등)이면 여기서
+ * throw하고 캐시는 건드리지 않으므로, 잘못된 설정으로 재로드해도 기존 정책이
+ * 그대로 유지된다(운영 중 프록시가 죽거나 무정책 상태가 되는 경로 없음).
+ *
+ * ★ 동시성: 엔진 판정 경로(evaluateToolCall·attemptSanitization 등)는 전부 동기라
+ * 이벤트루프를 놓지 않는다 — 재로드는 동기 블록 "사이"에서만 일어날 수 있어, 진행
+ * 중인 판정이 교체 전/후 설정을 섞어 읽는 상황이 구조적으로 불가능하다(단일 대입
+ * 교체로 충분). 판정 경로에 await를 넣게 되면 이 전제가 깨지므로 그때는 판정 시작
+ * 시 스냅샷으로 바꿔야 한다.
+ *
+ * 세션 상태(오염 그래프·노출이력·볼트)는 config와 별개 저장소라 영향받지 않는다.
+ *
+ * @param filePath 생략 시 표준 해석 순서(환경변수 → 기본 경로)로 다시 찾는다.
+ * @returns 적용된 새 설정.
+ */
+export function reloadPolicyConfig(filePath?: string): PolicyConfig {
+  const next = filePath === undefined ? loadPolicyConfig() : loadPolicyConfig(filePath);
+  cached = next; // 검증 통과 후에만 도달 — 원자적 교체(단일 대입)
+  return next;
 }

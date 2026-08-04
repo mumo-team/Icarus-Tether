@@ -21,7 +21,6 @@ import {
   type ToolCallContext,
   type PolicyDecision,
   type SessionTaintState,
-  type TrifectaEvent,
   type OutputScanEvent,
   type SanitizationResult,
   SanitizationMethod,
@@ -57,6 +56,7 @@ import {
 import {
   buildDestructiveExplanation,
   buildFailSafeExplanation,
+  buildOutboundExfilExplanation,
   buildUserExplanation,
 } from "./explain.js";
 
@@ -64,6 +64,7 @@ export {
   buildUserExplanation,
   buildFailSafeExplanation,
   buildDestructiveExplanation,
+  buildOutboundExfilExplanation,
   type ExplainInput,
   type DestructiveExplainInput,
 } from "./explain.js";
@@ -78,6 +79,7 @@ export {
 export {
   loadPolicyConfig,
   getPolicyConfig,
+  reloadPolicyConfig,
   NAMED_CHARSETS,
   type PolicyConfig,
   type UnknownToolPolicy,
@@ -91,7 +93,7 @@ export {
   type FieldSpec,
   type PatternSpec,
 } from "./config.js";
-export { loadToolRegistry, getToolRegistry, type ToolRegistry } from "./registry.js";
+export { loadToolRegistry, type ToolRegistry } from "./registry.js";
 export {
   detectSecrets,
   shannonEntropy,
@@ -103,9 +105,6 @@ export {
   extractStructured,
   tokenizePII,
   resolveToken,
-  ALLOWED_RECORD_TYPES,
-  NAME_MAX_LENGTH,
-  type ExtractedRecord,
   type SanitizeOutcome,
 } from "./sanitization.js";
 export {
@@ -337,6 +336,11 @@ export function recordToolResult(
  *
  * 프록시(②)는 fallbackRequestHandler에서 resources/read·prompts/get 응답을 받은 직후
  * 이 함수를 부르면 된다(값-계보를 위해 content 원형을 그대로 넘긴다). uri는 감사·계보 라벨.
+ *
+ * ★ C-7: opts.trusted를 안 넘기면 엔진이 설정(trustedResourceUris)의 URI 접두사로
+ * 신뢰를 판정한다 — URI 신뢰는 정책 판단이므로 registry가 소유한다("성질로 판단,
+ * 설정으로"). 프록시가 명시하면 그 값을 존중한다(하위호환 — 단 trusted:true 오전달은
+ * 프록시 책임: 엔진은 명시값을 검증하지 않는다).
  */
 export function recordExternalContent(
   sessionId: string,
@@ -345,7 +349,7 @@ export function recordExternalContent(
   content: unknown,
   opts?: { trusted?: boolean }
 ): TaintNode {
-  const tags = computeExternalContentTags(content, opts?.trusted ?? false);
+  const tags = computeExternalContentTags(content, opts?.trusted ?? isResourceUriTrusted(uri));
   addSessionTags(getOrCreateSession(sessionId), tags);
 
   // 라벨은 채널+uri — '/'·':'를 포함해 실제 도구명과 충돌하지 않는다(감사로그·계보 표시용).
@@ -360,6 +364,20 @@ export function recordExternalContent(
     payloadStore.set(sessionId, records);
   }
   return node;
+}
+
+/**
+ * ★ C-7: 리소스 URI 신뢰 판정 — registry(trustedResourceUris)의 접두사 매칭.
+ *
+ * 의도적으로 URL 파싱을 하지 않는다: 파서마다 해석이 갈리는 병리 URI(퍼센트 인코딩·
+ * 유저인포 `corp@evil.com`·대소문자 스킴 등)가 파서 차이 공격면이 되므로, 문자열
+ * 접두사 매칭만 쓴다. 위장의 위험 방향(원격을 신뢰로 오판)은 로드 시 경계 규칙
+ * ("://" 포함 + "/" 종료, config.ts)이 막고, 안전 방향(신뢰 자원을 비신뢰로 오판 —
+ * 예: "FILE:///" 대문자 스킴)은 default-deny라 과태깅으로 끝난다(우회 아님).
+ * 미매칭 = 비신뢰 (원칙 4 default-deny). 기본 설정은 빈 목록 — 아무것도 신뢰하지 않음.
+ */
+export function isResourceUriTrusted(uri: string): boolean {
+  return getPolicyConfig().trustedResourceUris.some((prefix) => uri.startsWith(prefix));
 }
 
 /**
@@ -401,6 +419,19 @@ const METHOD_CLEARS: Record<SanitizationMethod, ToolRiskTag> = {
  *    하나라도 실패하거나, 검증할 페이로드가 기록돼 있지 않거나, 설정에 해당
  *    방법의 근거(스키마·패턴)가 없으면 태그 유지 (fail-safe).
  */
+/**
+ * "토큰화가 실제로 값을 바꿨나" 비교 — attemptSanitization의 S4 no-op 게이트 전용.
+ * fail-safe: 직렬화가 던지면(순환 페이로드 — collectStrings 견고화로 기록은 가능)
+ * "안 바뀜"으로 보고해 태그 해제를 막는다. 오류로 태그가 벗겨지는 경로는 없어야 한다.
+ */
+function payloadChanged(before: unknown, after: unknown): boolean {
+  try {
+    return JSON.stringify(before) !== JSON.stringify(after);
+  } catch {
+    return false;
+  }
+}
+
 export function attemptSanitization(
   sessionId: string,
   method: SanitizationMethod
@@ -431,7 +462,7 @@ export function attemptSanitization(
     // 안전 증명이라(불변이어도 안전) 이 게이트를 적용하지 않는다.
     const tokenizationEffective =
       method !== SanitizationMethod.TOKENIZATION ||
-      records.every((r, i) => outcomes[i].ok && JSON.stringify(r.payload) !== JSON.stringify((outcomes[i] as { value: unknown }).value));
+      records.every((r, i) => outcomes[i].ok && payloadChanged(r.payload, (outcomes[i] as { value: unknown }).value));
 
     if (outcomes.every((o) => o.ok) && tokenizationEffective) {
       // 검증 통과 — 페이로드를 정화된 값으로 교체하고 태그 해제
@@ -877,6 +908,182 @@ export function evaluateToolCall(ctx: ToolCallContext): PolicyDecision {
   return applyDestructiveGate(ctx) ?? exfil;
 }
 
+// ---------------------------------------------------------------------------
+// 역방향 아웃바운드 콘텐츠 판정 — tools/call이 아닌 채널로 "서버로 돌아가는 콘텐츠"의 유출 검사.
+//
+// 배경(전수 조사 D-1): 프록시는 tools/call만 evaluateToolCall로 검사하고,
+// sampling/createMessage 같은 역방향 요청은 fallbackRequestHandler에서 무검사 중계했다.
+// sampling은 서버→클라 LLM 역요청이고 그 응답(LLM 출력)이 서버로 돌아가므로, 오염 세션에서
+// 응답에 민감 데이터가 실리면 lethal-trifecta와 동형의 유출인데 판정이 전혀 안 돌았다
+// (출력스캔까지 무력화 — U축 의존). 이 API가 "서버로 나가는 콘텐츠"를 tools/call 유출 판정과
+// 같은 가드에 태워 미탐을 막는다.
+//
+// ★ 완전 additive — evaluateToolCall/computeLineageDecision 무변경. 판정을 tools/call
+// 유출 경로(computeLineageDecision)와 **동일 강도**로 맞춘다: 나가는 콘텐츠를 아웃바운드
+// 싱크 인자처럼 보고, 같은 프리미티브(collectLineageEvidence 값-계보 + 출력스캔 + 볼트원본)
+// 로 valueSensitive를 계산하고, U축은 노출이력으로 본다.
+//   valueSensitive = (콘텐츠 계보에 SENSITIVE) OR 출력스캔(containment/regex) OR 볼트원본재전송
+//   sessionUntrusted = 노출이력(grow-only, 정화 불변 F1)
+// 값-계보를 반드시 재사용하는 이유: LLM 요약은 민감 원본을 발췌·재포맷하므로 출력스캔
+// containment(전체 문자열 일치)만으로는 놓친다. tools/call은 이를 VALUE_MATCH로 잡는데,
+// 역방향(더 위험한 채널)이 그보다 느슨하면 방어 불가능한 비대칭이 된다. 계보 미스 시엔
+// TEMPORAL_FALLBACK이 오염 frontier에 연결해 "오염 세션의 아웃바운드는 보수적 차단"까지
+// tools/call과 동일하게 동작한다(과차단 대칭 — 깨끗한 세션은 노드가 없어 통과).
+//
+// 형식모델: TaintLineage.tla ReachSink(n) 가드 `~(SENSITIVE ∈ tags[n] ∧ exposure)`는
+// 채널 불문 "민감값이 노출 세션에서 sink 도달 시 차단"이라 이 전이를 이미 커버한다.
+// sampling은 sink 도달의 새 실현일 뿐 — 모델 무수정(recordExternalContent가 CreateNode의
+// 새 실현이었던 것과 동형).
+//
+// 차단 의미론(default-deny, 원칙 4): 역방향은 자연스러운 "재시도" 지점이 없어 HITL
+// 재개방을 제시하지 않는 하드 블록이다(computeLineageDecision의 weak-only offer 미사용).
+// 프록시(②)는 allowed=false면 LLM 응답을 서버에 돌려주지 말고 MCP 에러로 대체해야 한다.
+// 반환형은 PolicyDecision(toolName=channel) — shared/types 무변경, 프록시가
+// broadcastDecision/recordAudit를 그대로 재사용한다.
+// ---------------------------------------------------------------------------
+
+/** evaluateOutboundContent가 검사하는 아웃바운드 채널. 유입(source)이 아니라 유출(sink) 축이다.
+ *  resources/read·prompts/get은 ③ 결정: 비신뢰 대상으로 나가는 "요청 자체"가 유출구다
+ *  (URI 쿼리에 데이터 싣기 등) — evaluateResourceRequest가 비신뢰일 때만 이 경로로 넘긴다. */
+export type OutboundChannel = "sampling/createMessage" | "resources/read" | "prompts/get";
+
+/**
+ * 서버로 돌아가려는 아웃바운드 콘텐츠(sampling 응답 등)를 유출 관점에서 판정한다.
+ *
+ * @param content 서버로 나가는 콘텐츠 원형(sampling 응답의 content 등). 문자열이 아니어도
+ *                되며(객체·배열) 내부 모든 문자열을 재귀 수집해 검사·계보 매칭한다.
+ * @returns PolicyDecision. allowed=false면 프록시가 응답 대신 에러를 서버로 반환할 것.
+ *
+ * 정상 케이스(오염 없는 세션)는 통과한다 — 과차단은 tools/call과 대칭이다.
+ */
+export function evaluateOutboundContent(
+  sessionId: string,
+  channel: OutboundChannel,
+  content: unknown
+): PolicyDecision {
+  // 나가는 콘텐츠를 아웃바운드 싱크의 "인자"처럼 취급한다 — 계보 값-매칭과 이벤트 방출기
+  // (ToolCallContext를 받음)가 그대로 재사용된다. 채널명을 toolName으로(‘/’ 포함 → 실제
+  // 도구명과 충돌 없음), content를 args로 접는다.
+  const ctx: ToolCallContext = {
+    sessionId,
+    toolName: channel,
+    args: { content } as Record<string, unknown>,
+    argTags: [],
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    // ① 값-계보: 콘텐츠 토큰이 어느 오염 노드에서 왔나 (computeLineageDecision과 동일).
+    const evidence = collectLineageEvidence(ctx);
+    // ② 출력스캔(TIER3): 세션이 읽은 민감 원본 포함(세탁·재조립) 또는 verbatim 비밀 키.
+    const outputScanFinding = scanOutputForSensitive(
+      getSensitivePayloads(sessionId),
+      content,
+      getPolicyConfig().secretDetection
+    );
+    // ③ 볼트 원본 재전송: 정화 후 원본을 그대로 되보내는 세탁 우회.
+    const resendsSanitizedOriginal = containsVaultOriginal(content);
+
+    const valueSensitive =
+      evidence.unionTags.has(ToolRiskTag.SENSITIVE) ||
+      resendsSanitizedOriginal ||
+      outputScanFinding !== null;
+    // U축 = 노출이력(grow-only, 정화 불변 — F1). tools/call U축과 동일.
+    const sessionUntrusted = sessionExposure.has(sessionId);
+
+    if (valueSensitive && sessionUntrusted) {
+      const taintedNodes = evidence.nodes.filter((n) => n.tags.length > 0);
+      const nodeDesc = taintedNodes
+        .map((n) => `${n.nodeId}(${n.toolName}: ${n.tags.join("+")})`)
+        .join(", ");
+      const resendNote = resendsSanitizedOriginal
+        ? " (정화 전 볼트 원본이 나가는 콘텐츠에 감지됨 — 원본 재전송)"
+        : "";
+      const outputScanNote = outputScanFinding
+        ? outputScanFinding.kind === "containment"
+          ? outputScanFinding.normalized
+            ? " (출력-스캔: 세션이 읽은 민감 원본이 재포맷/인코딩돼 나가는 콘텐츠에 포함됨)"
+            : " (출력-스캔: 세션이 읽은 민감 원본이 나가는 콘텐츠에 포함됨)"
+          : " (출력-스캔: 나가는 콘텐츠에서 비밀 키 패턴 감지)"
+        : "";
+      const decision: PolicyDecision = {
+        sessionId,
+        toolName: channel,
+        allowed: false,
+        reason:
+          `lethal trifecta 감지(역방향 아웃바운드 판정): 세션이 비신뢰 입력에 노출된 상태에서 ` +
+          `민감 데이터가 '${channel}' 응답으로 외부 서버에 되돌아가려 해 차단 — ${nodeDesc || "근거: 콘텐츠 값-민감"}` +
+          resendNote +
+          outputScanNote,
+        matchedTags: [ToolRiskTag.SENSITIVE, ToolRiskTag.UNTRUSTED_ORIGIN],
+        canOverride: false, // 역방향은 재시도 의미론이 없어 하드 블록 (default-deny)
+        explanation: buildOutboundExfilExplanation(),
+      };
+      if (outputScanFinding) {
+        decision.outputScan = emitOutputScanEvent(ctx, SinkClass.OUTBOUND_SINK, outputScanFinding);
+      }
+      // 채널 불문 트라이펙타 사실 기록 — 대시보드가 tools/call과 동일하게 본다.
+      emitTrifectaEvent(ctx, SinkClass.OUTBOUND_SINK, decision.matchedTags);
+      return decision;
+    }
+
+    return { sessionId, toolName: channel, allowed: true, matchedTags: [] };
+  } catch (err) {
+    // fail-safe: 역방향도 실전 결정자이므로 계산 실패는 차단이다 (조용한 통과 금지).
+    console.error("[policy-engine] 역방향 아웃바운드 판정 계산 실패 — fail-safe 차단:", err);
+    return {
+      sessionId,
+      toolName: channel,
+      allowed: false,
+      reason: "역방향 아웃바운드 판정 계산 실패 — fail-safe 차단 (오류 시 통과 금지)",
+      matchedTags: [],
+      canOverride: false,
+      explanation: buildFailSafeExplanation(),
+    };
+  }
+}
+
+/**
+ * ★ C-7 + ③: 리소스 요청(resources/read·prompts/get)을 "보내기 전" 판정한다.
+ *
+ * ③ 정책 결정(옵션 B — 비신뢰 대상만): 비신뢰 URI로 나가는 요청은 "읽기"라도 요청
+ * 자체가 경계 밖 통신이다 — URI 쿼리에 데이터를 실으면 유출구가 된다(마크다운 이미지
+ * URL 유출과 동형, tools/call·sampling을 막은 뒤 남는 마지막 열린 채널). 그래서
+ * 요청 params 전체(URI 포함)를 evaluateOutboundContent와 같은 강도로 sink 판정한다.
+ *
+ * 신뢰 URI(trustedResourceUris 매칭)는 내부 자원 — 요청이 경계를 안 나가므로 sink
+ * 검사 없이 통과한다(과차단 방지: 내부 경로 문자열이 우연히 민감값과 겹쳐도 무해).
+ * 판정 기준이 유입 태깅(recordExternalContent)과 동일한 registry 규칙이라, "신뢰면
+ * U 안 붙고 sink 검사도 없음 / 비신뢰면 U 붙고 sink 검사도 함"이 항상 일치한다.
+ *
+ * 프록시(②)는 요청을 중계하기 전에 이 함수를 부르고, allowed=false면 중계하지 않는다.
+ * params를 안 넘기면 URI만 검사한다(최소 보장).
+ */
+export function evaluateResourceRequest(
+  sessionId: string,
+  channel: "resources/read" | "prompts/get",
+  uri: string,
+  params?: unknown
+): PolicyDecision {
+  if (isResourceUriTrusted(uri)) {
+    return { sessionId, toolName: channel, allowed: true, matchedTags: [] };
+  }
+  return evaluateOutboundContent(sessionId, channel, params ?? { uri });
+}
+
+/**
+ * 엔진 내부 관측 로그용 트라이펙타 이벤트 구조 (구 shared/types TrifectaEvent).
+ * 계약에서 제거돼(발행 채널·소비자 없음) 로컬로만 유지한다 — 대시보드 표시는
+ * PolicyDecision.matchedTags가 담당하고, 이 값은 stderr 로그로만 쓰인다.
+ */
+interface TrifectaEvent {
+  id: string;
+  sessionId: string;
+  toolName: string;
+  matchedTags: ToolRiskTag[];
+  sinkClass: SinkClass;
+  timestamp: string;
+}
+
 function emitTrifectaEvent(
   ctx: ToolCallContext,
   sinkClass: SinkClass,
@@ -890,7 +1097,7 @@ function emitTrifectaEvent(
     sinkClass,
     timestamp: new Date().toISOString(),
   };
-  // TODO(B/C): dashboard·audit-log 쪽으로 이 이벤트를 발행 (HTTP/이벤트버스 등)
+  // 관측 로그만 — 대시보드 표시는 PolicyDecision.matchedTags가 담당한다.
   console.log("[policy-engine] TrifectaEvent 발행:", event);
   return event;
 }
