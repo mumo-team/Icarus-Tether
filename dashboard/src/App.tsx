@@ -46,6 +46,14 @@ const SAMPLE_BLOCKED_DECISION: PolicyDecision = {
     ],
   },
 };
+const MAX_EVENTS = 500;    // logs·injectionChecks·outputScans 슬라이딩 윈도우
+const MAX_SNAPSHOTS = 100; // 계보 스냅샷은 매 이벤트마다 배열 전체를 쌓아 더 무거우므로 더 낮게
+
+// 무한 append 방지 — 최근 max건만 유지한다.
+function pushCapped<T>(prev: T[], next: T, max: number): T[] {
+  const arr = [...prev, next];
+  return arr.length > max ? arr.slice(arr.length - max) : arr;
+}
 
 export default function App() {
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
@@ -106,8 +114,8 @@ export default function App() {
             matchedTags: data.matchedTags ?? [],
             timestamp: data.timestamp,
           };
-          setLogs((prev) => [...prev, entry]);
-          if (data.outputScan) setOutputScans((prev) => [...prev, data.outputScan]);
+          setLogs((prev) => pushCapped(prev, entry, MAX_EVENTS));
+          if (data.outputScan) setOutputScans((prev) => pushCapped(prev, data.outputScan, MAX_EVENTS));
           // 승인 가능한 차단이 오면 모달을 자동으로 띄운다 — 발표 3단계 "와우 포인트".
           if (data.allowed === false && data.canOverride && data.approvalId) {
             setModalDecision({
@@ -174,7 +182,7 @@ export default function App() {
             timestamp: data.timestamp,
             evaluated: data.evaluated ?? true,
           };
-          setInjectionChecks((prev) => [...prev, entry]);
+          setInjectionChecks((prev) => pushCapped(prev, entry, MAX_EVENTS));
         }
         if (data.type === "audit_integrity") {
           setAuditIntegrity({ ok: data.ok, total: data.total, problems: data.problems ?? [] });
@@ -193,7 +201,7 @@ export default function App() {
           });
        }
         if (data.type === "lineage") {
-          setSnapshots((prev) => [...prev, data.nodes ?? []]);
+          setSnapshots((prev) => pushCapped(prev, data.nodes ?? [], MAX_SNAPSHOTS));
         }
         if (data.type === "hitl_audit") {
           // 세션 전체 HITL 감사로그(엔진 누적) — append가 아니라 교체.
