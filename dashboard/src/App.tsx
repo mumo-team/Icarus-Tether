@@ -68,6 +68,7 @@ export default function App() {
   } | null>(null);
   const [snapshots, setSnapshots] = useState<LineageNode[][]>([]);
   const [outputScans, setOutputScans] = useState<OutputScanEvent[]>([]);
+  const [awaiting, setAwaiting] = useState<Record<string, "awaiting" | "timeout">>({});
 
     useEffect(() => {
     let disposed = false; // 언마운트 후 재연결 타이머가 되살아나는 것 방지
@@ -145,6 +146,12 @@ export default function App() {
                 : a
             )
           );
+          // 응답이 왔으니 이 항목의 '대기/무응답' 표시를 해제한다.
+          setAwaiting((prev) => {
+            const next = { ...prev };
+            delete next[data.approvalId];
+            return next;
+          });
         }
 
         if (data.type === "injection_check") {
@@ -220,13 +227,13 @@ export default function App() {
         })
       );
     }
-    setApprovals((prev) =>
-      prev.map((a) =>
-        a.id === id
-          ? { ...a, status, resolvedAt: new Date().toISOString(), resolvedBy }
-          : a
-      )
-    );
+    // 낙관적 승인표시 제거: 엔진이 OVERRIDE_STALE로 승인을 무효화할 수 있어
+    // 로컬에서 미리 확정하지 않는다. 상태 확정은 approval_resolved 수신 시에만.
+    // 큐에는 '전송됨·응답 대기'만 표시하고, 5초 내 응답 없으면 '응답 없음'으로 전환.
+    setAwaiting((prev) => ({ ...prev, [id]: "awaiting" }));
+    window.setTimeout(() => {
+      setAwaiting((prev) => (prev[id] === "awaiting" ? { ...prev, [id]: "timeout" } : prev));
+    }, 5000);
   }
 
    function handleActionClick(action: UserAction) {
@@ -334,7 +341,7 @@ export default function App() {
         )}
       </section>
       <OutputScanPanel scans={outputScans} />
-      <ApprovalQueue approvals={approvals} onDecide={handleDecide} />
+      <ApprovalQueue approvals={approvals} onDecide={handleDecide} awaiting={awaiting} />
       <SanitizationCompareView sanitization={sanitization} />
       <ForensicReplay snapshots={snapshots} />
       {modalDecision && (
