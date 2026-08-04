@@ -302,9 +302,6 @@ export default function App() {
   return (
     <div style={{ fontFamily: "sans-serif", padding: "24px" }}>
       <h1>Icarus-Tether 대시보드</h1>
-       <button onClick={() => setModalDecision(SAMPLE_BLOCKED_DECISION)}>
-         트라이펙타 경고 데모 보기 (샘플)
-      </button>
       <p style={{ color: wsConnected ? "#2e7d32" : "#d32f2f", fontWeight: "bold" }}>
         {wsConnected ? "[연결됨] proxy 연결됨" : "[대기] proxy 대기 중 — 데모를 실행하면 자동 연결됩니다"}
       </p>
@@ -377,6 +374,13 @@ export default function App() {
           onClose={() => setModalDecision(null)}
           queuedCount={approvals.filter((a) => a.status === "PENDING" && a.id !== modalDecision.approvalId).length}
         />
+      )}
+      {import.meta.env.DEV && (
+        <div style={{ marginTop: "32px", paddingTop: "16px", borderTop: "1px solid #eee" }}>
+          <button onClick={() => setModalDecision(SAMPLE_BLOCKED_DECISION)}>
+            트라이펙타 경고 데모 보기 (샘플 · 개발용)
+          </button>
+        </div>
       )}
     </div>
   );
