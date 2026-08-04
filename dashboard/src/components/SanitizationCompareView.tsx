@@ -5,6 +5,8 @@ interface SanitizationState {
   originalTags: string[];
   resultTags: string[];
   ok: boolean;
+  maskedCount?: number;
+  residualSensitiveData?: boolean;
 }
 
 // payload 원본 값은 엔진 vault에만 있어 세션에서 못 빼온다.
@@ -28,15 +30,18 @@ export default function SanitizationCompareView({
           style={{
             padding: "8px 12px",
             borderRadius: "6px",
-            background: live.ok ? "#e8f5e9" : "#fff3e0",
-            border: `1px solid ${live.ok ? "#c8e6c9" : "#ffe0b2"}`,
+            background: live.ok && !live.residualSensitiveData ? "#e8f5e9" : "#fff3e0",
+            border: `1px solid ${live.ok && !live.residualSensitiveData ? "#c8e6c9" : "#ffe0b2"}`,
             fontSize: "14px",
           }}
         >
-          {live.ok ? "[성공]" : "[주의]"} 실제 정화됨 ({live.method}) — 세션 오염 태그{" "}
+          {live.residualSensitiveData ? "[주의] 부분 정화됨" : live.ok ? "[성공] 실제 정화됨" : "[주의] 실제 정화됨"}
+          {" "}({live.method}{live.maskedCount !== undefined ? `, ${live.maskedCount}개 항목 토큰화` : ""}) — 세션 오염 태그{" "}
           <TagList tags={live.originalTags} tone="danger" /> →{" "}
           <TagList tags={live.resultTags} tone="safe" />
-          {live.ok && live.resultTags.length < 2 && "  (트라이펙타 미성립 → 재전송 통과)"}
+          {live.residualSensitiveData
+            ? "  (비정형 값 잔존 — 다른 가드가 이후 전송을 계속 막을 수 있음)"
+            : live.ok && live.resultTags.length < 2 && "  (트라이펙타 미성립 → 재전송 통과)"}
         </p>
       ) : (
         <p style={{ color: "#888", fontSize: "14px" }}>

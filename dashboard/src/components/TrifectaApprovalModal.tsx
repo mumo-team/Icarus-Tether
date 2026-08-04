@@ -4,12 +4,15 @@ interface TrifectaApprovalModalProps {
   decision: PolicyDecision;
   onActionClick: (action: UserAction) => void;
   onClose: () => void;
+  queuedCount?: number;
 }
 
 export default function TrifectaApprovalModal({
   decision,
   onActionClick,
   onClose,
+  queuedCount,
+
 }: TrifectaApprovalModalProps) {
   const { explanation } = decision;
   if (!explanation) return null;
@@ -27,6 +30,11 @@ export default function TrifectaApprovalModal({
     >
       <div style={{ background: "white", borderRadius: "8px", padding: "24px", maxWidth: "480px", width: "90%" }}>
         <h2>[차단] {explanation.summary}</h2>
+        {queuedCount ? (
+          <p style={{ margin: "0 0 8px", color: "#e65100", fontWeight: "bold" }}>
+            대기 중 {queuedCount}건 — 이 항목 처리 후 아래 승인 대기 큐에서 이어서 확인하세요
+          </p>
+        ) : null}
         <p>{explanation.reason}</p>
 
         {explanation.risks.length > 0 && (

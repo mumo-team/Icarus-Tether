@@ -1,5 +1,5 @@
 import { useState,useEffect, useRef } from "react";
-import type { AuditLogEntry, ApprovalRequest, PolicyDecision, UserAction, OutputScanEvent } from "@icarus-tether/types";
+import type { AuditLogEntry, ApprovalRequest, PolicyDecision, UserAction, OutputScanEvent, OverrideAuditEntry } from "@icarus-tether/types";
 import MetricCards from "./components/MetricCards";
 import TrifectaWarningBanner from "./components/TrifectaWarningBanner";
 import ThreatFusionBanner from "./components/ThreatFusionBanner";
@@ -9,7 +9,7 @@ import SanitizationCompareView from "./components/SanitizationCompareView";
 import TaintGraph, { type LineageNode } from "./components/TaintGraph";
 import ForensicReplay from "./components/ForensicReplay";
 import TrifectaApprovalModal from "./components/TrifectaApprovalModal";
-import AuditTimeline, { type HitlAuditEntry } from "./components/AuditTimeline";
+import AuditTimeline from "./components/AuditTimeline";
 import OutputScanPanel from "./components/OutputScanPanel";
 
 interface InjectionCheckEntry {
@@ -46,13 +46,21 @@ const SAMPLE_BLOCKED_DECISION: PolicyDecision = {
     ],
   },
 };
+const MAX_EVENTS = 500;    // logs·injectionChecks·outputScans 슬라이딩 윈도우
+const MAX_SNAPSHOTS = 100; // 계보 스냅샷은 매 이벤트마다 배열 전체를 쌓아 더 무거우므로 더 낮게
+
+// 무한 append 방지 — 최근 max건만 유지한다.
+function pushCapped<T>(prev: T[], next: T, max: number): T[] {
+  const arr = [...prev, next];
+  return arr.length > max ? arr.slice(arr.length - max) : arr;
+}
 
 export default function App() {
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [modalDecision, setModalDecision] = useState<PolicyDecision | null>(null);
   const [injectionChecks, setInjectionChecks] = useState<InjectionCheckEntry[]>([]);
-  const [hitlLog, setHitlLog] = useState<HitlAuditEntry[]>([]);
+  const [hitlLog, setHitlLog] = useState<OverrideAuditEntry[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const [auditIntegrity, setAuditIntegrity] = useState<{
@@ -65,10 +73,13 @@ export default function App() {
     originalTags: string[];
     resultTags: string[];
     ok: boolean;
+    maskedCount?: number;
+    residualSensitiveData?: boolean;
   } | null>(null);
   const [snapshots, setSnapshots] = useState<LineageNode[][]>([]);
   const [outputScans, setOutputScans] = useState<OutputScanEvent[]>([]);
-
+  const [awaiting, setAwaiting] = useState<Record<string, "awaiting" | "timeout">>({});
+  const [recvErrors, setRecvErrors] = useState(0);
     useEffect(() => {
     let disposed = false; // 언마운트 후 재연결 타이머가 되살아나는 것 방지
     let retryTimer: number | undefined;
@@ -84,22 +95,31 @@ export default function App() {
       };
 
       ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch (err) {
+          // 조용히 멈추지 않는다 — 이 프레임만 건너뛰고 수신오류로 집계·표시.
+          console.error("[대시보드] 이벤트 파싱 실패 — 이 프레임만 건너뜀:", err);
+          setRecvErrors((n) => n + 1);
+          return;
+        }
 
         if (data.type === "decision") {
           const entry: AuditLogEntry = {
             id: `${data.sessionId}-${data.toolName}-${data.timestamp}`,
             sessionId: data.sessionId,
             toolName: data.toolName,
-            decision: data.allowed ? "ALLOWED" : "BLOCKED",
+            decision: data.decision ?? (data.allowed ? "ALLOWED" : "BLOCKED"),
             matchedTags: data.matchedTags ?? [],
             timestamp: data.timestamp,
           };
-          setLogs((prev) => [...prev, entry]);
-          if (data.outputScan) setOutputScans((prev) => [...prev, data.outputScan]);
+          setLogs((prev) => pushCapped(prev, entry, MAX_EVENTS));
+          if (data.outputScan) setOutputScans((prev) => pushCapped(prev, data.outputScan, MAX_EVENTS));
           // 승인 가능한 차단이 오면 모달을 자동으로 띄운다 — 발표 3단계 "와우 포인트".
           if (data.allowed === false && data.canOverride && data.approvalId) {
-            setModalDecision({
+            // 이미 모달이 떠 있으면 덮어쓰지 않는다 — 새 건은 아래 큐에만 쌓인다(setApprovals).
+            setModalDecision((cur) => cur ?? ({
               sessionId: data.sessionId,
               toolName: data.toolName,
               allowed: false,
@@ -108,7 +128,7 @@ export default function App() {
               explanation: data.explanation,
               canOverride: data.canOverride,
               approvalId: data.approvalId,
-            });
+            }));
             // 큐에도 동일 항목을 쌓는다 — 모달과 같은 데이터로 ApprovalQueue·대기 카운트를 살린다.
             // (broadcastDecision이 args를 안 실으므로 args는 비운다 — 큐는 도구명·상태만 표시.)
             setApprovals((prev) =>
@@ -145,6 +165,12 @@ export default function App() {
                 : a
             )
           );
+          // 응답이 왔으니 이 항목의 '대기/무응답' 표시를 해제한다.
+          setAwaiting((prev) => {
+            const next = { ...prev };
+            delete next[data.approvalId];
+            return next;
+          });
         }
 
         if (data.type === "injection_check") {
@@ -157,7 +183,7 @@ export default function App() {
             timestamp: data.timestamp,
             evaluated: data.evaluated ?? true,
           };
-          setInjectionChecks((prev) => [...prev, entry]);
+          setInjectionChecks((prev) => pushCapped(prev, entry, MAX_EVENTS));
         }
         if (data.type === "audit_integrity") {
           setAuditIntegrity({ ok: data.ok, total: data.total, problems: data.problems ?? [] });
@@ -171,10 +197,12 @@ export default function App() {
             originalTags: data.originalTags ?? [],
             resultTags: data.resultTags ?? [],
             ok: data.ok,
+            maskedCount: data.maskedCount,
+            residualSensitiveData: data.residualSensitiveData,
           });
        }
         if (data.type === "lineage") {
-          setSnapshots((prev) => [...prev, data.nodes ?? []]);
+          setSnapshots((prev) => pushCapped(prev, data.nodes ?? [], MAX_SNAPSHOTS));
         }
         if (data.type === "hitl_audit") {
           // 세션 전체 HITL 감사로그(엔진 누적) — append가 아니라 교체.
@@ -220,13 +248,13 @@ export default function App() {
         })
       );
     }
-    setApprovals((prev) =>
-      prev.map((a) =>
-        a.id === id
-          ? { ...a, status, resolvedAt: new Date().toISOString(), resolvedBy }
-          : a
-      )
-    );
+    // 낙관적 승인표시 제거: 엔진이 OVERRIDE_STALE로 승인을 무효화할 수 있어
+    // 로컬에서 미리 확정하지 않는다. 상태 확정은 approval_resolved 수신 시에만.
+    // 큐에는 '전송됨·응답 대기'만 표시하고, 5초 내 응답 없으면 '응답 없음'으로 전환.
+    setAwaiting((prev) => ({ ...prev, [id]: "awaiting" }));
+    window.setTimeout(() => {
+      setAwaiting((prev) => (prev[id] === "awaiting" ? { ...prev, [id]: "timeout" } : prev));
+    }, 5000);
   }
 
    function handleActionClick(action: UserAction) {
@@ -274,12 +302,14 @@ export default function App() {
   return (
     <div style={{ fontFamily: "sans-serif", padding: "24px" }}>
       <h1>Icarus-Tether 대시보드</h1>
-       <button onClick={() => setModalDecision(SAMPLE_BLOCKED_DECISION)}>
-         트라이펙타 경고 데모 보기 (샘플)
-      </button>
       <p style={{ color: wsConnected ? "#2e7d32" : "#d32f2f", fontWeight: "bold" }}>
         {wsConnected ? "[연결됨] proxy 연결됨" : "[대기] proxy 대기 중 — 데모를 실행하면 자동 연결됩니다"}
       </p>
+      {recvErrors > 0 && (
+        <p style={{ color: "#d32f2f", fontWeight: "bold" }}>
+          [수신오류] 이벤트 수신 오류 {recvErrors}건 — 일부 프레임을 건너뛰었습니다
+        </p>
+      )}
       <section id="taint-graph-panel">
         <h2>실시간 오염 계보</h2>
         <TaintGraph lineage={snapshots[snapshots.length - 1] ?? []} />
@@ -334,7 +364,7 @@ export default function App() {
         )}
       </section>
       <OutputScanPanel scans={outputScans} />
-      <ApprovalQueue approvals={approvals} onDecide={handleDecide} />
+      <ApprovalQueue approvals={approvals} onDecide={handleDecide} awaiting={awaiting} />
       <SanitizationCompareView sanitization={sanitization} />
       <ForensicReplay snapshots={snapshots} />
       {modalDecision && (
@@ -342,7 +372,15 @@ export default function App() {
           decision={modalDecision}
           onActionClick={handleActionClick}
           onClose={() => setModalDecision(null)}
+          queuedCount={approvals.filter((a) => a.status === "PENDING" && a.id !== modalDecision.approvalId).length}
         />
+      )}
+      {import.meta.env.DEV && (
+        <div style={{ marginTop: "32px", paddingTop: "16px", borderTop: "1px solid #eee" }}>
+          <button onClick={() => setModalDecision(SAMPLE_BLOCKED_DECISION)}>
+            트라이펙타 경고 데모 보기 (샘플 · 개발용)
+          </button>
+        </div>
       )}
     </div>
   );
