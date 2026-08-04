@@ -65,6 +65,8 @@ export default function App() {
     originalTags: string[];
     resultTags: string[];
     ok: boolean;
+    maskedCount?: number;
+    residualSensitiveData?: boolean;
   } | null>(null);
   const [snapshots, setSnapshots] = useState<LineageNode[][]>([]);
   const [outputScans, setOutputScans] = useState<OutputScanEvent[]>([]);
@@ -186,6 +188,8 @@ export default function App() {
             originalTags: data.originalTags ?? [],
             resultTags: data.resultTags ?? [],
             ok: data.ok,
+            maskedCount: data.maskedCount,
+            residualSensitiveData: data.residualSensitiveData,
           });
        }
         if (data.type === "lineage") {

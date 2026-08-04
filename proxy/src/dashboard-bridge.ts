@@ -302,6 +302,8 @@ function handleDashboardMessage(text: string): void {
       originalTags: result.originalTags,
       resultTags: result.resultTags,
       ok,
+      maskedCount: result.maskedCount,
+      residualSensitiveData: result.residualSensitiveData,
       timestamp: new Date().toISOString(),
     });
     return;
