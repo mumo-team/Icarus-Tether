@@ -50,7 +50,7 @@ function signAuditEntry(entry: Omit<AuditLogEntry, "signature">): string {
 export function recordAudit(input: {
   sessionId: string;
   toolName: string;
-  decision: "ALLOWED" | "BLOCKED";
+  decision: AuditLogEntry["decision"]; // "ALLOWED"|"BLOCKED"|"FORWARDED" — shared/types와 자동 동기화
   matchedTags: ToolRiskTag[];
 }): void {
   const unsigned: Omit<AuditLogEntry, "signature"> = {
@@ -285,6 +285,9 @@ function handleDashboardMessage(text: string): void {
       originalTags: result.originalTags,
       resultTags: result.resultTags,
       ok,
+      // 부분 정화 UX용 보고 필드(엔진이 반환) — 대시보드에 전달 (e-3)
+      maskedCount: result.maskedCount,
+      residualSensitiveData: result.residualSensitiveData,
       timestamp: new Date().toISOString(),
     });
     return;

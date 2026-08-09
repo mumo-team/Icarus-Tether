@@ -16,7 +16,7 @@ import {
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, watch } from "node:fs";
 import { startDashboardBridge, stopDashboardBridge, broadcastDecision, recordAudit, broadcastAuditIntegrity, broadcastLineage } from "./dashboard-bridge.js";
 import { checkInjection } from "./injection.js";
 // 순수 라우팅·분류 헬퍼 (Phase 4에서 퍼징 가능하도록 분리).
@@ -32,6 +32,7 @@ import {
   evaluateResourceRequest,
   recordToolResult,
   recordExternalContent,
+  reloadPolicyConfig,
   requestApproval,
   resolveApproval,
 } from "@icarus-tether/policy-engine";
@@ -95,9 +96,7 @@ function logForwarded(sessionId: string, method: string, risk: MethodRisk = "UNC
 }
 
 // fallback로 빠지는 메서드를 분류해 audit.log에 정식 기록하고 stderr에도 남긴다.
-// C의 recordAudit는 decision이 ALLOWED|BLOCKED뿐이라, '무검사 통과'는 ALLOWED로 매핑한다.
-// (SINK 완전 차단은 세션 오염 정보가 필요 → 사-B(B) 이후. 지금은 SINK도 통과시키되
-//  stderr에 ⚠SINK로 눈에 띄게 남긴다. matchedTags 타입은 B 소관이라 늘리지 않는다.)
+// '무검사 통과'는 진짜 검사 통과(ALLOWED)와 구분되도록 FORWARDED로 기록한다(e-2).
 function auditForward(sessionId: string, method: string, reverse = false): void {
   const risk = classifyMethod(method); // 분류는 항상 순수 메서드명으로 (↩ 방향표시 제거된 값)
   const label = reverse ? `↩${method}` : method; // 로그·기록엔 방향을 남긴다
@@ -105,9 +104,48 @@ function auditForward(sessionId: string, method: string, reverse = false): void 
   recordAudit({
     sessionId,
     toolName: label, // 'resources/read'처럼 '/'가 있어 실제 도구명과 구분된다
-    decision: "ALLOWED", // 무검사 통과 = 허용된 것으로 기록 (C 타입 그대로 사용)
+    decision: "FORWARDED", // 검사 없이 중계됨 — 통과(ALLOWED)와 구분
     matchedTags: [],
   });
+}
+
+// 로그용 안전 직렬화. JSON.stringify는 순환참조(TypeError)·과대 깊이(RangeError)에서
+// 던지는데, 이 로그가 recordAudit보다 먼저라 그대로 두면 '감사 기록 전에 죽어' 감사 공백이
+// 생긴다(e-1). 절대 던지지 않게 감싸고 길이도 제한한다.
+function safeArgs(args: unknown): string {
+  try {
+    const s = JSON.stringify(args ?? {});
+    return s.length > 500 ? `${s.slice(0, 500)}…(생략)` : s;
+  } catch {
+    return "[직렬화 불가 — 순환참조/과대 인자]";
+  }
+}
+
+// Phase 3: 정책 핫리로드. 설정 파일이 바뀌면 재시작 없이 다음 요청부터 새 정책을 적용한다.
+// reloadPolicyConfig()는 '검증-후-교체'라 새 설정이 유효할 때만 캐시를 바꾸고, 실패하면
+// throw하되 기존 정책이 그대로 살아있다 → try/catch로 감싸 로그만 남기면 안전하다.
+function watchPolicyConfig(): void {
+  const path = process.env.TAINTGUARD_TOOL_REGISTRY;
+  if (!path) return; // 명시 경로 없음(기본 레지스트리) → 감시 생략
+  const resolved = resolve(path);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    watch(resolved, () => {
+      // 에디터 저장이 write 이벤트를 여러 번 쏘므로 디바운스한다.
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        try {
+          reloadPolicyConfig(); // 유효할 때만 원자적 교체. 실패해도 기존 정책 유지.
+          console.error(`[proxy] 🔄 정책 핫리로드 적용됨 ← ${resolved}`);
+        } catch (err) {
+          console.error(`[proxy] ⚠ 정책 리로드 실패 — 기존 정책 유지: ${(err as Error).message}`);
+        }
+      }, 200);
+    });
+    console.error(`[proxy] 정책 파일 감시 시작: ${resolved}`);
+  } catch (err) {
+    console.error(`[proxy] 정책 파일 감시 실패: ${(err as Error).message}`);
+  }
 }
 
 // [C 자리 스텁] 대시보드에서 사람이 승인하는 것을 흉내낸다.
@@ -134,6 +172,7 @@ async function main() {
   });
   console.error(`[proxy] 세션 시작  session=${sessionId}`);
   startDashboardBridge();
+  watchPolicyConfig(); // Phase 3: 설정 파일 변경 시 재시작 없이 정책 핫리로드
 
   // 다운스트림 서버 하나에 연결하는 헬퍼. HTTP(url) 또는 stdio(module 상대경로) 전송.
   // sampling capability를 신고해야 서버가 역방향 sampling을 쓸 수 있다(Phase 1에서 추가).
@@ -222,9 +261,7 @@ async function main() {
 
     const session = sessions.get(sessionId);
     if (session) session.toolCalls += 1;
-    console.error(
-      `[proxy] ⮕ ${agentName}  args=${JSON.stringify(args ?? {})}  session=${sessionId}`
-    );
+    console.error(`[proxy] ⮕ ${agentName}  args=${safeArgs(args)}  session=${sessionId}`);
 
     // ★ 엔진 판정·오염기록은 '속이름'으로 한다 — 레지스트리는 접두사 붙은 이름을 모른다.
     const ctx: ToolCallContext = {
