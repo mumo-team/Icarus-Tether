@@ -1,23 +1,4 @@
-import type { AuditLogEntry } from "@icarus-tether/types";
-
-// B의 policy-engine/src/hitl.ts가 내보내는 OverrideAuditEntry와 같은 모양.
-// 아직 shared/types에 없어서 여기 로컬로 정의 (실제 연동 시 공식 타입으로 교체).
-export interface HitlAuditEntry {
-  approvalId: string;
-  sessionId: string;
-  toolName: string;
-  // policy-engine hitl.ts의 OverrideAuditEntry.action과 동일하게 유지할 것.
-  action:
-    | "OFFERED"
-    | "REQUESTED"
-    | "APPROVED"
-    | "REJECTED"
-    | "OVERRIDE_USED"
-    | "SUPERSEDED"
-    | "OVERRIDE_STALE";
-  actor?: string;
-  timestamp: string;
-}
+import type { AuditLogEntry, OverrideAuditEntry } from "@icarus-tether/types";
 
 interface TimelineEntry {
   key: string;
@@ -28,7 +9,7 @@ interface TimelineEntry {
   source: "감사로그" | "HITL";
 }
 
-const HITL_ACTION_LABEL: Record<HitlAuditEntry["action"], string> = {
+const HITL_ACTION_LABEL: Record<OverrideAuditEntry["action"], string> = {
   OFFERED: "오버라이드 제안됨",
   REQUESTED: "승인 대기 등록",
   APPROVED: "승인됨",
@@ -40,7 +21,7 @@ const HITL_ACTION_LABEL: Record<HitlAuditEntry["action"], string> = {
 
 interface AuditTimelineProps {
   logs: AuditLogEntry[];
-  hitlLog: HitlAuditEntry[];
+  hitlLog: OverrideAuditEntry[];
 }
 
 export default function AuditTimeline({ logs, hitlLog }: AuditTimelineProps) {
@@ -49,7 +30,7 @@ export default function AuditTimeline({ logs, hitlLog }: AuditTimelineProps) {
     timestamp: l.timestamp,
     sessionId: l.sessionId,
     toolName: l.toolName,
-    label: l.decision === "ALLOWED" ? "통과" : "차단",
+    label: l.decision === "ALLOWED" ? "통과" : l.decision === "FORWARDED" ? "중계" : "차단",
     source: "감사로그",
   }));
 

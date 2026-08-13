@@ -7,11 +7,13 @@ interface MetricCardsProps {
 
 export default function MetricCards({ logs, approvals }: MetricCardsProps) {
   const blocked = logs.filter((l) => l.decision === "BLOCKED").length;
+  const forwarded = logs.filter((l) => l.decision === "FORWARDED").length;
   const pending = approvals.filter((a) => a.status === "PENDING").length;
 
   const cards = [
     { label: "전체 호출", value: logs.length },
     { label: "차단됨", value: blocked },
+    { label: "무검사 중계", value: forwarded },
     { label: "승인 대기", value: pending },
   ];
 
