@@ -73,6 +73,15 @@ snapshot 모델의 "생성 후 태그 불증가" 가정을 깨는 live 전파
   2. GrowthReExitSafety — **5스텝 반례가 정확히 live 고유 경로를 시연**:
      `생성{SENSITIVE} → 통과({S} 기록) → AddTag(UNTRUSTED) → 재통과(트라이펙타)`.
      guard가 있는 본 모델에서는 이 재통과가 비활성 = 차단된다.
+- ★ 의미론 시점 주의(F1과의 관계): 이 모델의 ReachSink guard는 **값-계보 태그의
+  트라이펙타**(`~(S∧U ∈ tags[n])`)로, F1의 노출이력(exposure) 축을 포함하지 않는다.
+  분담이 의도된 것이다 — exposure 축은 TaintLineage(수정판)·TaintDestructiveHITL이
+  증명하고, 이 모델은 live 전파 메커니즘(AddTag·cascadeDown·재통과) 축을 증명한다.
+  현행 코드의 차단식은 여기에 exposure 항을 **추가로 OR**한 것(차단을 늘리는
+  방향)이므로, 이 모델의 SinkSafety 결론은 현행 의미론에서도 a fortiori 유지된다.
+  (참고: `addNodeTags`는 의도적으로 sessionExposure를 켜지 않는다 — "계보만 오염,
+  세션 판정 불간섭"이 lineage-propagation.test.ts에 명시 테스트로 고정돼 있고,
+  현재 프로덕션 호출자는 없다. 값-계보에 실린 U는 unionTags로 판정에 잡힌다.)
 
 ## HITL 오버라이드 TOCTOU — 발견(1단계) → 수정 + 재증명(2단계) (TaintHITL)
 
@@ -249,7 +258,9 @@ TLC로 의미론을 확정한 뒤 이식했다. 더 약한 안(cascade 관통만
   이후 **cascadeDown 관통으로만 증가** (grow-only, 정화 불가 — fail-closed).
 - prune이 childIndex 엣지 유지, childless 판정은 "live 자식 없음" (연쇄 fixpoint 유지).
 - 판정 5곳이 묘비 태그 반영: ① evidence unionTags(shadow.ts) ② 안전 바닥
-  resolvedTaint ③ 생성 상속 ④ sessionHasLiveTag ⑤ frontier(후보+커버).
+  resolvedTaint ③ 생성 상속 ④ live 태그 보유자 집계(collectLiveTagHolders —
+  구 sessionHasLiveTag; F1 후 U축 유출 판정은 노출이력으로 이관되고, 이 집계는
+  파괴 게이트의 승인 지문·evidence용으로 남음) ⑤ frontier(후보+커버).
   안전 바닥과의 관계는 충돌이 아니라 정확화 — 바닥의 의도("오염 출처 미식별 =
   의심 = 차단")에서 재오염 묘비를 잡은 매칭은 "출처 식별"이므로 바닥을 건너뛴다.
   묘비 tags는 평소 비어 있어 기존 fail-open 3차 수정 동작은 그대로다.
