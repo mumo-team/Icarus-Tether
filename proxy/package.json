@@ -19,6 +19,7 @@
     "test:fuzz": "tsx test/fuzz-routing.ts",
     "test:fuzz-framing": "tsx test/fuzz-framing.ts",
     "bench": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/bench.ts",
+    "test:hotreload": "tsx test/test-hotreload.ts",
     "demo:killer": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client-killer.ts"
   },
   "dependencies": {
