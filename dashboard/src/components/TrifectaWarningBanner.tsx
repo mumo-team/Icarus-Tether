@@ -7,7 +7,7 @@ interface TrifectaWarningBannerProps {
 export default function TrifectaWarningBanner({ logs }: TrifectaWarningBannerProps) {
   // 트라이펙타 = 두 태그가 "모두" 겹친 차단. 태그 1개짜리 차단(예: 파괴 게이트의
   // UNTRUSTED_ORIGIN 단독)은 트라이펙타가 아니므로 이 배너로 오표시하지 않는다.
-  const latestTrifecta = logs.find(
+  const latestTrifecta = [...logs].reverse().find(
     (l) =>
       l.decision === "BLOCKED" &&
       l.matchedTags.includes(ToolRiskTag.SENSITIVE) &&

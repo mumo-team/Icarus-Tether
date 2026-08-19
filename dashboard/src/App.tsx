@@ -3,7 +3,6 @@ import type { AuditLogEntry, ApprovalRequest, PolicyDecision, UserAction, Output
 import MetricCards from "./components/MetricCards";
 import TrifectaWarningBanner from "./components/TrifectaWarningBanner";
 import ThreatFusionBanner from "./components/ThreatFusionBanner";
-import EventLogTimeline from "./components/EventLogTimeline";
 import ApprovalQueue from "./components/ApprovalQueue";
 import SanitizationCompareView from "./components/SanitizationCompareView";
 import TaintGraph, { type LineageNode } from "./components/TaintGraph";
@@ -317,7 +316,6 @@ export default function App() {
       <ThreatFusionBanner logs={logs} injectionChecks={injectionChecks} />
       <TrifectaWarningBanner logs={logs} />
       <MetricCards logs={logs} approvals={approvals} />
-      <EventLogTimeline logs={logs} />
       <AuditTimeline logs={logs} hitlLog={hitlLog} />
       <section
         style={{

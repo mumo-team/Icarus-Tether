@@ -1,7 +1,7 @@
 /**
  * 인젝션 탐지 — C 담당.
  *
- * ⚠️ 비신뢰 출처 콘텐츠(fetch_web_page·read_email 등 UNTRUSTED_ORIGIN 결과) 전용.
+ * 비신뢰 출처 콘텐츠(fetch_web_page·read_email 등 UNTRUSTED_ORIGIN 결과) 전용.
  * 사용자 직접 명령문에는 쓰지 말 것 — 오탐률이 크게 올라감(테스트로 확인됨).
  *
  * 역할은 "점수 산출"까지다. 최종 차단/허용 판정은 policy-engine(B) 소관 —
@@ -103,7 +103,7 @@ export async function checkInjection(
 
   const detection = await detectInjection(extractText(result));
   console.error(
-    `[injection] 🔍 ${toolName}  score=${detection.score.toFixed(4)}  isInjection=${detection.isInjection}`
+    `[injection] [검사] ${toolName}  score=${detection.score.toFixed(4)}  isInjection=${detection.isInjection}`
   );
   broadcastToDashboard({
     type: "injection_check",

@@ -1,4 +1,5 @@
 import type { AuditLogEntry, OverrideAuditEntry } from "@icarus-tether/types";
+type TimelineTone = "allowed" | "blocked" | "forwarded" | "hitl";
 
 interface TimelineEntry {
   key: string;
@@ -6,6 +7,7 @@ interface TimelineEntry {
   sessionId: string;
   toolName: string;
   label: string;
+  tone: TimelineTone;
   source: "감사로그" | "HITL";
 }
 
@@ -17,6 +19,14 @@ const HITL_ACTION_LABEL: Record<OverrideAuditEntry["action"], string> = {
   OVERRIDE_USED: "승인으로 1회 통과",
   SUPERSEDED: "제안 대체됨",
   OVERRIDE_STALE: "낡은 승인 무효화",
+};
+// 스토리보드 2단계 "로그 배지 변경" — 판정 종류를 색으로 즉시 구분한다.
+// HITL 전이는 판정이 아니라 사람의 개입이라 별도 색(주황)으로 분리한다.
+const TONE_STYLE: Record<TimelineTone, { bg: string; fg: string; border: string }> = {
+  allowed: { bg: "#e8f5e9", fg: "#1b5e20", border: "#a5d6a7" },
+  blocked: { bg: "#fdecea", fg: "#b71c1c", border: "#ef9a9a" },
+  forwarded: { bg: "#eceff1", fg: "#455a64", border: "#b0bec5" },
+  hitl: { bg: "#fff3e0", fg: "#e65100", border: "#ffb74d" },
 };
 
 interface AuditTimelineProps {
@@ -32,6 +42,7 @@ export default function AuditTimeline({ logs, hitlLog }: AuditTimelineProps) {
     toolName: l.toolName,
     label: l.decision === "ALLOWED" ? "통과" : l.decision === "FORWARDED" ? "중계" : "차단",
     source: "감사로그",
+    tone: l.decision === "ALLOWED" ? "allowed" : l.decision === "FORWARDED" ? "forwarded" : "blocked",
   }));
 
   const hitlEntries: TimelineEntry[] = hitlLog.map((h, i) => ({
@@ -41,6 +52,7 @@ export default function AuditTimeline({ logs, hitlLog }: AuditTimelineProps) {
     toolName: h.toolName,
     label: `${HITL_ACTION_LABEL[h.action] ?? h.action}${h.actor ? ` (${h.actor})` : ""}`,
     source: "HITL",
+    tone: "hitl",
   }));
 
   const combined = [...auditEntries, ...hitlEntries].sort(
@@ -54,12 +66,30 @@ export default function AuditTimeline({ logs, hitlLog }: AuditTimelineProps) {
         <p>기록 없음</p>
       ) : (
         <ul>
-          {combined.map((e) => (
-            <li key={e.key}>
-              <span style={{ fontFamily: "monospace", color: "#888" }}>[{e.source}]</span>{" "}
-              {new Date(e.timestamp).toLocaleTimeString()} — {e.toolName}: {e.label}
-            </li>
-          ))}
+          {combined.map((e) => {
+            const s = TONE_STYLE[e.tone];
+            return (
+              <li key={e.key} style={{ marginBottom: "4px" }}>
+                <span style={{ fontFamily: "monospace", color: "#888" }}>[{e.source}]</span>{" "}
+                {new Date(e.timestamp).toLocaleTimeString()} —{" "}
+                <span style={{ fontFamily: "monospace" }}>{e.toolName}</span>{" "}
+                <span
+                  style={{
+                    display: "inline-block",
+                    padding: "1px 8px",
+                    borderRadius: "10px",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    background: s.bg,
+                    color: s.fg,
+                    border: `1px solid ${s.border}`,
+                  }}
+                >
+                  {e.label}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>

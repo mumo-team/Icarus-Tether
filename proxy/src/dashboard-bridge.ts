@@ -93,7 +93,7 @@ function seedLastSignatureFromLog(): void {
 seedLastSignatureFromLog();
 
 // ── 감사 로그 무결성 검증 (책임 3의 "검사" 쪽) ────────────────────────
-// ⚠️ 이 검증 로직은 dashboard/server/src/verify-audit-log.ts(CLI)와 같은 규칙이다.
+// 이 검증 로직은 dashboard/server/src/verify-audit-log.ts(CLI)와 같은 규칙이다.
 // 워크스페이스가 달라 공유 import가 지저분해 의도적으로 중복했다 — 한쪽 규칙을
 // 바꾸면 반드시 다른 쪽도 함께 고칠 것. (signAuditEntry와 동일한 해시 규칙)
 export interface AuditIntegrityResult {
@@ -149,8 +149,8 @@ export function broadcastAuditIntegrity(): void {
   });
   console.error(
     result.ok
-      ? `[bridge] 감사로그 무결성 ✅ (${result.total}줄)`
-      : `[bridge] 감사로그 무결성 ⛔ 위반 ${result.problems.length}건`
+      ? `[bridge] 감사로그 무결성 [정상] (${result.total}줄)`
+      : `[bridge] 감사로그 무결성 [위반] ${result.problems.length}건`
   );
 }
 
