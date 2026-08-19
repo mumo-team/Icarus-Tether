@@ -73,6 +73,10 @@ U축을 세탁하고 무관한 민감값을 유출"하는 우회(헌팅 F1)를 �
 tools/call 외의 데이터 채널도 같은 판정에 태운다:
 - **역방향 유출**([`evaluateOutboundContent`](src/index.ts)): 서버가 요청한 sampling
   응답(LLM 출력이 서버로 되돌아감)을 tools/call 유출과 **동일 강도**로 판정.
+- **요청 방향 원격 sink**([`evaluateResourceRequest`](src/index.ts)): resources/read·
+  prompts/get **요청 자체**를 중계 전에 판정한다. 비신뢰 URI로 나가는 요청은
+  "읽기"라도 URI에 데이터를 실으면 유출구라 sink 강도로 검사한다. URI 신뢰
+  판정은 엔진 소유 — 설정(`trustedResourceUris`)의 접두사 규칙으로 결정한다.
 - **외부 유입 태깅**([`recordExternalContent`](src/index.ts)): resources/read·
   prompts/get로 들어온 외부 콘텐츠를 오염 파이프라인에 흘려 exposure를 켠다.
 
@@ -80,6 +84,12 @@ tools/call 외의 데이터 채널도 같은 판정에 태운다:
 
 판정 계산이 예외를 던지면 **통과가 아니라 차단**한다(`computeLineageDecision`·파괴
 게이트·역방향 판정 전부 try/catch로 차단 반환). 조용한 통과 경로가 없다.
+
+판정·기록 경로의 값 순회는 재귀 없는 명시 스택([`value-walk.ts`](src/value-walk.ts))
+으로 단일화돼 있다 — 순환참조·수만 depth 중첩 입력에도 예외가 나지 않아, 공격자
+유발 DoS·감사 공백이 성립하지 않는다. 깊이 상한·절단도 두지 않는다: 상한 D를 두면
+D+1 깊이에 민감값을 숨기는 우회("상한 밑에 숨기면 통과")가 어떤 D에서도 열리기
+때문이며, 절단 없는 선형 순회는 이 우회가 성립 자체가 안 된다.
 
 ### 2.7 형식검증으로 증명된 불변식 (`formal/`, TLC 전수 탐색)
 
