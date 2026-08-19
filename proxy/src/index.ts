@@ -287,7 +287,7 @@ async function main() {
       matchedTags: decision.matchedTags,
     });
 
-    broadcastDecision(sessionId, agentName, decision, ctx.timestamp);
+    broadcastDecision(sessionId, agentName, decision, ctx.timestamp, ctx.args);
     broadcastLineage(sessionId); // 판정 직후 현재 계보 스냅샷 방송 → TaintGraph 실시간 갱신
 
     if (!decision.allowed) {

@@ -15,6 +15,7 @@
  * 
  * [주의] 검증 규칙은 proxy/src/dashboard-bridge.ts의 verifyAuditChain과 동일하다.
  *    워크스페이스가 달라 의도적으로 중복 — 한쪽 규칙 변경 시 다른 쪽도 함께 고칠 것.
+ * 
  *
  * 실행: npm run verify -w dashboard/server            (기본: proxy/audit.log)
  *      npm run verify -w dashboard/server -- <경로>   (다른 파일 지정)
@@ -33,7 +34,7 @@ const DEFAULT_LOG_PATH = resolve(__dirname, "../../../proxy/audit.log");
 
 // 기록할 때(recordAudit)와 동일한 규칙: signature 자신만 빼고 나머지 전부 해시.
 // prevHash는 포함된다 — 그래야 "앞 줄이 무엇이었나"가 서명에 묶인다.
-function recomputeSignature(entry: AuditLogEntry): string {
+export function recomputeSignature(entry: AuditLogEntry): string {
   const { signature: _omit, ...unsigned } = entry;
   return createHash("sha256").update(JSON.stringify(unsigned)).digest("hex");
 }
@@ -44,7 +45,7 @@ interface Problem {
   detail: string;
 }
 
-function verify(logPath: string): { total: number; problems: Problem[] } {
+export function verify(logPath: string): { total: number; problems: Problem[] } {
   let raw: string;
   try {
     raw = readFileSync(logPath, "utf8");
@@ -101,19 +102,22 @@ function verify(logPath: string): { total: number; problems: Problem[] } {
   return { total: lines.length, problems };
 }
 
-// ── 실행 ──
-const logPath = process.argv[2] ? resolve(process.argv[2]) : DEFAULT_LOG_PATH;
-console.error(`[verify] 검사 대상: ${logPath}\n`);
+// ── 실행 (CLI로 직접 실행했을 때만) ──
+// 가드가 없으면 테스트가 이 모듈을 import하는 순간 process.exit가 불려 테스트가 죽는다.
+if (resolve(process.argv[1] ?? "") === resolve(fileURLToPath(import.meta.url))) {
+  const logPath = process.argv[2] ? resolve(process.argv[2]) : DEFAULT_LOG_PATH;
+  console.error(`[verify] 검사 대상: ${logPath}\n`);
 
-const { total, problems } = verify(logPath);
+  const { total, problems } = verify(logPath);
 
-if (problems.length === 0) {
-  console.error(`[정상] 무결 — ${total}줄 전부 서명·체인 정상.`);
-  process.exit(0);
-} else {
-  console.error(`[위반] 무결성 위반 ${problems.length}건 (전체 ${total}줄):\n`);
-  for (const p of problems) {
-    console.error(`  ${p.line}번째 줄 [${p.kind}] ${p.detail}`);
+  if (problems.length === 0) {
+    console.error(`[정상] 무결 — ${total}줄 전부 서명·체인 정상.`);
+    process.exit(0);
+  } else {
+    console.error(`[위반] 무결성 위반 ${problems.length}건 (전체 ${total}줄):\n`);
+    for (const p of problems) {
+      console.error(`  ${p.line}번째 줄 [${p.kind}] ${p.detail}`);
+    }
+    process.exit(1);
   }
-  process.exit(1);
 }

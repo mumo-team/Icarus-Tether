@@ -1,4 +1,7 @@
+import { useRef } from "react";
 import { maskPii } from "../lib/pii/mask";
+import type { AuditLogEntry } from "@icarus-tether/types";
+import type { LineageNode } from "./TaintGraph";
 
 interface SanitizationState {
   method: string;
@@ -9,22 +12,90 @@ interface SanitizationState {
   residualSensitiveData?: boolean;
 }
 
-// payload 원본 값은 엔진 vault에만 있어 세션에서 못 빼온다.
-// 대신 maskPii(대시보드의 정규식 마스킹)를 실제로 돌려, 마스킹이 어떻게
-// 동작하는지 그 자리에서 보여준다 — 값은 예시지만 변환은 진짜다.
-const SAMPLE_RAW = `고객 홍길동, 이메일 hong@example.com, 연락처 010-1234-5678`;
-const SAMPLE_MASKED = maskPii(SAMPLE_RAW);
+interface FlowSource {
+  toolName: string;
+  tags: string[];
+}
+
+// 원본 payload는 엔진 보관소에만 있고, 브리지 전송경계 화이트리스트가 원본 값 방송을
+// 막는다(의도된 설계). 그래서 아래 값 상자는 마스킹 동작을 보여주는 예시이고,
+// 도구명·오염 태그·정화 결과는 이 세션의 실제 데이터다. 어느 쪽인지 화면에 밝힌다.
+const MASK_EXAMPLE_RAW = `고객 홍길동, 이메일 hong@example.com, 연락처 010-1234-5678`;
+const MASK_EXAMPLE_MASKED = maskPii(MASK_EXAMPLE_RAW);
+
+// 아직 아무 판정도 안 온 초기 화면용. 실데이터가 들어오면 즉시 대체된다.
+const EXAMPLE_SOURCES: FlowSource[] = [
+  { toolName: "fetch_web_page", tags: ["UNTRUSTED_ORIGIN"] },
+  { toolName: "query_customer_db", tags: ["SENSITIVE"] },
+];
+const EXAMPLE_SINK = "send_email";
+
+/**
+ * 이 세션에서 실제로 무엇이 오염을 날랐고 어디로 나가려 했는지 뽑는다.
+ * 유출 시도 = 가장 최근 차단된 호출, 오염 출처 = 계보에서 태그가 남아 있는 노드.
+ * 같은 도구가 여러 노드로 나뉘어도 화면에선 한 줄로 합친다.
+ */
+function deriveFlow(
+  logs: AuditLogEntry[],
+  lineage: LineageNode[]
+): { sinkTool: string; sources: FlowSource[]; real: boolean; at: string | undefined } {
+  const lastBlocked = [...logs].reverse().find((l) => l.decision === "BLOCKED");
+  const sinkTool = lastBlocked?.toolName;
+
+  const byTool = new Map<string, Set<string>>();
+  for (const n of lineage) {
+    if (n.tags.length === 0) continue; // 정화됐거나 중립인 노드는 이 이야기에 필요 없다
+    if (n.toolName === sinkTool) continue; // 싱크 자신은 아래에 따로 그린다
+    const set = byTool.get(n.toolName) ?? new Set<string>();
+    n.tags.forEach((t) => set.add(t));
+    byTool.set(n.toolName, set);
+  }
+  const sources: FlowSource[] = [...byTool].map(([toolName, tags]) => ({ toolName, tags: [...tags] }));
+
+  if (!sinkTool || sources.length === 0) {
+    return { sinkTool: EXAMPLE_SINK, sources: EXAMPLE_SOURCES, real: false, at: undefined };
+  }
+  return { sinkTool, sources, real: true, at: lastBlocked?.timestamp };
+}
+
+function sourceTone(tags: string[]): NodeTone {
+  if (tags.includes("SENSITIVE")) return "danger";
+  if (tags.includes("UNTRUSTED_ORIGIN")) return "untrusted";
+  return "safe";
+}
 
 export default function SanitizationCompareView({
   sanitization,
+  logs,
+  lineage,
+  blockedArgs,
 }: {
   sanitization: SanitizationState | null;
+  logs: AuditLogEntry[];
+  lineage: LineageNode[];
+  blockedArgs: string | null;
 }) {
   const live = sanitization; // WS로 받은 실제 정화 결과 (없으면 아직 정화 안 함)
+  // '정화 없이' 카드는 정화 직전 흐름을 보여줘야 한다. 최신 계보를 그대로 쓰면
+  // 정화로 태그가 풀린 노드가 좌우 양쪽에서 같이 사라져, 왼쪽이 오른쪽을 따라가 버린다.
+  // 그래서 정화가 오기 전까지만 갱신하고, 새 차단이 오면 그 시점 상태로 다시 잡는다.
+  const computed = deriveFlow(logs, lineage);
+  const frozen = useRef(computed);
+  if (!live || frozen.current.at !== computed.at) frozen.current = computed;
+  const flow = frozen.current;
+  // 차단된 호출의 실제 인자가 오면 그것을 쓰고, 아직 없으면 마스킹 동작 예시를 보여준다.
+  const payloadReal = blockedArgs !== null;
+  const rawOut = blockedArgs ?? MASK_EXAMPLE_RAW;
+  const maskedOut = blockedArgs ? maskPii(blockedArgs) : MASK_EXAMPLE_MASKED;
 
   return (
     <section>
       <h2>정화 전/후 비교</h2>
+      <p style={{ fontSize: "12px", color: flow.real ? "#2e7d32" : "#888", margin: "0 0 8px" }}>
+        {flow.real
+          ? "[실데이터] 이 세션에서 실제로 기록된 도구와 오염 태그입니다."
+          : "[예시] 아직 차단된 흐름이 없습니다 — 데모를 실행하면 실제 흐름으로 바뀝니다."}
+      </p>
       {live ? (
         <p
           style={{
@@ -62,11 +133,16 @@ export default function SanitizationCompareView({
           }}
         >
           <Pill text={`정화 없이${!live ? " · 현재" : ""}`} tone="danger" />
-          <FlowNode title="fetch_web_page" sub="UNTRUSTED_ORIGIN" tone="untrusted" />
-          <FlowNode title="query_customer_db" sub="SENSITIVE" tone="danger" />
+          {flow.sources.map((s) => (
+            <FlowNode key={`before-${s.toolName}`} title={s.toolName} sub={s.tags.join("+")} tone={sourceTone(s.tags)} />
+          ))}
           <Arrow />
-          <FlowNode title="send_email" sub="[차단]" tone="blocked" />
-          <PayloadBox label="나가려던 데이터" value={SAMPLE_RAW} tone="danger" />
+          <FlowNode title={flow.sinkTool} sub="[차단]" tone="blocked" />
+          <PayloadBox
+            label={payloadReal ? "나가려던 실제 데이터 (차단된 호출의 인자)" : "마스킹 예시 — 입력"}
+            value={rawOut}
+            tone="danger"
+          />
         </div>
 
         {/* 정화 후 (통과) */}
@@ -81,13 +157,33 @@ export default function SanitizationCompareView({
           }}
         >
           <Pill text={`정화 후${live ? ` · ${live.method}` : ""}`} tone="safe" />
-          <FlowNode title="fetch_web_page" sub="UNTRUSTED_ORIGIN" tone="untrusted" />
-          <FlowNode title="query_customer_db" sub="SENSITIVE 해제됨" tone="safe" />
+          {flow.sources.map((s) => {
+            // 정화가 실제로 일어났으면 남은 태그만 보여준다 — 부분 정화를 숨기지 않는다.
+            const remaining = live ? s.tags.filter((t) => live.resultTags.includes(t)) : [];
+            return (
+              <FlowNode
+                key={`after-${s.toolName}`}
+                title={s.toolName}
+                sub={remaining.length ? `${remaining.join("+")} 잔존` : "해제됨"}
+                tone={remaining.length ? sourceTone(remaining) : "safe"}
+              />
+            );
+          })}
           <Arrow />
-          <FlowNode title="send_email" sub="[통과]" tone="allowed" />
-          <PayloadBox label="정화되어 나간 데이터 (maskPii 실제 적용)" value={SAMPLE_MASKED} tone="safe" />
+          <FlowNode title={flow.sinkTool} sub="[통과]" tone="allowed" />
+          <PayloadBox
+            label={payloadReal ? "maskPii를 실제로 적용한 결과" : "마스킹 예시 — maskPii 적용 결과"}
+            value={maskedOut}
+            tone="safe"
+          />
         </div>
       </div>
+
+      <p style={{ fontSize: "11px", color: "#999", marginTop: "10px", lineHeight: 1.6 }}>
+        {payloadReal
+          ? "값 상자는 실제로 차단된 호출의 인자입니다. 통과한 호출의 인자는 대시보드로 내보내지 않습니다 — 운영자가 확인해야 하는 것은 막힌 쪽이고, 그만큼 노출면을 좁힙니다."
+          : "아래 값 상자는 마스킹이 어떻게 동작하는지 보여주는 예시입니다. 차단이 발생하면 실제로 나가려던 인자로 바뀝니다."}
+      </p>
     </section>
   );
 }

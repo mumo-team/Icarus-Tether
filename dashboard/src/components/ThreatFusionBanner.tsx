@@ -28,7 +28,7 @@ export default function ThreatFusionBanner({
     const count = [signalLineage, signalTrifecta, signalInjection].filter(Boolean).length;
     const level = count >= 3 ? "높음" : count >= 1 ? "주의" : "정상";
 
-    return { tags, lastInjection, signalLineage, signalTrifecta, signalInjection, level };
+    return { tags, toolName: lastBlocked?.toolName, lastInjection, signalLineage, signalTrifecta, signalInjection, level };
   }, [logs, injectionChecks]);
 
   const color =
@@ -63,7 +63,7 @@ export default function ThreatFusionBanner({
         <SignalRow
           on={fusion.signalTrifecta}
           label="트라이펙타 규칙"
-          detail={fusion.signalTrifecta ? "성립 (민감+비신뢰+외부유출)" : "미성립"}
+          detail={fusion.signalTrifecta ? `성립 — ${fusion.toolName} 차단 (민감+비신뢰+외부유출)` : "미성립"}
         />
         <SignalRow
           on={fusion.signalInjection}
