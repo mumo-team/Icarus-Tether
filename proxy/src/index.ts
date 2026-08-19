@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readFileSync, watch } from "node:fs";
-import { startDashboardBridge, stopDashboardBridge, broadcastDecision, recordAudit, broadcastAuditIntegrity, broadcastLineage } from "./dashboard-bridge.js";
+import { startDashboardBridge, stopDashboardBridge, broadcastDecision, broadcastForwarded, recordAudit, broadcastAuditIntegrity, broadcastLineage } from "./dashboard-bridge.js";
 import { checkInjection } from "./injection.js";
 // 순수 라우팅·분류 헬퍼 (Phase 4에서 퍼징 가능하도록 분리).
 // (URI 신뢰 판정은 C-7로 엔진에 이관 — isResourceTrusted 임시 휴리스틱 제거)
@@ -101,12 +101,17 @@ function auditForward(sessionId: string, method: string, reverse = false): void 
   const risk = classifyMethod(method); // 분류는 항상 순수 메서드명으로 (↩ 방향표시 제거된 값)
   const label = reverse ? `↩${method}` : method; // 로그·기록엔 방향을 남긴다
   logForwarded(sessionId, label, risk);
+  const timestamp = new Date().toISOString();
   recordAudit({
     sessionId,
     toolName: label, // 'resources/read'처럼 '/'가 있어 실제 도구명과 구분된다
     decision: "FORWARDED", // 검사 없이 중계됨 — 통과(ALLOWED)와 구분
     matchedTags: [],
   });
+  // 대시보드 라이브 반영 — 파일(audit.log)에만 남기면 화면의 '무검사 중계' 카드가
+  // 영원히 0으로 남는다. 브리지가 broadcastForwarded를 제공하는데 호출부가 없어
+  // 비어 있던 배선을 잇는다 (기록=recordAudit, 표시=broadcastForwarded 한 쌍).
+  broadcastForwarded(sessionId, label, timestamp);
 }
 
 // 로그용 안전 직렬화. JSON.stringify는 순환참조(TypeError)·과대 깊이(RangeError)에서
