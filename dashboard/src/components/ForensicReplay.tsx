@@ -34,8 +34,9 @@ export default function ForensicReplay({ snapshots }: { snapshots: LineageNode[]
   const isLive = index === last && !pinned.current;
 
   return (
-    <section>
-      <h2>오염 전파 포렌식 리플레이</h2>
+    // 앵커는 모달의 "문제가 된 데이터 출처 확인하기"가 scrollIntoView로 쓴다.
+    <section id="taint-graph-panel">
+      <h2>오염 전파 — 실시간 · 되감기</h2>
       {snapshots.length === 0 ? (
         <p style={{ color: "#888", fontSize: "14px" }}>
           데모를 실행하면 오염이 전파되는 과정을 단계별로 되감아 볼 수 있습니다.

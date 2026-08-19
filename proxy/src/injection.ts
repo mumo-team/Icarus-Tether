@@ -25,12 +25,30 @@ const MAX_INPUT_CHARS = 2000;
 
 type ClassifierResult = { label: string; score: number };
 
+// 진행률 콜백은 청크마다 불린다. 그대로 찍으면 로그가 수천 줄이 되므로 10%마다만 남긴다.
+const progressShown = new Map<string, number>();
+
 let classifierPromise: ReturnType<typeof pipeline> | null = null;
 function getClassifier() {
   if (!classifierPromise) {
     classifierPromise = pipeline(
       "text-classification",
-      "protectai/deberta-v3-base-prompt-injection-v2"
+      "protectai/deberta-v3-base-prompt-injection-v2",
+      {
+        // 첫 실행에선 모델(약 700MB)을 내려받는다. 아무 표시가 없으면 데모가 멈춘 것처럼
+        // 보여 사용자가 중간에 끊어버린다. 어디까지 받았는지 stderr로 알린다.
+        progress_callback: (info) => {
+          if (info.status === "ready") {
+            console.error("[injection] 모델 준비 완료");
+            return;
+          }
+          if (info.status !== "progress") return;
+          const bucket = Math.floor(info.progress / 10);
+          if (progressShown.get(info.file) === bucket) return;
+          progressShown.set(info.file, bucket);
+          console.error(`[injection] 모델 내려받는 중 ${info.file} ${bucket * 10}%`);
+        },
+      }
     );
   }
   return classifierPromise;

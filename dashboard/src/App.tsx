@@ -1,11 +1,10 @@
 import { useState,useEffect, useRef } from "react";
 import type { AuditLogEntry, ApprovalRequest, PolicyDecision, UserAction, OutputScanEvent, OverrideAuditEntry } from "@icarus-tether/types";
 import MetricCards from "./components/MetricCards";
-import TrifectaWarningBanner from "./components/TrifectaWarningBanner";
 import ThreatFusionBanner from "./components/ThreatFusionBanner";
 import ApprovalQueue from "./components/ApprovalQueue";
 import SanitizationCompareView from "./components/SanitizationCompareView";
-import TaintGraph, { type LineageNode } from "./components/TaintGraph";
+import type { LineageNode } from "./components/TaintGraph";
 import ForensicReplay from "./components/ForensicReplay";
 import TrifectaApprovalModal from "./components/TrifectaApprovalModal";
 import AuditTimeline from "./components/AuditTimeline";
@@ -315,14 +314,30 @@ export default function App() {
           [수신오류] 이벤트 수신 오류 {recvErrors}건 — 일부 프레임을 건너뛰었습니다
         </p>
       )}
-      <section id="taint-graph-panel">
-        <h2>실시간 오염 계보</h2>
-        <TaintGraph lineage={snapshots[snapshots.length - 1] ?? []} />
-      </section>
-      <ThreatFusionBanner logs={logs} injectionChecks={injectionChecks} />
-      <TrifectaWarningBanner logs={logs} />
+      <div style={{ margin: "20px 0 4px", fontSize: "13px", color: "#888" }}>지금 상태</div>
       <MetricCards logs={logs} approvals={approvals} />
-      <AuditTimeline logs={logs} hitlLog={hitlLog} />
+      <ThreatFusionBanner logs={logs} injectionChecks={injectionChecks} />
+      <ApprovalQueue approvals={approvals} onDecide={handleDecide} awaiting={awaiting} />
+
+      {/* 왜 막았나 — 계보 그래프는 리플레이 안에 하나만 둔다. 예전엔 같은 그래프를
+          위(실시간)와 아래(리플레이)에 두 번 그렸는데, 리플레이가 새 스냅샷을 자동으로
+          따라가므로 둘이 같은 그림이었다. */}
+      <div style={{ margin: "28px 0 4px", fontSize: "13px", color: "#888" }}>왜 막았나</div>
+      <ForensicReplay snapshots={snapshots} />
+      <SanitizationCompareView
+        sanitization={sanitization}
+        logs={logs}
+        lineage={snapshots[snapshots.length - 1] ?? []}
+        blockedArgs={blockedArgs}
+      />
+
+      {/* 기록 — 사후 조회용이라 접어 둔다. 시연 중엔 펼칠 일이 거의 없고,
+          접어야 첫 화면이 한 스크린에 들어온다. */}
+      <details style={{ marginTop: "28px" }}>
+        <summary style={{ cursor: "pointer", fontSize: "14px", color: "#555", padding: "8px 0" }}>
+          기록 — 감사로그 타임라인 · 무결성 · 인젝션 탐지 · 출력 스캔
+        </summary>
+        <AuditTimeline logs={logs} hitlLog={hitlLog} />
       <section
         style={{
           margin: "12px 0",
@@ -367,15 +382,8 @@ export default function App() {
           </ul>
         )}
       </section>
-      <OutputScanPanel scans={outputScans} />
-      <ApprovalQueue approvals={approvals} onDecide={handleDecide} awaiting={awaiting} />
-      <SanitizationCompareView
-        sanitization={sanitization}
-        logs={logs}
-        lineage={snapshots[snapshots.length - 1] ?? []}
-        blockedArgs={blockedArgs}
-      />
-      <ForensicReplay snapshots={snapshots} />
+        <OutputScanPanel scans={outputScans} />
+      </details>
       {modalDecision && (
         <TrifectaApprovalModal
           decision={modalDecision}
