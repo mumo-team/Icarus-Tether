@@ -79,6 +79,8 @@ export default function App() {
   const [outputScans, setOutputScans] = useState<OutputScanEvent[]>([]);
   const [awaiting, setAwaiting] = useState<Record<string, "awaiting" | "timeout">>({});
   const [recvErrors, setRecvErrors] = useState(0);
+  // 차단된 호출이 실제로 내보내려던 인자. 정화 전/후 비교의 좌측 상자 원본이 된다.
+  const [blockedArgs, setBlockedArgs] = useState<string | null>(null);
     useEffect(() => {
     let disposed = false; // 언마운트 후 재연결 타이머가 되살아나는 것 방지
     let retryTimer: number | undefined;
@@ -114,6 +116,10 @@ export default function App() {
             timestamp: data.timestamp,
           };
           setLogs((prev) => pushCapped(prev, entry, MAX_EVENTS));
+          // 차단 건에만 실려 온다(브리지가 통과 건은 안 싣는다).
+          if (data.allowed === false && typeof data.blockedArgs === "string") {
+            setBlockedArgs(data.blockedArgs);
+          }
           if (data.outputScan) setOutputScans((prev) => pushCapped(prev, data.outputScan, MAX_EVENTS));
           // 승인 가능한 차단이 오면 모달을 자동으로 띄운다 — 발표 3단계 "와우 포인트".
           if (data.allowed === false && data.canOverride && data.approvalId) {
@@ -363,7 +369,12 @@ export default function App() {
       </section>
       <OutputScanPanel scans={outputScans} />
       <ApprovalQueue approvals={approvals} onDecide={handleDecide} awaiting={awaiting} />
-      <SanitizationCompareView sanitization={sanitization} />
+      <SanitizationCompareView
+        sanitization={sanitization}
+        logs={logs}
+        lineage={snapshots[snapshots.length - 1] ?? []}
+        blockedArgs={blockedArgs}
+      />
       <ForensicReplay snapshots={snapshots} />
       {modalDecision && (
         <TrifectaApprovalModal

@@ -158,7 +158,7 @@ let wss: WebSocketServer | null = null;
 const clients = new Set<WebSocket>();
 
 const ALLOWED_FIELDS: Record<string, readonly string[]> = {
-  decision: ["type", "sessionId", "toolName", "allowed", "decision", "reason", "matchedTags", "explanation", "canOverride", "approvalId", "outputScan", "timestamp"],
+  decision: ["type", "sessionId", "toolName", "allowed", "decision", "reason", "matchedTags", "explanation", "canOverride", "approvalId", "outputScan", "blockedArgs", "timestamp"],
   lineage: ["type", "sessionId", "nodes", "timestamp"],
   hitl_audit: ["type", "sessionId", "entries", "timestamp"],
   audit_integrity: ["type", "ok", "total", "problems", "timestamp"],
@@ -232,11 +232,32 @@ export function broadcastToDashboard(event: Record<string, unknown>): void {
  * canOverride는 hitlPolicy가 off면 엔진이 아예 안 채우므로 여기서 false로 고정한다 —
  * 대시보드가 "필드 없음"과 "false"를 구분하지 않아도 되게.
  */
+// 차단된 호출이 '무엇을 내보내려 했는지'를 대시보드가 실제 값으로 보여주기 위한 것.
+// 통과한 호출은 싣지 않는다 — 운영자가 확인해야 하는 건 막힌 쪽이고, 그만큼 노출면이 좁아진다.
+// 길이 상한을 두는 이유: 도구 인자에 문서 전문이 통째로 들어올 수 있어, 그대로 실으면
+// 프레임이 비대해지고 화면에서도 못 읽는다.
+const MAX_BLOCKED_ARGS_CHARS = 1200;
+
+function summarizeBlockedArgs(args: unknown): string | undefined {
+  if (args === undefined || args === null) return undefined;
+  let text: string;
+  try {
+    text = JSON.stringify(args);
+  } catch {
+    return undefined; // 순환참조 등 — 조용히 생략한다(방송 자체를 막지는 않는다)
+  }
+  if (!text || text === "{}") return undefined;
+  return text.length > MAX_BLOCKED_ARGS_CHARS
+    ? `${text.slice(0, MAX_BLOCKED_ARGS_CHARS)}…(생략)`
+    : text;
+}
+
 export function broadcastDecision(
   sessionId: string,
   toolName: string,
   decision: PolicyDecision,
-  timestamp: string
+  timestamp: string,
+  args?: unknown
 ): void {
   broadcastToDashboard({
     type: "decision",
@@ -249,6 +270,8 @@ export function broadcastDecision(
     canOverride: decision.canOverride ?? false,
     approvalId: decision.approvalId,
     outputScan: decision.outputScan,
+    // 차단된 경우에만 실제 인자를 싣는다 — 통과 건의 인자는 대시보드로 나가지 않는다.
+    blockedArgs: decision.allowed ? undefined : summarizeBlockedArgs(args),
     timestamp,
   });
   // 이 판정 과정에서 생긴 HITL 전이(OFFERED 등)를 함께 방송 — index.ts 무수정.
