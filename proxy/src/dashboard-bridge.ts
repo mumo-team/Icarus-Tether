@@ -363,6 +363,7 @@ function handleDashboardMessage(text: string): void {
       originalTags: result.originalTags,
       resultTags: result.resultTags,
       ok,
+      // 부분 정화 UX용 보고 필드(엔진이 반환) — 대시보드에 전달
       maskedCount: result.maskedCount,
       residualSensitiveData: result.residualSensitiveData,
       timestamp: new Date().toISOString(),
