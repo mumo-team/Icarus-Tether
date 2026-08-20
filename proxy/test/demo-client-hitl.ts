@@ -41,7 +41,9 @@ async function main() {
 
   // proxy의 대시보드 브리지에 붙어 승인 완료 신호를 듣는다.
   // 브라우저와 같은 방송을 받는다 — 대시보드 클라이언트가 하나 더 붙는 셈이다.
-  const bridge = new WebSocket("ws://localhost:7331");
+  // 브리지가 127.0.0.1에만 리슨하므로 주소를 맞춘다(Windows localhost → ::1 이슈 회피).
+  // Node 클라이언트는 Origin 헤더를 안 보내며, 브리지의 verifyClient가 이를 통과시킨다.
+  const bridge = new WebSocket("ws://127.0.0.1:7331");
   await new Promise<void>((res, rej) => {
     bridge.once("open", () => res());
     bridge.once("error", rej);

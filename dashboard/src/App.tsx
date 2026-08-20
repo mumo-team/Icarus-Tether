@@ -86,7 +86,9 @@ export default function App() {
     let ws: WebSocket | null = null;
 
     function connect() {
-      ws = new WebSocket("ws://localhost:7331");
+      // 브리지가 127.0.0.1에만 리슨하므로 주소를 맞춘다 — Windows에서 localhost가
+      // ::1(IPv6)로 먼저 풀리면 연결이 지연되거나 실패할 수 있다.
+      ws = new WebSocket("ws://127.0.0.1:7331");
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -264,19 +266,25 @@ export default function App() {
    function handleActionClick(action: UserAction) {
     const ws = wsRef.current;
     const wsOpen = ws && ws.readyState === WebSocket.OPEN;
-    if (action.kind === "REQUEST_APPROVAL" && modalDecision?.approvalId) {
-      if (wsOpen) {
+    if (action.kind === "REQUEST_APPROVAL" && modalDecision) {
+      // 규약 4-4: REQUEST_APPROVAL 액션의 detail이 approvalId다. 한 결정에 승인 액션이
+      // 둘 이상 실릴 수 있어, decision 단위 값보다 액션 단위 값이 정확하다.
+      // (detail이 없는 경우에만 decision 쪽으로 되돌아간다.)
+      const approvalId = action.detail ?? modalDecision.approvalId;
+      if (!approvalId) {
+        console.error("[대시보드] 승인 id가 없어 승인을 보낼 수 없습니다");
+      } else if (wsOpen) {
         // 승인 상태는 proxy 프로세스의 엔진 메모리에 있어 브라우저가 직접 못 부른다.
         // 웹소켓으로 보내면 proxy가 같은 프로세스에서 resolveApproval을 대신 호출한다.
         ws.send(
           JSON.stringify({
             type: "approve",
             sessionId: modalDecision.sessionId,
-            approvalId: modalDecision.approvalId,
+            approvalId,
             resolvedBy: "dashboard-reviewer",
           })
         );
-        console.log("[대시보드] 승인 전송:", modalDecision.approvalId);
+        console.log("[대시보드] 승인 전송:", approvalId);
       } else {
         console.error("[대시보드] proxy 연결이 없어 승인을 보낼 수 없습니다");
       }
@@ -350,7 +358,7 @@ export default function App() {
       >
         <strong>[무결성] 감사 로그</strong>{" "}
         {!auditIntegrity ? (
-          <span style={{ color: "#616161" }}>세션 종료 시 검증됩니다</span>
+          <span style={{ color: "#616161" }}>기록이 쌓이면 매 판정마다 검증됩니다</span>
         ) : auditIntegrity.ok ? (
           <span style={{ color: "#2e7d32" }}>
             [정상] 무결 — {auditIntegrity.total}줄 전부 서명·체인 정상

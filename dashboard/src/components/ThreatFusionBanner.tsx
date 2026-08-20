@@ -5,6 +5,8 @@ import { ToolRiskTag, type AuditLogEntry } from "@icarus-tether/types";
 interface InjectionSignal {
   isInjection: boolean;
   score: number;
+  /** 모델 호출이 정상 종료했는지. false면 isInjection은 fail-safe 기본값이라 신뢰 불가 */
+  evaluated: boolean;
 }
 
 // 여러 독립 신호를 하나의 위협 판정으로 종합한다.
@@ -23,7 +25,9 @@ export default function ThreatFusionBanner({
 
     const signalLineage = tags.length > 0;
     const signalTrifecta = tags.includes(ToolRiskTag.SENSITIVE) && tags.includes(ToolRiskTag.UNTRUSTED_ORIGIN);
-    const signalInjection = lastInjection?.isInjection ?? false;
+    // evaluated=false는 모델 로드/추론 실패 시의 fail-safe 반환값(isInjection:true, score:1)이다.
+    // 그대로 켜면 '모델 실패'가 화면에서 '탐지 성공'으로 둔갑한다 — 평가된 건만 신호로 센다.
+    const signalInjection = (lastInjection?.evaluated ?? false) && lastInjection.isInjection;
 
     const count = [signalLineage, signalTrifecta, signalInjection].filter(Boolean).length;
     const level = count >= 3 ? "높음" : count >= 1 ? "주의" : "정상";
@@ -67,11 +71,14 @@ export default function ThreatFusionBanner({
         />
         <SignalRow
           on={fusion.signalInjection}
+          unknown={!!fusion.lastInjection && !fusion.lastInjection.evaluated}
           label="ML 인젝션 탐지"
           detail={
-            fusion.lastInjection
-              ? `score=${fusion.lastInjection.score.toFixed(4)}`
-              : "검사 이력 없음"
+            !fusion.lastInjection
+              ? "검사 이력 없음"
+              : !fusion.lastInjection.evaluated
+              ? "모델 로드/추론 실패로 판정 불가 — 종합 판정에서 제외"
+              : `score=${fusion.lastInjection.score.toFixed(4)}`
           }
         />
       </ul>
@@ -79,10 +86,23 @@ export default function ThreatFusionBanner({
   );
 }
 
-function SignalRow({ on, label, detail }: { on: boolean; label: string; detail: string }) {
+// unknown=true는 "신호를 얻지 못함" — 신호가 없는 '정상'과 반드시 구분한다.
+// 판정 불가를 '정상'으로 적으면 화면이 근거 없는 안심을 준다.
+function SignalRow({
+  on,
+  label,
+  detail,
+  unknown = false,
+}: {
+  on: boolean;
+  label: string;
+  detail: string;
+  unknown?: boolean;
+}) {
+  const mark = unknown ? "판정불가" : on ? "감지" : "정상";
   return (
-    <li style={{ color: on ? "#b71c1c" : "#888" }}>
-      <span style={{ fontWeight: 500 }}>[{on ? "감지" : "정상"}]</span> {label} — {detail}
+    <li style={{ color: unknown ? "#e65100" : on ? "#b71c1c" : "#888" }}>
+      <span style={{ fontWeight: 500 }}>[{mark}]</span> {label} — {detail}
     </li>
   );
 }

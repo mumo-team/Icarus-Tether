@@ -20,6 +20,11 @@ import { requestApproval, resolveApproval, attemptSanitization, getSessionLineag
 import { SanitizationMethod, type PolicyDecision, type AuditLogEntry, type ToolRiskTag } from "@icarus-tether/types";
 
 const WS_PORT = 7331;
+const WS_HOST = "127.0.0.1";
+const ALLOWED_ORIGINS = new Set([
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+]);
 
 
 // ── 감사 로그: 해시 체인 (C 담당, 책임 3) ─────────────────────────────
@@ -395,10 +400,26 @@ function handleDashboardMessage(text: string): void {
   }
 }
 
-/** 웹소켓 서버 기동. 포트가 물려 있으면 원인을 분명히 알리고 죽는다. */
+/**
+ * 웹소켓 서버 기동. 루프백에만 리슨하고 브라우저 Origin을 화이트리스트로 제한한다.
+ * 포트가 물려 있으면 원인을 알리되 프로세스는 죽이지 않는다 — 대시보드 없이도
+ * 판정·차단·감사로그는 계속 동작해야 한다.
+ */
 export function startDashboardBridge(): void {
   if (wss) return;
-  const server = new WebSocketServer({ port: WS_PORT });
+  const server = new WebSocketServer({
+    port: WS_PORT,
+    host: WS_HOST,
+    // @types/ws의 verifyClient는 sync|async 유니온이라 문맥 추론이 안 된다(TS7031) →
+    // 파라미터를 명시한다. 선언은 origin: string이지만 Origin 헤더가 없는 클라이언트에선
+    // 런타임에 undefined가 들어오므로 !origin으로 함께 받는다.
+    verifyClient: ({ origin }: { origin: string }) => {
+      if (!origin) return true;            // Node 클라이언트(demo:hitl)는 Origin 없음
+      if (ALLOWED_ORIGINS.has(origin)) return true;
+      console.error(`[bridge] [경고] 허용되지 않은 Origin 연결 거부: ${origin}`);
+      return false;
+    },
+  });
   wss = server;
 
   // 핸들러가 없으면 EADDRINUSE가 unhandled error로 터져 스택만 잔뜩 나온다.
@@ -411,7 +432,10 @@ export function startDashboardBridge(): void {
     } else {
       console.error("[bridge] 웹소켓 서버 오류:", err);
     }
-    process.exit(1);
+    // 대시보드는 관측 계층이다. 여기서 프로세스를 죽이면 집행 계층(판정·차단·감사로그)까지
+    // 같이 죽어, 사용자가 프록시를 설정에서 빼고 실제 서버에 직접 붙는 진짜 우회를 유발한다.
+    // clients가 빈 채로 남으므로 broadcastToDashboard는 무해한 no-op이 된다.
+    wss = null;
   });
 
   server.on("connection", (socket) => {
