@@ -18,7 +18,7 @@ import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readFileSync, watch } from "node:fs";
 import { startDashboardBridge, stopDashboardBridge, broadcastDecision, broadcastForwarded, recordAudit, broadcastAuditIntegrity, broadcastLineage } from "./dashboard-bridge.js";
-import { checkInjection } from "./injection.js";
+import { checkInjection, warmupInjectionDetector } from "./injection.js";
 // 순수 라우팅·분류 헬퍼 (Phase 4에서 퍼징 가능하도록 분리).
 // (URI 신뢰 판정은 C-7로 엔진에 이관 — isResourceTrusted 임시 휴리스틱 제거)
 import { classifyMethod, splitAgentToolName, type MethodRisk } from "./routing.js";
@@ -177,6 +177,9 @@ async function main() {
   });
   console.error(`[proxy] 세션 시작  session=${sessionId}`);
   startDashboardBridge();
+  // 인젝션 탐지 모델(약 700MB)을 기동 시점부터 백그라운드로 내려받는다. await하지 않으므로
+  // 프록시 기동을 막지 않고, 첫 도구 호출이 다운로드를 혼자 다 기다리는 일도 없어진다.
+  void warmupInjectionDetector().catch(() => {}); // 실패는 checkInjection이 fail-safe로 처리
   watchPolicyConfig(); // Phase 3: 설정 파일 변경 시 재시작 없이 정책 핫리로드
 
   // 다운스트림 서버 하나에 연결하는 헬퍼. HTTP(url) 또는 stdio(module 상대경로) 전송.
@@ -331,7 +334,13 @@ async function main() {
     console.error(`[proxy] ⬅ 통과  ${agentName}`);
 
    // 비신뢰 출처 콘텐츠 인젝션 검사 (대상 판단·점수 산출·방송은 injection.ts가 한다).
-    await checkInjection(sessionId, bareName, result);
+    // ★ 응답 경로에서 분리 (P0-1): 인젝션 점수는 판정에 관여하지 않는 보조 신호라
+    // (injection.ts 헤더) 도구 응답을 붙잡을 이유가 없다. await로 묶어두면 콜드 캐시에서
+    // 모델 다운로드를 기다리다 MCP 60초 타임아웃으로 도구 호출 자체가 실패한다(실측).
+    // 백그라운드로 돌리고, 점수는 준비되는 대로 대시보드에 방송된다.
+    void checkInjection(sessionId, bareName, result).catch((err) =>
+      console.error(`[proxy] 인젝션 검사 실패(보조 신호 — 판정 영향 없음)  ${agentName}`, err)
+    );
 
     return result;
   });
