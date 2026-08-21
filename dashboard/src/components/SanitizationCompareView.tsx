@@ -17,9 +17,10 @@ interface FlowSource {
   tags: string[];
 }
 
-// 원본 payload는 엔진 보관소에만 있고, 브리지 전송경계 화이트리스트가 원본 값 방송을
-// 막는다(의도된 설계). 그래서 아래 값 상자는 마스킹 동작을 보여주는 예시이고,
-// 도구명·오염 태그·정화 결과는 이 세션의 실제 데이터다. 어느 쪽인지 화면에 밝힌다.
+// 차단된 호출의 인자는 브리지가 blockedArgs로 실어 보내므로(화이트리스트 등재됨),
+// 값 상자는 그 실제 값을 쓴다. 아직 차단이 없을 때만 아래 예시 문자열로 대체한다.
+// 어느 쪽을 보고 있는지는 payloadReal 플래그로 화면에 밝힌다.
+// (통과한 호출의 인자는 브리지가 싣지 않는다 — 차단 건만 나온다.)
 const MASK_EXAMPLE_RAW = `고객 홍길동, 이메일 hong@example.com, 연락처 010-1234-5678`;
 const MASK_EXAMPLE_MASKED = maskPii(MASK_EXAMPLE_RAW);
 

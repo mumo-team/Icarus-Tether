@@ -2,9 +2,11 @@
   "name": "@icarus-tether/proxy",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "setup:claude": "node scripts/setup-claude-desktop.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "demo:attack": "cross-env TAINTGUARD_TOOL_REGISTRY=./config/demo-registry.json tsx test/mock-client.ts",
