@@ -2,9 +2,16 @@
 /**
  * Claude Desktop에 이 프록시를 MCP 서버로 등록한다. (macOS · Windows · Linux)
  *
- * 사용법 (저장소 어디서든):
- *   node proxy/scripts/setup-claude-desktop.mjs
- *   node proxy/scripts/setup-claude-desktop.mjs --remove
+ * 사용법 — 저장소 루트에서:
+ *   npm run setup:claude
+ *   npm run setup:claude -- --remove
+ *
+ * 저장소 밖에서 실행해야 하면 스크립트 절대 경로를 준다:
+ *   node "<저장소>/proxy/scripts/setup-claude-desktop.mjs"
+ *
+ * (상대 경로 `node proxy/scripts/...`는 현재 위치가 저장소 루트일 때만 맞는다.
+ *  Node가 스크립트 파일을 찾는 단계에서 실패하므로 스크립트 코드로는 보정할 수 없어,
+ *  위치에 안 흔들리는 진입점으로 npm 스크립트를 뒀다.)
  *
  * ⚠️ 반드시 Claude Desktop을 완전히 종료한 뒤 실행할 것.
  * 앱이 켜져 있으면 자기 메모리 내용으로 설정 파일을 통째로 덮어써서,

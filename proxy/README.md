@@ -89,8 +89,8 @@ mock-client 대신 실제 AI 에이전트를 붙여 프록시가 진짜 프롬�
 # 1. Claude Desktop을 완전히 종료한다 (창만 닫으면 안 됨)
 #    macOS   : Cmd+Q
 #    Windows : 트레이 아이콘 우클릭 → 종료 (창 X 버튼으로는 안 꺼진다)
-# 2. 터미널에서:
-node proxy/scripts/setup-claude-desktop.mjs
+# 2. 저장소 루트에서:
+npm run setup:claude
 # 3. Claude Desktop을 실행하고 "지금 쓸 수 있는 도구 뭐가 있어?" 라고 물어본다
 ```
 
@@ -107,7 +107,10 @@ node proxy/scripts/setup-claude-desktop.mjs
 - macOS: `~/Library/Logs/Claude/mcp-server-icarus-tether.log`
 - Windows: `%APPDATA%\Claude\logs\mcp-server-icarus-tether.log`
 
-등록을 되돌리려면 `node proxy/scripts/setup-claude-desktop.mjs --remove`.
+등록을 되돌리려면 `npm run setup:claude -- --remove`.
+
+> 저장소 밖에서 실행해야 하면 스크립트 절대 경로를 주면 된다:
+> `node "<저장소>/proxy/scripts/setup-claude-desktop.mjs"`
 
 ## 정책 엔진 연동 지점
 
