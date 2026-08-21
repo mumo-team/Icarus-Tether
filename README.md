@@ -55,7 +55,7 @@ npm run demo:hitl -w proxy # (2) 데모 실행 → 대시보드에 실시간 반
 ### 검증
 
 ```bash
-npm test  -w @icarus-tether/policy-engine   # 단위 + 속성 기반 테스트 (277건)
+npm test                                    # 전체 298건 (policy 277 · dashboard 13 · server 8)
 npm run bench -w @icarus-tether/policy-engine   # 정확도 벤치 (session vs lineage)
 npm run verify -w dashboard/server          # 감사로그 해시체인 무결성 검증
 ```

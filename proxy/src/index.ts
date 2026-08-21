@@ -182,6 +182,21 @@ async function main() {
   void warmupInjectionDetector().catch(() => {}); // 실패는 checkInjection이 fail-safe로 처리
   watchPolicyConfig(); // Phase 3: 설정 파일 변경 시 재시작 없이 정책 핫리로드
 
+  // 정상 종료 경로는 stdin EOF다(아래 process.stdin.on("end")). 그쪽은 실측으로
+  // 확인됐다 — stdin 공급자가 죽으면 EOF가 잡혀 브리지를 닫고 7331을 놓는다.
+  // 여기는 그 경로를 안 타는 종료(터미널에서 Ctrl+C 등)를 위한 방어적 보강이다.
+  // 신호 없이 죽어도 OS가 포트는 회수하지만, 그 경우 마지막 무결성 방송과 소켓
+  // 정리가 생략된다. 이 핸들러가 그걸 보장한다.
+  // SIGBREAK는 Windows의 Ctrl+Break. SIGTERM은 Windows에선 OS가 발생시키지 않지만
+  // (등록해둬도 무해) macOS·Linux·CI에서는 정식 종료 신호다.
+  for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"] as const) {
+    process.on(sig, () => {
+      console.error(`[proxy] ${sig} 수신 — 브리지 정리 후 종료  session=${sessionId}`);
+      stopDashboardBridge();
+      process.exit(0);
+    });
+  }
+
   // 다운스트림 서버 하나에 연결하는 헬퍼. HTTP(url) 또는 stdio(module 상대경로) 전송.
   // sampling capability를 신고해야 서버가 역방향 sampling을 쓸 수 있다(Phase 1에서 추가).
   async function connectServer(entry: ServerEntry): Promise<Client> {
