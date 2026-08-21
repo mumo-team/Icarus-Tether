@@ -46,10 +46,18 @@ function getClassifier() {
           const bucket = Math.floor(info.progress / 10);
           if (progressShown.get(info.file) === bucket) return;
           progressShown.set(info.file, bucket);
-          console.error(`[injection] 모델 내려받는 중 ${info.file} ${bucket * 10}%`);
+          // transformers.js는 캐시에서 읽을 때도 progress를 쏜다 — "내려받는 중"이라고
+          // 쓰면 캐시 히트인데도 다운로드처럼 보인다. 중립적으로 '적재 중'이라 적는다.
+          console.error(`[injection] 모델 적재 중 ${info.file} ${bucket * 10}%`);
         },
       }
-    );
+    ).catch((err) => {
+      // 거부된 Promise를 그대로 캐시에 두면 이후 모든 호출이 같은 거부를 재-await해
+      // '1회 실패 = 프로세스 수명 내내 실패'가 된다(예열이 한 번 실패하면 그 세션의
+      // 모든 검사가 evaluated:false). null로 되돌려 다음 호출에서 재시도하게 한다.
+      classifierPromise = null;
+      throw err; // 거부는 그대로 전파 — detectInjection의 fail-safe 경로는 그대로다
+    });
   }
   return classifierPromise;
 }
@@ -120,8 +128,12 @@ export async function checkInjection(
   if (!getPolicyConfig().untrustedSourceTools.has(toolName)) return;
 
   const detection = await detectInjection(extractText(result));
+  // evaluated를 반드시 함께 찍는다. fail-safe 반환값(score: 1)과 진짜 탐지(0.9999992…)가
+  // toFixed(4)를 거치면 둘 다 "1.0000"이라, 이 값 없이는 '모델 실패'와 '탐지 성공'을
+  // 로그만 보고 구분할 수 없다.
   console.error(
-    `[injection] [검사] ${toolName}  score=${detection.score.toFixed(4)}  isInjection=${detection.isInjection}`
+    `[injection] [검사] ${toolName}  score=${detection.score.toFixed(4)}` +
+      `  isInjection=${detection.isInjection}  evaluated=${detection.evaluated}`
   );
   broadcastToDashboard({
     type: "injection_check",
