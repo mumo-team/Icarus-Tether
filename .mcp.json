@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "icarus-tether": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "./node_modules/tsx/dist/cli.mjs",
+        "./proxy/src/index.ts"
+      ],
+      "env": {
+        "TAINTGUARD_TOOL_REGISTRY": "./proxy/config/demo-registry.json"
+      }
+    }
+  }
+}

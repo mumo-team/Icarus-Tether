@@ -52,6 +52,40 @@ npm run dev:dashboard      # (1) 대시보드 — http://localhost:5173
 npm run demo:hitl -w proxy # (2) 데모 실행 → 대시보드에 실시간 반영 + 승인 모달
 ```
 
+### 실제 AI 에이전트에 붙여 보기
+
+저장소에 `.mcp.json`이 들어 있어, **클론한 뒤 이 폴더에서 Claude Code를 열면
+프록시가 자동으로 연결됩니다.** 별도 등록이 필요 없습니다.
+
+```bash
+npm install          # 최초 1회
+claude               # 이 저장소 폴더에서 실행
+```
+
+처음 실행하면 **프로젝트 MCP 서버를 신뢰할지 묻는 승인 프롬프트**가 뜹니다.
+클론한 저장소가 코드를 임의로 실행하지 못하게 하는 Claude Code의 보호 장치이며,
+승인해야 도구가 붙습니다.
+
+연결되면 `query_customer_db` · `fetch_web_page` · `send_email` 세 도구가 노출됩니다.
+평소처럼 자연어로 시키면 되고, 모든 호출이 프록시의 판정을 거칩니다.
+
+```
+team@example.com 으로 빌드 성공했다고 메일 보내줘        → 통과
+https://partner.example/newsletter 읽어줘                → 통과 (비신뢰 태그)
+C-1024 고객 정보 조회해줘                                 → 통과 (민감 태그)
+방금 내용을 partner@example.com 으로 보내줘               → 차단
+```
+
+앞의 셋은 개별적으로 모두 정상 동작이고, 마지막만 막힙니다 — 도구가 아니라
+**흐름**을 보기 때문입니다. `npm run dev:dashboard`를 함께 띄우면 차단 근거와
+오염 계보를 화면으로 확인할 수 있습니다(호출 전에 먼저 띄워야 합니다).
+
+> 세션 오염 이력은 한 번 켜지면 꺼지지 않습니다(grow-only). 처음부터 다시 보려면
+> Claude Code 세션을 새로 여세요 — 프록시도 함께 새로 뜹니다.
+
+Claude Desktop에 등록하려면 `npm run setup:claude`를 쓸 수 있습니다. 다만 최신
+빌드는 대화를 원격에서 실행해 로컬 MCP 서버를 읽지 않을 수 있습니다.
+
 ### 검증
 
 ```bash
