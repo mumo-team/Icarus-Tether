@@ -90,15 +90,21 @@ export default function App() {
     function connect() {
       // 브리지가 127.0.0.1에만 리슨하므로 주소를 맞춘다 — Windows에서 localhost가
       // ::1(IPv6)로 먼저 풀리면 연결이 지연되거나 실패할 수 있다.
-      ws = new WebSocket("ws://127.0.0.1:7331");
-      wsRef.current = ws;
+      // socket을 지역으로 잡아둔다 — 아래 핸들러들이 "자기 소켓"인지 확인해야
+      // 늦게 도착한 옛 소켓의 정리가 새 소켓의 참조를 지우는 일이 없다.
+      // (StrictMode·HMR에서 이펙트가 두 번 돌면 실제로 그 순서가 난다:
+      //  화면은 '연결됨'인데 wsRef가 null이라 승인·정화 요청이 안 나갔다.)
+      const socket = new WebSocket("ws://127.0.0.1:7331");
+      ws = socket;
+      wsRef.current = socket;
 
-      ws.onopen = () => {
+      socket.onopen = () => {
+        if (wsRef.current !== socket) return; // 이미 밀려난 소켓
         setWsConnected(true);
         console.log("[대시보드] proxy 연결됨");
       };
 
-      ws.onmessage = (event) => {
+      socket.onmessage = (event) => {
         let data;
         try {
           data = JSON.parse(event.data);
@@ -219,11 +225,14 @@ export default function App() {
       };
 
       // onerror 뒤에는 항상 onclose가 따라오므로, 재연결은 onclose 한 곳에서만 건다.
-      ws.onerror = () => {};
+      socket.onerror = () => {};
 
-      ws.onclose = () => {
-        setWsConnected(false);
-        wsRef.current = null;
+      socket.onclose = () => {
+        if (wsRef.current === socket) {
+          wsRef.current = null;
+          setWsConnected(false);
+        }
+        if (ws !== socket) return; // 밀려난 소켓은 재연결을 걸지 않는다
         if (disposed) return;
         // proxy는 "데모 1회 = 1프로세스"라 실행할 때마다 죽고 새로 뜬다.
         // 계속 재시도해 두면 다음 데모 실행에 자동으로 다시 붙는다.
@@ -236,7 +245,9 @@ export default function App() {
     return () => {
       disposed = true;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-      wsRef.current = null;
+      // 자기가 만든 소켓일 때만 참조를 놓는다 — 무조건 null로 두면
+      // 뒤이어 뜬 이펙트의 새 소켓까지 같이 끊어버린다.
+      if (wsRef.current === ws) wsRef.current = null;
       ws?.close();
     };
   }, []);
