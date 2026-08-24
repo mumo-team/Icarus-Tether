@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { ToolRiskTag, type AuditLogEntry } from "@icarus-tether/types";
+import { mono } from "../theme";
 
 // 융합에 쓰는 최소 신호 — 대시보드가 이미 받는 것에서 파생한다(새 state 없음).
 interface InjectionSignal {
@@ -9,8 +10,13 @@ interface InjectionSignal {
   evaluated: boolean;
 }
 
-// 여러 독립 신호를 하나의 위협 판정으로 종합한다.
-// 실제 차단은 policy-engine(B) 소관 — 여기선 이미 받은 신호를 화면에서 합쳐 보여줄 뿐이다.
+/**
+ * 여러 독립 신호를 한 줄로 종합해 보여준다.
+ *
+ * 화면에서 일부러 작게 둔다 — 이 판정은 차단에 관여하지 않는다. 크게 띄우면
+ * "AI가 종합 판단해서 막는다"로 읽혀서, 판정 경로에 AI가 없다는 이 제품의
+ * 논지를 화면이 스스로 흔든다. 실제 차단은 policy-engine 소관이다.
+ */
 export default function ThreatFusionBanner({
   logs,
   injectionChecks,
@@ -35,74 +41,92 @@ export default function ThreatFusionBanner({
     return { tags, toolName: lastBlocked?.toolName, lastInjection, signalLineage, signalTrifecta, signalInjection, level };
   }, [logs, injectionChecks]);
 
-  const color =
-    fusion.level === "높음"
-      ? { fg: "#b71c1c", bg: "#fdecea", border: "#e57373" }
-      : fusion.level === "주의"
-      ? { fg: "#e65100", bg: "#fff3e0", border: "#ffb74d" }
-      : { fg: "#555", bg: "#f5f5f5", border: "#ccc" };
+  const inj = fusion.lastInjection;
+  const injUnknown = !!inj && !inj.evaluated;
 
   return (
-    <section
+    <div
       style={{
-        margin: "12px 0",
-        padding: "14px 16px",
-        borderRadius: "8px",
-        background: color.bg,
-        border: `2px solid ${color.border}`,
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        flexWrap: "wrap",
+        padding: "13px 18px",
+        borderRadius: "var(--R)",
+        background: "var(--panel-2)",
+        border: "1px solid var(--line)",
+        marginBottom: 12,
       }}
     >
-      <div style={{ fontWeight: 700, fontSize: "15px", color: color.fg, marginBottom: "8px" }}>
-        종합 위협 판정 — [{fusion.level}]{" "}
-        <span style={{ fontWeight: 400, fontSize: "13px", color: "#777" }}>
-          (여러 신호를 합친 근거 — 최종 차단은 정책 엔진이 결정)
-        </span>
-      </div>
-      <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "14px", lineHeight: 1.8 }}>
-        <SignalRow
-          on={fusion.signalLineage}
-          label="계보 오염 추적"
-          detail={fusion.signalLineage ? fusion.tags.join(", ") : "오염 없음"}
-        />
-        <SignalRow
-          on={fusion.signalTrifecta}
-          label="트라이펙타 규칙"
-          detail={fusion.signalTrifecta ? `성립 — ${fusion.toolName} 차단 (민감+비신뢰+외부유출)` : "미성립"}
-        />
-        <SignalRow
-          on={fusion.signalInjection}
-          unknown={!!fusion.lastInjection && !fusion.lastInjection.evaluated}
-          label="ML 인젝션 탐지"
-          detail={
-            !fusion.lastInjection
-              ? "검사 이력 없음"
-              : !fusion.lastInjection.evaluated
-              ? "모델 로드/추론 실패로 판정 불가 — 종합 판정에서 제외"
-              : `score=${fusion.lastInjection.score.toFixed(4)}`
-          }
-        />
-      </ul>
-    </section>
+      <span style={{ fontSize: 12, color: "var(--ink-3)", marginRight: 3 }}>신호</span>
+
+      <Chip on={fusion.signalLineage} label="계보 오염" value={fusion.signalLineage ? fusion.tags.join(" + ") : "없음"} />
+      <Chip
+        on={fusion.signalTrifecta}
+        label="트라이펙타"
+        value={fusion.signalTrifecta ? `성립 · ${fusion.toolName}` : "미성립"}
+      />
+      <Chip
+        on={fusion.signalInjection}
+        unknown={injUnknown}
+        label="ML 인젝션"
+        value={!inj ? "이력 없음" : injUnknown ? "판정 불가" : inj.score.toFixed(4)}
+        note="관측용"
+      />
+
+      <span style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--ink-3)" }}>
+        종합 <b style={{ color: fusion.level === "정상" ? "var(--ink-2)" : "var(--ink)" }}>{fusion.level}</b>
+      </span>
+    </div>
   );
 }
 
-// unknown=true는 "신호를 얻지 못함" — 신호가 없는 '정상'과 반드시 구분한다.
-// 판정 불가를 '정상'으로 적으면 화면이 근거 없는 안심을 준다.
-function SignalRow({
+/** unknown=true는 "신호를 얻지 못함" — 신호가 없는 '정상'과 반드시 구분한다.
+ *  판정 불가를 '정상'으로 적으면 화면이 근거 없는 안심을 준다. */
+function Chip({
   on,
   label,
-  detail,
+  value,
+  note,
   unknown = false,
 }: {
   on: boolean;
   label: string;
-  detail: string;
+  value: string;
+  note?: string;
   unknown?: boolean;
 }) {
-  const mark = unknown ? "판정불가" : on ? "감지" : "정상";
+  const active = on || unknown;
   return (
-    <li style={{ color: unknown ? "#e65100" : on ? "#b71c1c" : "#888" }}>
-      <span style={{ fontWeight: 500 }}>[{mark}]</span> {label} — {detail}
-    </li>
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 7,
+        padding: "6px 11px",
+        borderRadius: "var(--r2)",
+        fontSize: 11.5,
+        background: "rgba(255,255,255,.04)",
+        border: `1px solid ${active ? "var(--danger-line)" : "var(--line-2)"}`,
+        color: active ? "var(--danger-hi)" : "var(--ink-2)",
+      }}
+    >
+      {label}
+      <b style={{ ...mono, fontSize: 11, color: active ? "var(--danger)" : "var(--ink)" }}>{value}</b>
+      {note && (
+        <em
+          style={{
+            fontStyle: "normal",
+            fontSize: 9,
+            padding: "1px 5px",
+            borderRadius: 3,
+            background: "rgba(255,255,255,.08)",
+            color: "var(--ink-3)",
+          }}
+        >
+          {note}
+        </em>
+      )}
+    </span>
   );
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import TaintGraph, { type LineageNode } from "./TaintGraph";
+import { card, mono } from "../theme";
 
 // 오염 전파를 시간순으로 되감아 재생한다 — 포렌식 분석.
 // proxy가 판정마다 보낸 계보 스냅샷을 쌓아둔 배열을 받아, 슬라이더/재생으로 훑는다.
@@ -35,15 +36,54 @@ export default function ForensicReplay({ snapshots }: { snapshots: LineageNode[]
 
   return (
     // 앵커는 모달의 "문제가 된 데이터 출처 확인하기"가 scrollIntoView로 쓴다.
-    <section id="taint-graph-panel">
-      <h2>오염 전파 — 실시간 · 되감기</h2>
+    <section id="taint-graph-panel" style={card}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          flexWrap: "wrap",
+          marginBottom: 16,
+        }}
+      >
+        <h3>오염 계보</h3>
+        {isLive && (
+          <span
+            style={{
+              ...mono,
+              fontSize: 10,
+              letterSpacing: "0.12em",
+              color: "var(--untrusted)",
+              padding: "3px 8px",
+              borderRadius: 4,
+              background: "rgba(155,208,235,.08)",
+              border: "1px solid rgba(155,208,235,.26)",
+            }}
+          >
+            LIVE
+          </span>
+        )}
+      </div>
+
       {snapshots.length === 0 ? (
-        <p style={{ color: "#888", fontSize: "14px" }}>
-          데모를 실행하면 오염이 전파되는 과정을 단계별로 되감아 볼 수 있습니다.
-        </p>
+        <div
+          style={{
+            padding: 22,
+            textAlign: "center",
+            borderRadius: "var(--r)",
+            border: "1px dashed var(--line-2)",
+            color: "var(--ink-3)",
+            fontSize: 12,
+          }}
+        >
+          아직 추적된 오염이 없습니다
+        </div>
       ) : (
         <>
-          <div style={{ display: "flex", alignItems: "center", gap: "10px", margin: "8px 0" }}>
+          <TaintGraph lineage={current} />
+
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
             <button
               onClick={() => {
                 pinned.current = true;
@@ -54,6 +94,11 @@ export default function ForensicReplay({ snapshots }: { snapshots: LineageNode[]
               이전
             </button>
             <button
+              style={{
+                background: "rgba(155,208,235,.10)",
+                borderColor: "var(--accent-line)",
+                color: "var(--untrusted)",
+              }}
               onClick={() => {
                 if (playing) {
                   setPlaying(false);
@@ -75,34 +120,35 @@ export default function ForensicReplay({ snapshots }: { snapshots: LineageNode[]
             >
               다음
             </button>
+            <button
+              onClick={() => {
+                pinned.current = false;
+                setPlaying(false);
+                setIndex(last);
+              }}
+              disabled={isLive}
+            >
+              최신으로
+            </button>
+
             <input
               type="range"
               min={0}
               max={last}
               value={index}
+              aria-label="오염 전파 단계"
               onChange={(e) => {
                 pinned.current = true;
                 setPlaying(false);
                 setIndex(Number(e.target.value));
               }}
-              style={{ flex: 1, accentColor: "#5f5e5a", height: "6px" }}
+              style={{ flex: 1, minWidth: 120, accentColor: "var(--untrusted)", height: 6 }}
             />
-            <span style={{ fontSize: "13px", minWidth: "120px", textAlign: "right" }}>
+
+            <span style={{ ...mono, fontSize: 11.5, color: "var(--ink-3)", minWidth: 132, textAlign: "right" }}>
               {index + 1} / {last + 1} 단계 · 노드 {current.length}개
-              {isLive && <span style={{ color: "#2e7d32", marginLeft: "6px" }}>[라이브]</span>}
             </span>
           </div>
-          <button
-            onClick={() => {
-              pinned.current = false;
-              setPlaying(false);
-              setIndex(last);
-            }}
-            style={{ fontSize: "12px", marginBottom: "8px" }}
-          >
-            최신으로 (라이브 따라가기)
-          </button>
-          <TaintGraph lineage={current} />
         </>
       )}
     </section>

@@ -10,14 +10,17 @@ export interface LineageNode {
   parents: { nodeId: string; method: string; weak: boolean }[];
 }
 
-// 태그에 따라 노드 색을 정한다 — 오염 종류를 한눈에.
-function nodeColor(tags: string[]): { bg: string; border: string } {
+// 오염 종류에 따라 노드 표면을 정한다.
+// 축마다 다른 '색상'을 주지 않는 게 핵심이다 — 민감에 빨강을 쓰면 DB 조회처럼
+// 정당한 동작이 나쁜 일로 읽힌다. 색상각은 청색 하나로 두고 채도로만 나눈다.
+// 두 축이 겹친 노드만 표면을 한 단계 올려(raise) 시선을 준다.
+function nodeSkin(tags: string[]): { bg: string; border: string } {
   const s = tags.includes("SENSITIVE");
   const u = tags.includes("UNTRUSTED_ORIGIN");
-  if (s && u) return { bg: "#f5c2c0", border: "#d32f2f" }; // 둘 다 = 진한 빨강
-  if (s) return { bg: "#fdecea", border: "#e57373" }; // 민감
-  if (u) return { bg: "#fff3e0", border: "#f0b429" }; // 비신뢰
-  return { bg: "#eceff1", border: "#b0bec5" }; // 태그 없음(정화됨/중립)
+  if (s && u) return { bg: "var(--raise)", border: "var(--untrusted)" };
+  if (s) return { bg: "var(--panel)", border: "var(--sensitive)" };
+  if (u) return { bg: "var(--panel)", border: "var(--untrusted)" };
+  return { bg: "var(--panel-2)", border: "var(--line-2)" }; // 정화됨/중립
 }
 
 // 계보엔 화면 좌표가 없다. 부모 깊이로 x를, 같은 깊이 내 순번으로 y를 계산한다.
@@ -49,17 +52,23 @@ export default function TaintGraph({ lineage }: { lineage: LineageNode[] }) {
       const d = depth.get(n.id) ?? 0;
       const row = rowCount.get(d) ?? 0;
       rowCount.set(d, row + 1);
-      const c = nodeColor(n.tags);
+      const skin = nodeSkin(n.tags);
       return {
         id: n.id,
-        position: { x: d * 240, y: row * 90 },
-        data: { label: `${n.toolName}\n${n.tags.join("+") || "(정화됨)"}` },
+        position: { x: d * 250, y: row * 96 },
+        data: { label: `${n.toolName}\n${n.tags.join(" + ") || "(정화됨)"}` },
         style: {
-          background: c.bg,
-          border: `2px solid ${c.border}`,
-          borderRadius: "8px",
-          fontSize: "12px",
-          width: 180,
+          background: skin.bg,
+          border: `1px solid ${skin.border}`,
+          borderRadius: 9,
+          color: "var(--ink)",
+          fontFamily: '"IBM Plex Mono", ui-monospace, monospace',
+          fontSize: 12,
+          lineHeight: 1.55,
+          padding: "10px 12px",
+          width: 200,
+          whiteSpace: "pre-line",
+          textAlign: "left",
         },
       };
     });
@@ -70,9 +79,20 @@ export default function TaintGraph({ lineage }: { lineage: LineageNode[] }) {
         source: p.nodeId,
         target: n.id,
         animated: !p.weak, // 강한 연결만 애니메이션, weak는 정적
-        style: p.weak ? { strokeDasharray: "4 4", stroke: "#aaa" } : { stroke: "#555" },
+        // 약한 연결(안전 바닥)은 점선으로 둔다. 근거의 세기가 선 모양으로 보여야
+        // "시간 근접으로 추정한 것"과 "값이 실제로 일치한 것"이 구분된다.
+        style: p.weak
+          ? { strokeDasharray: "5 6", stroke: "var(--ink-3)", strokeWidth: 1.6 }
+          : { stroke: "var(--untrusted)", strokeWidth: 2 },
         label: p.method,
-        labelStyle: { fontSize: "10px", fill: "#666" },
+        labelStyle: {
+          fontSize: 10,
+          fill: "var(--ink-3)",
+          fontFamily: '"IBM Plex Mono", ui-monospace, monospace',
+        },
+        labelBgStyle: { fill: "var(--panel-2)" },
+        labelBgPadding: [5, 3] as [number, number],
+        labelBgBorderRadius: 4,
       }))
     );
 
@@ -81,10 +101,19 @@ export default function TaintGraph({ lineage }: { lineage: LineageNode[] }) {
 
   if (lineage.length === 0) {
     return (
-      <p style={{ color: "#888", fontSize: "13px", margin: "8px 0" }}>
-        아직 추적된 오염이 없습니다.
-      </p>
+      <div
+        style={{
+          padding: 22,
+          textAlign: "center",
+          borderRadius: "var(--r)",
+          border: "1px dashed var(--line-2)",
+          color: "var(--ink-3)",
+          fontSize: 12,
+        }}
+      >
+        아직 추적된 오염이 없습니다
+      </div>
     );
   }
-  return <TaintFlowDiagram nodes={nodes} edges={edges} height={280} />;
+  return <TaintFlowDiagram nodes={nodes} edges={edges} height={320} />;
 }

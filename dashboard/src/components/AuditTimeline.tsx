@@ -1,4 +1,6 @@
 import type { AuditLogEntry, OverrideAuditEntry } from "@icarus-tether/types";
+import { inset, mono } from "../theme";
+
 type TimelineTone = "allowed" | "blocked" | "forwarded" | "hitl";
 
 interface TimelineEntry {
@@ -20,13 +22,15 @@ const HITL_ACTION_LABEL: Record<OverrideAuditEntry["action"], string> = {
   SUPERSEDED: "제안 대체됨",
   OVERRIDE_STALE: "낡은 승인 무효화",
 };
-// 스토리보드 2단계 "로그 배지 변경" — 판정 종류를 색으로 즉시 구분한다.
-// HITL 전이는 판정이 아니라 사람의 개입이라 별도 색(주황)으로 분리한다.
+
+// 판정 종류를 색으로 즉시 구분한다.
+// 화면 전체가 청색 한 색상각이라, 결과를 나타내는 통과/차단만 상태색을 쓴다.
+// HITL 전이는 판정이 아니라 사람의 개입이라 액센트(비신뢰 청색)로 따로 뗀다.
 const TONE_STYLE: Record<TimelineTone, { bg: string; fg: string; border: string }> = {
-  allowed: { bg: "#e8f5e9", fg: "#1b5e20", border: "#a5d6a7" },
-  blocked: { bg: "#fdecea", fg: "#b71c1c", border: "#ef9a9a" },
-  forwarded: { bg: "#eceff1", fg: "#455a64", border: "#b0bec5" },
-  hitl: { bg: "#fff3e0", fg: "#e65100", border: "#ffb74d" },
+  allowed: { bg: "var(--ok-bg)", fg: "var(--ok)", border: "var(--ok-line)" },
+  blocked: { bg: "var(--danger-bg)", fg: "var(--danger-hi)", border: "var(--danger-line)" },
+  forwarded: { bg: "rgba(255,255,255,.05)", fg: "var(--ink-3)", border: "var(--line-2)" },
+  hitl: { bg: "rgba(155,208,235,.10)", fg: "var(--untrusted)", border: "var(--accent-line)" },
 };
 
 interface AuditTimelineProps {
@@ -59,39 +63,54 @@ export default function AuditTimeline({ logs, hitlLog }: AuditTimelineProps) {
     (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
   );
 
+  if (combined.length === 0) {
+    return (
+      <div
+        style={{
+          padding: 20,
+          textAlign: "center",
+          borderRadius: "var(--r)",
+          border: "1px dashed var(--line-2)",
+          color: "var(--ink-3)",
+          fontSize: 12,
+        }}
+      >
+        기록 없음
+      </div>
+    );
+  }
+
   return (
-    <section>
-      <h2>감사로그 통합 타임라인</h2>
-      {combined.length === 0 ? (
-        <p>기록 없음</p>
-      ) : (
-        <ul>
-          {combined.map((e) => {
-            const s = TONE_STYLE[e.tone];
-            return (
-              <li key={e.key} style={{ marginBottom: "4px" }}>
-                <span style={{ fontFamily: "monospace", color: "#888" }}>[{e.source}]</span>{" "}
-                {new Date(e.timestamp).toLocaleTimeString()} —{" "}
-                <span style={{ fontFamily: "monospace" }}>{e.toolName}</span>{" "}
-                <span
-                  style={{
-                    display: "inline-block",
-                    padding: "1px 8px",
-                    borderRadius: "10px",
-                    fontSize: "12px",
-                    fontWeight: 600,
-                    background: s.bg,
-                    color: s.fg,
-                    border: `1px solid ${s.border}`,
-                  }}
-                >
-                  {e.label}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </section>
+    <div style={{ display: "grid", gap: 8 }}>
+      {combined.map((e) => {
+        const s = TONE_STYLE[e.tone];
+        return (
+          <div
+            key={e.key}
+            style={{ ...inset, padding: "11px 14px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}
+          >
+            <span style={{ ...mono, fontSize: 10.5, color: "var(--ink-3)", minWidth: 62 }}>
+              {new Date(e.timestamp).toLocaleTimeString()}
+            </span>
+            <span style={{ ...mono, fontSize: 11.5, flex: 1, minWidth: 0 }}>{e.toolName}</span>
+            <span style={{ fontSize: 10, color: "var(--ink-3)" }}>{e.source}</span>
+            <span
+              style={{
+                display: "inline-block",
+                padding: "3px 10px",
+                borderRadius: 999,
+                fontSize: 10.5,
+                fontWeight: 500,
+                background: s.bg,
+                color: s.fg,
+                border: `1px solid ${s.border}`,
+              }}
+            >
+              {e.label}
+            </span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
