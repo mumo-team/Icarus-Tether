@@ -1,0 +1,191 @@
+/**
+ * 디자인 토큰 — 대시보드 전역.
+ *
+ * 색 규칙(중요): 화면에 쓰는 색상각은 **청색 200° 하나**다.
+ *   - 오염 축 세 개는 색상각이 아니라 **채도**로 구분한다
+ *     (비신뢰 S67 → 민감 S40 → 유출구 S18 → 시스템 S0).
+ *     축마다 다른 색을 주면 "민감 = 위험"처럼 읽혀서, DB 조회 같은
+ *     정당한 동작이 나쁜 일처럼 보인다.
+ *   - 표면은 완전한 중성 검정이다. 네이비를 깔면 그 위의 청색 액센트가
+ *     뭉개져 탁해진다.
+ *   - 상태색은 둘뿐이다: 통과(비비드 시안)·차단(빨강). 면적이 작아야
+ *     튄다.
+ */
+
+:root {
+  /* 표면 — 중성 검정. 색상 성분 없음 */
+  --ground: #08090b;
+  --panel: #141416;
+  --panel-2: #0e0e10;
+  --raise: #1e1e22;
+
+  /* 글자 */
+  --ink: #ffffff;
+  --ink-2: #b0b0b6;
+  --ink-3: #7c7c84;
+
+  /* 경계 — 거의 안 보이게. 구분은 표면 밝기 차이로 */
+  --line: rgba(255, 255, 255, 0.06);
+  --line-2: rgba(255, 255, 255, 0.12);
+
+  /* 오염 축 — 청색 200°, 명도 76% 고정, 채도만 다르게 */
+  --untrusted: #9bd0eb; /* S67 비신뢰 출처 */
+  --sensitive: #abcbdb; /* S40 민감 출처 */
+  --sink: #b8c7ce; /* S18 외부 유출구 */
+  --system: #c3c3c5; /* S0  프로토콜·시스템 */
+
+  /* 같은 축의 배지 채움 — 명도 36% 고정 */
+  --untrusted-deep: #326a85;
+  --sensitive-deep: #426476;
+  --sink-deep: #515f67;
+  --system-deep: #5c5c5e;
+
+  /* 같은 축의 태그 글자 — 명도 86% */
+  --untrusted-hi: #c3e3f3;
+  --sensitive-hi: #cde0ea;
+
+  /* 상태색 — 이 둘만 다른 채도축. 상태 알약에만 쓴다 */
+  --ok: #38bdf8;
+  --danger: #ef4444;
+  --danger-hi: #f87171;
+
+  /* 반투명 — 알약 배경·테두리용 */
+  --ok-bg: rgba(56, 189, 248, 0.13);
+  --ok-line: rgba(56, 189, 248, 0.3);
+  --danger-bg: rgba(239, 68, 68, 0.13);
+  --danger-line: rgba(239, 68, 68, 0.3);
+  --accent-bg: rgba(155, 208, 235, 0.1);
+  --accent-line: rgba(155, 208, 235, 0.4);
+
+  /* 형태 */
+  --R: 12px; /* 카드 */
+  --r: 10px; /* 카드 안쪽 요소 */
+  --r2: 8px; /* 버튼·칩 */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "Inter", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+  line-height: 1.6;
+  letter-spacing: -0.008em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.018em;
+  text-wrap: balance;
+}
+h1 {
+  font-size: 16px;
+}
+h2 {
+  font-size: 17px;
+  letter-spacing: -0.022em;
+}
+h3 {
+  font-size: 14.5px;
+  letter-spacing: -0.014em;
+}
+h4 {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+p {
+  margin: 0;
+}
+
+ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  color: var(--ink-2);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r2);
+  padding: 7px 14px;
+  font-size: 12.5px;
+}
+button:hover {
+  color: var(--ink);
+  border-color: var(--accent-line);
+}
+button:focus-visible {
+  outline: 2px solid var(--untrusted);
+  outline-offset: 2px;
+}
+
+details > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+details > summary::before {
+  content: "▸";
+  color: var(--untrusted);
+  font-size: 10px;
+  transition: transform 0.18s;
+}
+details[open] > summary::before {
+  transform: rotate(90deg);
+}
+details > summary:focus-visible {
+  outline: 2px solid var(--untrusted);
+  outline-offset: -3px;
+}
+
+/* 숫자가 세로로 줄 맞게 */
+.mono {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+::selection {
+  background: var(--untrusted-deep);
+  color: #fff;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--ground);
+}
+::-webkit-scrollbar-thumb {
+  background: #26262b;
+  border-radius: 99px;
+  border: 2px solid var(--ground);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #34343a;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

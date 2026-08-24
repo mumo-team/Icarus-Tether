@@ -9,6 +9,8 @@ import ForensicReplay from "./components/ForensicReplay";
 import TrifectaApprovalModal from "./components/TrifectaApprovalModal";
 import AuditTimeline from "./components/AuditTimeline";
 import OutputScanPanel from "./components/OutputScanPanel";
+import BlockReason from "./components/BlockReason";
+import { card, inset, pill, GAP } from "./theme";
 
 interface InjectionCheckEntry {
   id: string;
@@ -88,15 +90,21 @@ export default function App() {
     function connect() {
       // 브리지가 127.0.0.1에만 리슨하므로 주소를 맞춘다 — Windows에서 localhost가
       // ::1(IPv6)로 먼저 풀리면 연결이 지연되거나 실패할 수 있다.
-      ws = new WebSocket("ws://127.0.0.1:7331");
-      wsRef.current = ws;
+      // socket을 지역으로 잡아둔다 — 아래 핸들러들이 "자기 소켓"인지 확인해야
+      // 늦게 도착한 옛 소켓의 정리가 새 소켓의 참조를 지우는 일이 없다.
+      // (StrictMode·HMR에서 이펙트가 두 번 돌면 실제로 그 순서가 난다:
+      //  화면은 '연결됨'인데 wsRef가 null이라 승인·정화 요청이 안 나갔다.)
+      const socket = new WebSocket("ws://127.0.0.1:7331");
+      ws = socket;
+      wsRef.current = socket;
 
-      ws.onopen = () => {
+      socket.onopen = () => {
+        if (wsRef.current !== socket) return; // 이미 밀려난 소켓
         setWsConnected(true);
         console.log("[대시보드] proxy 연결됨");
       };
 
-      ws.onmessage = (event) => {
+      socket.onmessage = (event) => {
         let data;
         try {
           data = JSON.parse(event.data);
@@ -217,11 +225,14 @@ export default function App() {
       };
 
       // onerror 뒤에는 항상 onclose가 따라오므로, 재연결은 onclose 한 곳에서만 건다.
-      ws.onerror = () => {};
+      socket.onerror = () => {};
 
-      ws.onclose = () => {
-        setWsConnected(false);
-        wsRef.current = null;
+      socket.onclose = () => {
+        if (wsRef.current === socket) {
+          wsRef.current = null;
+          setWsConnected(false);
+        }
+        if (ws !== socket) return; // 밀려난 소켓은 재연결을 걸지 않는다
         if (disposed) return;
         // proxy는 "데모 1회 = 1프로세스"라 실행할 때마다 죽고 새로 뜬다.
         // 계속 재시도해 두면 다음 데모 실행에 자동으로 다시 붙는다.
@@ -234,7 +245,9 @@ export default function App() {
     return () => {
       disposed = true;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-      wsRef.current = null;
+      // 자기가 만든 소켓일 때만 참조를 놓는다 — 무조건 null로 두면
+      // 뒤이어 뜬 이펙트의 새 소켓까지 같이 끊어버린다.
+      if (wsRef.current === ws) wsRef.current = null;
       ws?.close();
     };
   }, []);
@@ -311,87 +324,172 @@ export default function App() {
     setModalDecision(null);
   }
 
+  const lastLineage = snapshots[snapshots.length - 1] ?? [];
+
   return (
-    <div style={{ fontFamily: "sans-serif", padding: "24px" }}>
-      <h1>Icarus-Tether 대시보드</h1>
-      <p style={{ color: wsConnected ? "#2e7d32" : "#d32f2f", fontWeight: "bold" }}>
-        {wsConnected ? "[연결됨] proxy 연결됨" : "[대기] proxy 대기 중 — 데모를 실행하면 자동 연결됩니다"}
-      </p>
-      {recvErrors > 0 && (
-        <p style={{ color: "#d32f2f", fontWeight: "bold" }}>
-          [수신오류] 이벤트 수신 오류 {recvErrors}건 — 일부 프레임을 건너뛰었습니다
-        </p>
-      )}
-      <div style={{ margin: "20px 0 4px", fontSize: "13px", color: "#888" }}>지금 상태</div>
-      <MetricCards logs={logs} approvals={approvals} />
-      <ThreatFusionBanner logs={logs} injectionChecks={injectionChecks} />
-      <ApprovalQueue approvals={approvals} onDecide={handleDecide} awaiting={awaiting} />
-
-      {/* 왜 막았나 — 계보 그래프는 리플레이 안에 하나만 둔다. 예전엔 같은 그래프를
-          위(실시간)와 아래(리플레이)에 두 번 그렸는데, 리플레이가 새 스냅샷을 자동으로
-          따라가므로 둘이 같은 그림이었다. */}
-      <div style={{ margin: "28px 0 4px", fontSize: "13px", color: "#888" }}>왜 막았나</div>
-      <ForensicReplay snapshots={snapshots} />
-      <SanitizationCompareView
-        sanitization={sanitization}
-        logs={logs}
-        lineage={snapshots[snapshots.length - 1] ?? []}
-        blockedArgs={blockedArgs}
-      />
-
-      {/* 기록 — 사후 조회용이라 접어 둔다. 시연 중엔 펼칠 일이 거의 없고,
-          접어야 첫 화면이 한 스크린에 들어온다. */}
-      <details style={{ marginTop: "28px" }}>
-        <summary style={{ cursor: "pointer", fontSize: "14px", color: "#555", padding: "8px 0" }}>
-          기록 — 감사로그 타임라인 · 무결성 · 인젝션 탐지 · 출력 스캔
-        </summary>
-        <AuditTimeline logs={logs} hitlLog={hitlLog} />
-      <section
+    <div style={{ maxWidth: 1340, margin: "0 auto", padding: "26px 30px 76px" }}>
+      {/* ── 상단 ─────────────────────────────────────── */}
+      <nav
         style={{
-          margin: "12px 0",
-          padding: "12px 16px",
-          borderRadius: "8px",
-          border: "2px solid",
-          borderColor: !auditIntegrity ? "#9e9e9e" : auditIntegrity.ok ? "#2e7d32" : "#d32f2f",
-          background: !auditIntegrity ? "#f5f5f5" : auditIntegrity.ok ? "#e8f5e9" : "#ffebee",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 20,
+          flexWrap: "wrap",
+          paddingBottom: 20,
+          marginBottom: 24,
+          borderBottom: "1px solid var(--line)",
         }}
       >
-        <strong>[무결성] 감사 로그</strong>{" "}
-        {!auditIntegrity ? (
-          <span style={{ color: "#616161" }}>기록이 쌓이면 매 판정마다 검증됩니다</span>
-        ) : auditIntegrity.ok ? (
-          <span style={{ color: "#2e7d32" }}>
-            [정상] 무결 — {auditIntegrity.total}줄 전부 서명·체인 정상
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span
+            style={{
+              width: 30,
+              height: 30,
+              borderRadius: "var(--r2)",
+              display: "grid",
+              placeItems: "center",
+              background: "linear-gradient(150deg, var(--untrusted), var(--sensitive-deep))",
+            }}
+          >
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--ground)" strokeWidth="2.4" strokeLinecap="round">
+              <path d="M12 3v6.4M12 14.6V21" />
+              <circle cx="12" cy="12" r="2.2" fill="var(--ground)" stroke="none" />
+              <path d="M5 7.5 8.6 10M19 7.5 15.4 10M5 16.5 8.6 14M19 16.5 15.4 14" />
+            </svg>
           </span>
-        ) : (
-          <span style={{ color: "#d32f2f" }}>
-            [위반] 위변조 감지 — {auditIntegrity.problems.length}건 (전체 {auditIntegrity.total}줄)
-            <ul style={{ margin: "6px 0 0" }}>
-              {auditIntegrity.problems.map((p, i) => (
-                <li key={i}>
-                  {p.line}번째 줄 [{p.kind}] {p.detail}
-                </li>
+          <h1>Icarus-Tether 대시보드</h1>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          {recvErrors > 0 && (
+            <span style={pill("danger")}>이벤트 수신 오류 {recvErrors}건</span>
+          )}
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 9,
+              padding: "7px 14px",
+              borderRadius: "var(--r2)",
+              fontSize: 12.5,
+              fontWeight: 500,
+              background: wsConnected ? "var(--ok-bg)" : "rgba(255,255,255,.05)",
+              border: `1px solid ${wsConnected ? "var(--ok-line)" : "var(--line-2)"}`,
+              color: wsConnected ? "var(--ok)" : "var(--ink-3)",
+            }}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: wsConnected ? "var(--ok)" : "var(--ink-3)",
+              }}
+            />
+            {wsConnected ? "proxy 연결됨" : "proxy 대기 중"}
+          </span>
+        </div>
+      </nav>
+
+      <MetricCards logs={logs} approvals={approvals} />
+
+      {/* ── 계보가 화면의 주인공. 근거·승인은 옆에 붙인다 ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "1.82fr 1fr", gap: GAP, alignItems: "stretch", marginBottom: GAP }}>
+        <ForensicReplay snapshots={snapshots} />
+        <aside style={card}>
+          <BlockReason logs={logs} lineage={lastLineage} />
+          <div style={{ height: 1, background: "var(--line)", margin: "18px 0 15px" }} />
+          <ApprovalQueue approvals={approvals} onDecide={handleDecide} awaiting={awaiting} />
+        </aside>
+      </div>
+
+      <div style={{ marginBottom: GAP }}>
+        <SanitizationCompareView
+          sanitization={sanitization}
+          logs={logs}
+          lineage={lastLineage}
+          blockedArgs={blockedArgs}
+        />
+      </div>
+
+      {/* 판정에 관여하지 않는 신호라 작게 둔다 — 크게 띄우면 "AI가 막는다"로 읽힌다 */}
+      <ThreatFusionBanner logs={logs} injectionChecks={injectionChecks} />
+
+      {/* 기록 — 사후 조회용이라 접어 둔다. 접어야 첫 화면이 한 스크린에 들어온다 */}
+      <details style={{ ...card, padding: 0, overflow: "hidden" }}>
+        <summary style={{ padding: "15px 22px", fontSize: 13, color: "var(--ink-2)" }}>기록</summary>
+        <div style={{ padding: "0 22px 20px", display: "grid", gap: GAP }}>
+          <AuditTimeline logs={logs} hitlLog={hitlLog} />
+
+          <div
+            style={{
+              ...inset,
+              padding: "12px 15px",
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              fontSize: 12.5,
+              flexWrap: "wrap",
+              borderColor: !auditIntegrity ? "var(--line)" : auditIntegrity.ok ? "var(--ok-line)" : "var(--danger-line)",
+            }}
+          >
+            <span style={pill(!auditIntegrity ? "muted" : auditIntegrity.ok ? "ok" : "danger")}>무결성</span>
+            {!auditIntegrity ? (
+              <span style={{ color: "var(--ink-3)" }}>기록이 쌓이면 매 판정마다 검증됩니다</span>
+            ) : auditIntegrity.ok ? (
+              <span style={{ color: "var(--ink-2)" }}>
+                감사 로그 <b className="mono">{auditIntegrity.total}</b>줄 전부 서명·체인 정상
+              </span>
+            ) : (
+              <span style={{ color: "var(--danger-hi)" }}>
+                위변조 {auditIntegrity.problems.length}건 (전체 {auditIntegrity.total}줄)
+                <ul style={{ margin: "6px 0 0" }}>
+                  {auditIntegrity.problems.map((p, i) => (
+                    <li key={i} className="mono" style={{ fontSize: 11.5 }}>
+                      {p.line}번째 줄 [{p.kind}] {p.detail}
+                    </li>
+                  ))}
+                </ul>
+              </span>
+            )}
+          </div>
+
+          {injectionChecks.length > 0 && (
+            <div style={{ display: "grid", gap: 8 }}>
+              {injectionChecks.map((c) => (
+                <div
+                  key={c.id}
+                  style={{ ...inset, padding: "11px 14px", display: "flex", alignItems: "center", gap: 12, fontSize: 12.5 }}
+                >
+                  <span style={pill(!c.evaluated ? "muted" : c.isInjection ? "danger" : "ok")}>
+                    {!c.evaluated ? "평가 실패" : c.isInjection ? "위험" : "안전"}
+                  </span>
+                  <span className="mono" style={{ color: "var(--ink-2)" }}>
+                    {c.toolName} · score={c.score.toFixed(4)}
+                  </span>
+                  <em
+                    style={{
+                      marginLeft: "auto",
+                      fontStyle: "normal",
+                      fontSize: 9,
+                      padding: "1px 5px",
+                      borderRadius: 3,
+                      background: "rgba(255,255,255,.08)",
+                      color: "var(--ink-3)",
+                    }}
+                  >
+                    관측용
+                  </em>
+                </div>
               ))}
-            </ul>
-          </span>
-        )}
-      </section>
-      <section>
-        <h2>인젝션 탐지 결과</h2>
-        {injectionChecks.length === 0 ? (
-          <p>아직 없음</p>
-        ) : (
-          <ul>
-            {injectionChecks.map((c) => (
-              <li key={c.id} style={{ color: c.isInjection ? "#d32f2f" : "#2e7d32" }}>
-                {c.isInjection ? "[위험]" : "[안전]"}{!c.evaluated && " [평가실패]"} — {c.toolName} (score={c.score.toFixed(4)})
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-        <OutputScanPanel scans={outputScans} />
+            </div>
+          )}
+
+          <OutputScanPanel scans={outputScans} />
+        </div>
       </details>
+
       {modalDecision && (
         <TrifectaApprovalModal
           decision={modalDecision}
@@ -400,8 +498,9 @@ export default function App() {
           queuedCount={approvals.filter((a) => a.status === "PENDING" && a.id !== modalDecision.approvalId).length}
         />
       )}
+
       {import.meta.env.DEV && (
-        <div style={{ marginTop: "32px", paddingTop: "16px", borderTop: "1px solid #eee" }}>
+        <div style={{ marginTop: 32, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
           <button onClick={() => setModalDecision(SAMPLE_BLOCKED_DECISION)}>
             트라이펙타 경고 데모 보기 (샘플 · 개발용)
           </button>
