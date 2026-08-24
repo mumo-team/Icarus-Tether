@@ -306,9 +306,11 @@ async function main() {
     });
 
     broadcastDecision(sessionId, agentName, decision, ctx.timestamp, ctx.args);
-    broadcastLineage(sessionId); // 판정 직후 현재 계보 스냅샷 방송 → TaintGraph 실시간 갱신
 
     if (!decision.allowed) {
+      // 차단은 결과가 없어(아래에서 바로 반환) 계보가 더 자라지 않는다. 이 시점이
+      // 최종 상태이므로 여기서 방송한다. 통과 쪽은 결과 기록 뒤에 방송한다 — 아래 참조.
+      broadcastLineage(sessionId);
       console.error(`[proxy] 차단  ${agentName}  reason=${decision.reason}`);
       // 오버라이드 가능한 차단이면 승인 id를 알려준다 — 사람이 승인 후 재시도하면 통과.
       if (decision.canOverride && decision.approvalId) {
@@ -349,6 +351,11 @@ async function main() {
         ],
       };
     }
+
+    // 계보 방송은 여기서 한다 — 판정 직후에 보내면 방금 recordToolResult가 만든 노드가
+    // 빠져서 화면이 한 칸씩 밀린다(실측: 호출 3건에 노드 2개). 호출당 방송 횟수는
+    // 그대로 1회이고, 대신 매번 최신 계보가 실린다.
+    broadcastLineage(sessionId);
 
     console.error(`[proxy] ⬅ 통과  ${agentName}`);
 
