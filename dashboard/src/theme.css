@@ -189,3 +189,46 @@ details > summary:focus-visible {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ── ReactFlow 다크 대응 ─────────────────────────
+   Controls는 기본이 '흰 배경 + 어두운 아이콘'이라, 어두운 판 위에 그대로 두면
+   흰 덩어리만 보이고 +/− 아이콘이 사라진다. 배경과 아이콘을 같이 뒤집는다. */
+.react-flow__controls {
+  box-shadow: none;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r2);
+  overflow: hidden;
+}
+.react-flow__controls-button {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  width: 26px;
+  height: 26px;
+}
+.react-flow__controls-button:last-child {
+  border-bottom: none;
+}
+.react-flow__controls-button:hover {
+  background: var(--raise);
+}
+.react-flow__controls-button svg {
+  fill: var(--ink-2);
+  max-width: 12px;
+  max-height: 12px;
+}
+.react-flow__controls-button:hover svg {
+  fill: var(--ink);
+}
+
+/* 노드 손잡이(handle)는 계보 그래프에서 연결점을 끌 일이 없다.
+   흰 점이 도구 이름 옆에 떠서 오히려 노드 경계를 흐린다. */
+.react-flow__handle {
+  background: var(--line-2);
+  border: none;
+  width: 5px;
+  height: 5px;
+}
+
+.react-flow__edge-text {
+  font-size: 10px;
+}

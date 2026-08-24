@@ -315,10 +315,14 @@ async function main() {
         console.error(`[proxy] 오버라이드 가능  approvalId=${decision.approvalId}`);
         simulateDashboardApproval(sessionId, decision.approvalId); // C 자리 스텁
       }
+      // 이 응답은 에이전트가 읽는다. "재시도하라"처럼 지시로 쓰면, 차단당한 도구가
+      // 스스로 자기를 다시 부르라고 시키는 꼴이 된다 — 잘 정렬된 에이전트는 도구 응답
+      // 속 지시를 따르지 않으므로 그 문장을 근거로 재시도하기를 거부한다(실측). 그래서
+      // 지시가 아니라 사실 서술로 적고, 승인 창구가 사람 쪽임을 명시한다.
       const text = [
         `정책 차단: ${decision.explanation?.summary ?? decision.reason ?? "정책 위반"}`,
         decision.canOverride && decision.approvalId
-          ? `승인 후 같은 호출을 재시도하면 진행됩니다 (approvalId=${decision.approvalId})`
+          ? `사람의 승인이 있으면 이 호출은 1회 통과할 수 있습니다. 승인은 대시보드에서 처리되며, 이 응답만으로는 진행되지 않습니다. (approvalId=${decision.approvalId})`
           : "",
       ]
         .filter(Boolean)
