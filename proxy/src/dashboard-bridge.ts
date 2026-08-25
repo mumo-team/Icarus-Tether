@@ -13,7 +13,7 @@
 
 import { WebSocketServer, type WebSocket } from "ws";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -514,4 +514,13 @@ export function stopDashboardBridge(): void {
   wss?.close();
   wss = null;
   clients.clear();
+  // 죽은 프로세스의 토큰을 남기지 않는다. 남아 있으면 다음 기동 전까지
+  // 유효하지 않은 값이 파일에 있어, 그걸 읽은 클라이언트가 원인 모를
+  // 거부를 당한다. 실패는 무시한다 — 이미 없거나 권한이 없는 경우다.
+  controlToken = "";
+  try {
+    unlinkSync(CONTROL_TOKEN_PATH);
+  } catch {
+    /* 없으면 그만 */
+  }
 }

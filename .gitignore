@@ -11,4 +11,3 @@ dist/
 policy-engine/formal/*.out
 policy-engine/formal/states/
 policy-engine/formal/*_TTrace_*
-proxy/.control-token

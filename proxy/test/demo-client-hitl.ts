@@ -155,6 +155,7 @@ async function main() {
         type: "approve",
         sessionId: pending.sessionId,
         approvalId: pending.approvalId,
+        resolvedBy: "auto-tester",
         token: readControlToken(),
       })
     );
