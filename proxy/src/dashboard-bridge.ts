@@ -12,10 +12,11 @@
  */
 
 import { WebSocketServer, type WebSocket } from "ws";
-import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, readFileSync } from "node:fs";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { requestApproval, resolveApproval, attemptSanitization, getSessionLineage, getOverrideAuditLog } from "@icarus-tether/policy-engine";
 import { SanitizationMethod, type PolicyDecision, type AuditLogEntry, type ToolRiskTag } from "@icarus-tether/types";
 
@@ -33,6 +34,28 @@ const ALLOWED_ORIGINS = new Set([
 // (키 없는 SHA-256이라 "사후 편집·삭제 탐지"까지가 목표 — HMAC 서명은 향후 과제.)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AUDIT_LOG_PATH = resolve(__dirname, "../audit.log");
+
+
+// ── 제어 채널 인증 ────────────────────────────────────────────────
+// Origin 헤더는 non-브라우저 클라이언트가 마음대로 붙일 수 있어 인증이 못 된다.
+// 관측(broadcast) 수신은 그대로 열어두되, 상태를 바꾸는 명령만 토큰을 요구한다.
+// 이렇게 나눠야 데모 흐름을 안 깨면서, 인젝션당한 에이전트가 자기 승인을 눌러
+// HITL을 통과하는 경로를 막을 수 있다.
+// 프로젝트 폴더 밖에 둔다 — 파일 읽기 도구는 대개 프로젝트를 루트로 잡으므로,
+// 밖에 있으면 인젝션당한 에이전트가 토큰을 읽어 자기 승인하는 경로가 막힌다.
+// (경로 제한 없는 도구에는 여전히 뚫린다 — 차단이 아니라 문턱 높이기다.)
+const CONTROL_TOKEN_PATH = resolve(tmpdir(), "icarus-tether-control.token");
+const CONTROL_TYPES = new Set(["approve", "reject", "sanitize"]);
+let controlToken = "";
+
+/** 길이가 다르면 즉시 false. 같으면 타이밍 차이가 안 나게 비교한다. */
+function tokenMatches(given: unknown): boolean {
+  if (typeof given !== "string" || controlToken === "") return false;
+  const a = Buffer.from(given, "utf8");
+  const b = Buffer.from(controlToken, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
 
 // 이 프로세스가 마지막으로 쓴 줄의 signature. 다음 줄의 prevHash가 된다.
 // 프로세스 시작 시 기존 audit.log 마지막 줄에서 seed한다(seedLastSignatureFromLog) —
@@ -327,6 +350,7 @@ export function broadcastLineage(sessionId: string): void {
   console.error(`[bridge] 계보 방송  노드 ${nodes.length}개`);
 }
 
+
 /**
  * 세션의 HITL 오버라이드 감사로그 전체를 대시보드에 방송한다 — AuditTimeline의
  * hitlLog 소스. 엔진 hitl.ts의 getOverrideAuditLog가 프로세스 내 누적 로그를 주므로,
@@ -343,14 +367,29 @@ export function broadcastHitlAudit(sessionId: string): void {
   });
 }
 
-function handleDashboardMessage(text: string): void {
+function handleDashboardMessage(text: string, socket: WebSocket): void {
   const msg = JSON.parse(text) as {
     type?: string;
     sessionId?: string;
     approvalId?: string;
     resolvedBy?: string;
     method?: string;
+    token?: string;
   };
+
+  // 상태를 바꾸는 명령만 막는다. 관측용 수신은 이 함수를 타지 않으므로
+  // 연결·실시간 표시는 토큰 없이도 그대로다.
+  if (msg.type && CONTROL_TYPES.has(msg.type) && !tokenMatches(msg.token)) {
+    console.error(`[bridge] [경고] 제어 명령 거부 — 토큰 불일치 (type=${msg.type})`);
+    socket.send(
+      JSON.stringify({
+        type: "control_rejected",
+        reason: "제어 토큰이 필요합니다. proxy 콘솔의 토큰을 대시보드에 입력하세요.",
+        timestamp: new Date().toISOString(),
+      })
+    );
+    return;
+  }
 
   // (1) 승인/거부 — HITL 오버라이드
   if (msg.type === "approve" || msg.type === "reject") {
@@ -407,6 +446,21 @@ function handleDashboardMessage(text: string): void {
  */
 export function startDashboardBridge(): void {
   if (wss) return;
+  
+  // 프로세스마다 새 토큰. 사람은 콘솔에서 보고 대시보드에 붙여넣고,
+  // 같은 머신의 Node 클라이언트(demo:hitl)는 파일에서 읽는다.
+  controlToken = randomUUID();
+  try {
+    writeFileSync(CONTROL_TOKEN_PATH, controlToken, { encoding: "utf8", mode: 0o600 });
+  } catch (err) {
+    console.error("[bridge] 제어 토큰 파일 기록 실패 — 콘솔 값으로 진행하세요:", err);
+  }
+  console.error(
+    `\n[bridge] ── 제어 토큰 ─────────────────────────────────\n` +
+      `[bridge]   ${controlToken}\n` +
+      `[bridge]   대시보드 상단 '제어 토큰' 칸에 넣어야 승인·정화가 동작합니다.\n` +
+      `[bridge] ──────────────────────────────────────────────\n`
+  );
   const server = new WebSocketServer({
     port: WS_PORT,
     host: WS_HOST,
@@ -444,7 +498,7 @@ export function startDashboardBridge(): void {
     socket.on("close", () => clients.delete(socket));
     socket.on("message", (raw) => {
       try {
-        handleDashboardMessage(raw.toString());
+        handleDashboardMessage(raw.toString(), socket);
       } catch (err) {
         // 없는 id·세션 불일치·이미 처리된 제안은 엔진이 예외로 막는다 (fail-closed).
         console.error("[bridge] 대시보드 메시지 처리 실패:", err);
