@@ -20,9 +20,26 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { WebSocket } from "ws";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROXY_PATH = resolve(__dirname, "../src/index.ts");
+const CONTROL_TOKEN_PATH = resolve(tmpdir(), "icarus-tether-control.token");
+
+/**
+ * 제어 토큰은 '보낼 때' 읽는다. 이 스크립트가 proxy를 직접 띄우므로
+ * (StdioClientTransport), 모듈 로드 시점엔 파일이 아직 없거나 지난 실행의
+ * 토큰이 남아 있다. proxy는 기동할 때마다 새 토큰을 발급한다.
+ */
+function readControlToken(): string {
+  try {
+    return readFileSync(CONTROL_TOKEN_PATH, "utf8").trim();
+  } catch {
+    console.error("[demo] 제어 토큰 파일을 읽지 못했습니다 — 승인이 거부될 수 있습니다");
+    return "";
+  }
+}
 
 const PACE_MS = Number(process.env.DEMO_PACE_MS ?? 3000);
 const APPROVAL_TIMEOUT_MS = Number(process.env.APPROVAL_TIMEOUT_MS ?? 60_000);
@@ -69,6 +86,11 @@ async function main() {
     }
     if (msg.type === "sanitized") {
       resolveAction?.(msg.ok ? `정화됨(${msg.method})` : "정화 실패");
+    }
+     // 토큰이 틀리면 브리지가 조용히 씹지 않고 이걸 되돌려 준다.
+    // 없으면 승인 대기 타임아웃까지 원인을 모른 채 기다리게 된다.
+    if (msg.type === "control_rejected") {
+      console.error(`[demo] [경고] 제어 명령 거부됨 — ${msg.reason}`);
     }
   });
 
@@ -133,7 +155,7 @@ async function main() {
         type: "approve",
         sessionId: pending.sessionId,
         approvalId: pending.approvalId,
-        resolvedBy: "auto-tester",
+        token: readControlToken(),
       })
     );
   } else {

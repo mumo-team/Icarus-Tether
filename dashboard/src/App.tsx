@@ -4,7 +4,7 @@ import MetricCards from "./components/MetricCards";
 import ThreatFusionBanner from "./components/ThreatFusionBanner";
 import ApprovalQueue from "./components/ApprovalQueue";
 import SanitizationCompareView from "./components/SanitizationCompareView";
-import type { LineageNode } from "./components/TaintGraph";
+import type { LineageSnapshot } from "./components/TaintGraph";
 import ForensicReplay from "./components/ForensicReplay";
 import TrifectaApprovalModal from "./components/TrifectaApprovalModal";
 import AuditTimeline from "./components/AuditTimeline";
@@ -76,12 +76,18 @@ export default function App() {
     maskedCount?: number;
     residualSensitiveData?: boolean;
   } | null>(null);
-  const [snapshots, setSnapshots] = useState<LineageNode[][]>([]);
+  const [snapshots, setSnapshots] = useState<LineageSnapshot[]>([]);
   const [outputScans, setOutputScans] = useState<OutputScanEvent[]>([]);
   const [awaiting, setAwaiting] = useState<Record<string, "awaiting" | "timeout">>({});
   const [recvErrors, setRecvErrors] = useState(0);
   // 차단된 호출이 실제로 내보내려던 인자. 정화 전/후 비교의 좌측 상자 원본이 된다.
   const [blockedArgs, setBlockedArgs] = useState<string | null>(null);
+    // 제어 토큰 — proxy 콘솔에 뜬 값을 한 번 붙여넣으면 브라우저에 남는다.
+  // 관측은 토큰 없이도 되므로, 이게 비어 있어도 화면은 정상 동작한다.
+  const [controlToken, setControlToken] = useState<string>(
+    () => localStorage.getItem("icarus.controlToken") ?? ""
+  );
+  const [controlError, setControlError] = useState<string | null>(null);
     useEffect(() => {
     let disposed = false; // 언마운트 후 재연결 타이머가 되살아나는 것 방지
     let retryTimer: number | undefined;
@@ -215,8 +221,16 @@ export default function App() {
             residualSensitiveData: data.residualSensitiveData,
           });
        }
+       if (data.type === "control_rejected") {
+          console.error("[대시보드] 제어 명령 거부:", data.reason);
+          setControlError(data.reason ?? "제어 명령이 거부되었습니다");
+        }
+        if (data.type === "approval_resolved") setControlError(null);
         if (data.type === "lineage") {
-          setSnapshots((prev) => pushCapped(prev, data.nodes ?? [], MAX_SNAPSHOTS));
+          // 방송 시각을 같이 보관한다 — 재생 중인 단계와 감사 로그의 판정을 맞추는 열쇠.
+          setSnapshots((prev) =>
+            pushCapped(prev, { nodes: data.nodes ?? [], timestamp: data.timestamp }, MAX_SNAPSHOTS)
+          );
         }
         if (data.type === "hitl_audit") {
           // 세션 전체 HITL 감사로그(엔진 누적) — append가 아니라 교체.
@@ -264,6 +278,7 @@ export default function App() {
           sessionId: appr.sessionId,
           approvalId: id,
           resolvedBy,
+          token: controlToken,
         })
       );
     }
@@ -295,6 +310,7 @@ export default function App() {
             sessionId: modalDecision.sessionId,
             approvalId,
             resolvedBy: "dashboard-reviewer",
+            token: controlToken,
           })
         );
         console.log("[대시보드] 승인 전송:", approvalId);
@@ -310,6 +326,7 @@ export default function App() {
             type: "sanitize",
             sessionId: modalDecision.sessionId,
             method: action.detail,
+            token: controlToken,
           })
         );
         console.log("[대시보드] 정화 요청:", action.detail);
@@ -324,7 +341,7 @@ export default function App() {
     setModalDecision(null);
   }
 
-  const lastLineage = snapshots[snapshots.length - 1] ?? [];
+  const lastLineage = snapshots[snapshots.length - 1]?.nodes ?? [];
 
   return (
     <div style={{ maxWidth: 1340, margin: "0 auto", padding: "26px 30px 76px" }}>
@@ -362,6 +379,28 @@ export default function App() {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          {controlError && <span style={pill("danger")}>{controlError}</span>}
+          <input
+            type="password"
+            value={controlToken}
+            onChange={(e) => {
+              setControlToken(e.target.value);
+              localStorage.setItem("icarus.controlToken", e.target.value);
+              setControlError(null);
+            }}
+            placeholder="제어 토큰"
+            aria-label="제어 토큰"
+            style={{
+              width: 150,
+              padding: "6px 10px",
+              borderRadius: "var(--r2)",
+              border: `1px solid ${controlToken ? "var(--ok-line)" : "var(--line-2)"}`,
+              background: "rgba(255,255,255,.04)",
+              color: "var(--ink)",
+              fontFamily: '"IBM Plex Mono", ui-monospace, monospace',
+              fontSize: 11.5,
+            }}
+          />
           {recvErrors > 0 && (
             <span style={pill("danger")}>이벤트 수신 오류 {recvErrors}건</span>
           )}
@@ -396,7 +435,7 @@ export default function App() {
 
       {/* ── 계보가 화면의 주인공. 근거·승인은 옆에 붙인다 ── */}
       <div style={{ display: "grid", gridTemplateColumns: "1.82fr 1fr", gap: GAP, alignItems: "stretch", marginBottom: GAP }}>
-        <ForensicReplay snapshots={snapshots} />
+        <ForensicReplay snapshots={snapshots} logs={logs} />
         <aside style={card}>
           <BlockReason logs={logs} lineage={lastLineage} />
           <div style={{ height: 1, background: "var(--line)", margin: "18px 0 15px" }} />
