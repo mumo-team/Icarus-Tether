@@ -33,8 +33,10 @@
  *    "행동(도구 호출)의 길목"을 검사하는 것이므로, 응답-텍스트 exfil은 out of scope.
  *  - min-length 미만 짧은 민감값은 우연 매치 방지를 위해 제외 → evade 가능. 문턱은 태깅
  *    사유별로 다르다: 출처 기반(민감 소스 도구가 반환한 값) 6자, 내용 기반(엔트로피·정규식
- *    추정) 12자 — OUTPUT_SCAN_MIN_LENGTH_SOURCE 주석 참조. base64 디코딩 게이트(≥12바이트)는
- *    출처와 무관하게 유지되므로, 6~11자 출처 값의 base64 인코딩본은 여전히 미탐이다.
+ *    추정) 12자 — OUTPUT_SCAN_MIN_LENGTH_SOURCE 주석 참조. base64 디코딩 게이트도 둘로 나뉜다:
+ *    엄격 집합(run ≥16자·디코딩 ≥12바이트)은 모든 needle이 보고, 완화 집합(run ≥8자·디코딩
+ *    ≥6바이트)은 12자 미만 출처 needle이 처음 나올 때만 지연 생성해 그 needle에만 공급한다
+ *    (B64_RELAXED 주석). 5자 이하 출처 값의 base64는 여전히 미탐.
  *  - 분할 전송: 한 호출에 needle의 연속 12자(FRAGMENT_WINDOW) 이상 조각이 실리면 잡는다(포함검사
  *    (e)). 12자 미만 조각으로 더 잘게 나누면 미탐 — 호출 간 재조립 버퍼는 두지 않는다.
  *  - 인코딩 "전에" 변형(압축·암호화)한 뒤 hex/base64 하는 세탁은 미탐 — 그건 hex/base64
@@ -166,12 +168,51 @@ function hashValue(v: string): string {
 }
 
 /**
- * base64로 보이는 연속 구간(run). 표준 charset(`+/`)과 URL-safe charset(`-_`)을 각각.
+ * base64 디코딩 게이트 한 벌 — run 최소 길이(후보 정규식·후보 길이 검사·URL 세그먼트 최소)와
+ * 디코딩 결과 최소 바이트. 표준 charset(`+/`)과 URL-safe charset(`-_`) run 정규식을 함께 든다.
+ */
+interface B64Gates {
+  runMin: number;
+  byteMin: number;
+  stdRun: RegExp;
+  urlsafeRun: RegExp;
+}
+
+/**
+ * 엄격 게이트 — 모든 needle이 보는 기본 디코딩 집합.
  * 인코딩 ≥16자만 후보 — 디코딩 ≥12바이트라야 포함검사(min-length 12) 통과 가능하고,
  * 짧은 정상 단어("test"·"name")는 애초에 후보에서 빠져 우연 디코드 오탐을 원천 차단.
  */
-const BASE64_RUN = /[A-Za-z0-9+/]{16,}={0,2}/g;
-const URLSAFE_B64_RUN = /[A-Za-z0-9_-]{16,}/g;
+const B64_STRICT: B64Gates = {
+  runMin: 16,
+  byteMin: OUTPUT_SCAN_MIN_LENGTH,
+  stdRun: /[A-Za-z0-9+/]{16,}={0,2}/g,
+  urlsafeRun: /[A-Za-z0-9_-]{16,}/g,
+};
+
+/**
+ * ★ 완화 게이트 — 12자 미만 출처 needle 전용 디코딩 집합 (지연 생성·메모이즈).
+ *
+ * 왜 필요한가: 출처 문턱을 6자로 낮춰도(OUTPUT_SCAN_MIN_LENGTH_SOURCE) 6~11자 출처 값의 base64
+ * 인코딩본(8~15자 run, 디코딩 6~11바이트)은 엄격 게이트에서 후보조차 되지 못했다. 확장 벤치
+ * 실행 B 완화 모드의 잔여 미탐 4건(X271·X279#2·X311·X329#2)이 전부 이 형태였다.
+ *
+ * 왜 안전한가: 이 집합이 엄격 집합에 더해 새로 통과시키는 디코딩 결과는 6~11바이트다. 그 안에
+ * 들어갈 수 있는 needle은 11자 이하뿐이라 내용 기반 needle(문턱 12)·정규식(≥20자)은 영향이
+ * 없고, 출처 needle 중에서도 12자 미만인 것만 이 집합을 본다(호출부). 8~12자 평범한 토큰
+ * ("password"·"settings" 등)은 디코딩하면 상위 비트가 선 바이트가 나와 UTF-8 게이트에서 탈락하고,
+ * 디코딩이 텍스트로 성공하는 토큰은 진짜 base64뿐이라 탐지로 이어지려면 그 텍스트가 세션의 실제
+ * 출처 값을 담아야 한다. "test"(4자)는 8자 하한에도 못 미쳐 후보가 아니다. 기존 81·boundary·
+ * 확장 A/B 네 세트 실측 새 오탐 0.
+ *
+ * 비용: 12자 미만 출처 needle이 하나도 없는 호출에서는 생성되지 않는다(엄격 경로 비용 불변).
+ */
+const B64_RELAXED: B64Gates = {
+  runMin: 8,
+  byteMin: OUTPUT_SCAN_MIN_LENGTH_SOURCE,
+  stdRun: /[A-Za-z0-9+/]{8,}={0,2}/g,
+  urlsafeRun: /[A-Za-z0-9_-]{8,}/g,
+};
 
 /** 리딩 URL 쓰레기(`host/…/`) 대응으로 시도할 내부 `/` 접미부 최대 개수 (성능 유계). */
 const OFFSET_SLASH_TRIES = 8;
@@ -190,16 +231,16 @@ function isMeaningfulText(decoded: string, bytes: Buffer): boolean {
  *   (snake_case·kebab-case·UUID·파일경로)를 디코딩해도, 재인코딩이 원본과 왕복하지
  *   않으면(정상 텍스트는 거의 항상 비정준) 폐기된다.
  */
-function tryDecodeBase64Candidate(candidate: string, out: string[]): boolean {
+function tryDecodeBase64Candidate(candidate: string, out: string[], gates: B64Gates): boolean {
   const noPad = candidate.replace(/=+$/, "");
-  if (noPad.length < 16 || noPad.length % 4 === 1) return false; // 짧거나 base64 불가능 길이
+  if (noPad.length < gates.runMin || noPad.length % 4 === 1) return false; // 짧거나 base64 불가능 길이
   let bytes: Buffer;
   try {
     bytes = Buffer.from(candidate, "base64");
   } catch {
     return false;
   }
-  if (bytes.length < OUTPUT_SCAN_MIN_LENGTH) return false; // 디코딩 <12바이트 → 매치 불가
+  if (bytes.length < gates.byteMin) return false; // 디코딩이 문턱 미만 → 매치 불가 (엄격 12 / 완화 6)
   if (bytes.toString("base64").replace(/=+$/, "") !== noPad) return false; // 정준성
   const text = bytes.toString("utf8");
   if (!isMeaningfulText(text, bytes)) return false;
@@ -221,20 +262,20 @@ function tryDecodeBase64Candidate(candidate: string, out: string[]): boolean {
  *     쓰레기가 되는 경우, 내부 `/`를 유지한 접미부가 깨끗한 base64가 된다. 실패 시에만
  *     돌므로 정상 base64 비용은 불변, 정준성 게이트가 정상 경로 텍스트를 거른다.
  */
-function decodeBase64Runs(strings: readonly string[]): string[] {
+function decodeBase64Runs(strings: readonly string[], gates: B64Gates): string[] {
   const decoded: string[] = [];
   for (const s of strings) {
-    for (const run of s.match(BASE64_RUN) ?? []) {
-      if (tryDecodeBase64Candidate(run, decoded)) continue; // 통짜 성공이면 오프셋 불필요
+    for (const run of s.match(gates.stdRun) ?? []) {
+      if (tryDecodeBase64Candidate(run, decoded, gates)) continue; // 통짜 성공이면 오프셋 불필요
       let idx = run.indexOf("/");
       for (let tries = 0; idx !== -1 && tries < OFFSET_SLASH_TRIES; tries++) {
-        tryDecodeBase64Candidate(run.slice(idx + 1), decoded);
+        tryDecodeBase64Candidate(run.slice(idx + 1), decoded, gates);
         idx = run.indexOf("/", idx + 1);
       }
     }
-    for (const run of s.match(URLSAFE_B64_RUN) ?? []) {
+    for (const run of s.match(gates.urlsafeRun) ?? []) {
       if (!/[-_]/.test(run)) continue; // 순수 영숫자 run은 표준 패스가 이미 처리
-      tryDecodeBase64Candidate(run.replace(/-/g, "+").replace(/_/g, "/"), decoded);
+      tryDecodeBase64Candidate(run.replace(/-/g, "+").replace(/_/g, "/"), decoded, gates);
     }
   }
   return decoded;
@@ -267,14 +308,14 @@ function percentDecodeLoose(s: string): string {
  * ★ 미탐 ② URL 구조 세그먼트 분할 — base64가 URL 경로(`/<b64>.png`)에 실릴 때 `/`·`.`가
  * base64 charset(`+/`)과 겹쳐 하나의 run으로 병합되면, 디코딩 결과 앞부분이 쓰레기 바이트가
  * 되어 유효 UTF-8 검사에 걸려 run 전체가 폐기된다(그 안에 진짜 시크릿이 있어도). 구분자로
- * 잘라 각 세그먼트를 깨끗한 base64 후보로 만든다. base64 run 최소 길이(16) 미만은 제외.
+ * 잘라 각 세그먼트를 깨끗한 base64 후보로 만든다. 게이트의 run 최소 길이 미만은 제외.
  *
  * `=`(base64 패딩)·`%`(percent-decoding이 담당)는 구분자에서 뺀다. 전체 문자열 스캔은
  * 그대로 유지되므로(호출부), `/` 포함 정상 base64는 여전히 통짜로 잡혀 이 분할은 additive다.
  */
 const URL_DELIM = /[/?&#.:@]+/;
-function urlSegments(s: string): string[] {
-  return s.split(URL_DELIM).filter((seg) => seg.length >= 16);
+function urlSegments(s: string, minLen: number): string[] {
+  return s.split(URL_DELIM).filter((seg) => seg.length >= minLen);
 }
 
 // ---------------------------------------------------------------------------
@@ -378,9 +419,9 @@ export function scanOutputForSensitive(
   //     전부 정준성 게이트(재인코딩 왕복)를 통과해야 하므로 순수 additive(과차단 0). 단일 필드일
   //     땐 concat===outStrings[0]이라 개별 추가가 무의미하므로 다필드일 때만 더한다(핫패스 비용 불변).
   const b64Inputs = outStrings.length > 1 ? [...scanBases, ...outStrings] : scanBases;
-  const b64Sources = [...b64Inputs, ...b64Inputs.flatMap(urlSegments)];
+  const b64Sources = [...b64Inputs, ...b64Inputs.flatMap((s) => urlSegments(s, B64_STRICT.runMin))];
   // dedup: concat과 개별 필드가 같은 run을 중복 디코딩할 수 있어 haystack 비용을 여기서 상한한다.
-  const decodedStrings = [...new Set(decodeBase64Runs(b64Sources))];
+  const decodedStrings = [...new Set(decodeBase64Runs(b64Sources, B64_STRICT))];
 
   // 1. 포함검사: (concat·percent-decoded) + 디코딩 평문을 haystack으로. min-length가 우연 매치를 막는다.
   if (scanBases.length > 0) {
@@ -388,6 +429,23 @@ export function scanOutputForSensitive(
     // 정규화 폴백용 haystack은 "아주 긴 needle"이 나올 때만 지연 생성(대부분 생략 → 대용량 무손실 최적화).
     let normHaystacksLazy: string[] | null = null;
     const normHaystacks = (): string[] => (normHaystacksLazy ??= haystacks.map(normalizeText));
+    // ★ 완화 디코딩 집합 — 12자 미만 출처 needle이 처음 나올 때만 생성·메모이즈(B64_RELAXED 주석).
+    //   엄격 집합에 이미 있는 디코딩 결과는 제외해 haystack이 중복되지 않게 한다. 새로 더해진 것이
+    //   없으면 엄격 haystack을 그대로 돌려준다(추가 검사 비용 0).
+    let relaxedHaystacksLazy: string[] | null = null;
+    const relaxedHaystacks = (): string[] => {
+      if (relaxedHaystacksLazy) return relaxedHaystacksLazy;
+      const relaxedSources = [...b64Inputs, ...b64Inputs.flatMap((s) => urlSegments(s, B64_RELAXED.runMin))];
+      const known = new Set(decodedStrings);
+      const extra: string[] = [];
+      for (const d of decodeBase64Runs(relaxedSources, B64_RELAXED)) {
+        if (!known.has(d)) {
+          known.add(d);
+          extra.push(d);
+        }
+      }
+      return (relaxedHaystacksLazy = extra.length > 0 ? [...haystacks, ...extra] : haystacks);
+    };
     // (e) 조각 검사 후보 — (a)~(d)에 전부 실패한 needle 중 길이 게이트를 통과한 것만 모아
     //     루프가 끝난 뒤 haystack 1패스로 한꺼번에 본다(findFragment).
     const fragNeedles: FragmentNeedle[] = [];
@@ -397,8 +455,11 @@ export function scanOutputForSensitive(
       const values = collectStrings(payload);
       for (const v of values) {
         if (v.length < min) continue; // 짧은 값은 어떤 needle도 안 씀 (우연 매치 방지)
+        // ★ 12자 미만 출처 needle만 완화 디코딩 집합을 본다 — 그보다 긴 needle은 완화 집합이
+        //   새로 더하는 6~11바이트 평문 안에 들어갈 수 없어 엄격 집합으로 충분하다.
+        const hay = origin === "source" && v.length < B64_STRICT.byteMin ? relaxedHaystacks() : haystacks;
         // (a) 정확 포함검사 — 무손실. 원문/base64 그대로 실린 경우.
-        if (haystacks.some((h) => h.includes(v))) {
+        if (hay.some((h) => h.includes(v))) {
           return { kind: "containment", sourceTool: toolName, matchLen: v.length, valueHash: hashValue(v) };
         }
         // (b) 정규화 포함검사 — 대소문자·구분자 재포맷을 견딘다. min-length는 normalize 후 길이에.
@@ -407,7 +468,7 @@ export function scanOutputForSensitive(
         if (nv.length >= min) {
           const matched =
             nv.length <= NEEDLE_REGEX_MAX
-              ? matchNormalizedNeedle(nv, haystacks)
+              ? matchNormalizedNeedle(nv, hay)
               : normHaystacks().some((h) => h.includes(nv));
           if (matched) {
             return { kind: "containment", sourceTool: toolName, matchLen: nv.length, valueHash: hashValue(v), normalized: true };

@@ -80,10 +80,53 @@ test("출처 기반 문턱: 7자 출처 값의 hex 인코딩본도 탐지 (hex n
   assert.equal(f?.kind, "containment");
 });
 
-test("한계(정직): 6~11자 출처 값의 base64 인코딩본은 여전히 미탐 — 디코딩 게이트(≥12바이트)는 출처 무관", () => {
-  const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "h9x2mq" }, origin: "source" }];
-  const b64 = Buffer.from("h9x2mq", "utf8").toString("base64"); // 8자 run — base64 후보(≥16) 자체가 아님
+/**
+ * ★ 성질 변경 기록 — 이 테스트는 원래 "6~11자 출처 값의 base64 인코딩본은 미탐(디코딩 게이트
+ * ≥12바이트는 출처 무관)"이라는 한계를 고정했다. 완화 디코딩 집합(run ≥8자·디코딩 ≥6바이트)을
+ * 12자 미만 출처 needle에만 지연 공급하면서 그 한계를 의도적으로 걷어낸다.
+ *
+ * 걷어내는 이유:
+ *  1. 확장 벤치 실행 B의 완화 모드 잔여 미탐 4건(X271·X279#2·X311·X329#2)이 전부 이 형태였다.
+ *  2. 완화 집합이 새로 통과시키는 디코딩 결과는 6~11바이트라 그 안에 들어갈 needle은 11자 이하 =
+ *     출처 needle뿐이다. 내용 기반 needle(문턱 12)과 정규식(≥20자)은 영향을 받지 않는다.
+ *  3. 8~12자 평범한 토큰은 UTF-8 게이트에서 탈락하고, 텍스트로 풀리는 토큰은 진짜 base64뿐이라
+ *     탐지로 이어지려면 그 텍스트가 실제 출처 값을 담아야 한다. "test"(4자)는 후보가 아니다.
+ *     기존 81·boundary·확장 A/B 네 세트 실측 새 오탐 0.
+ *  4. 12자 미만 출처 needle이 없는 호출은 집합을 만들지 않아 비용이 그대로다.
+ *
+ * 남기는 성질: 내용 기반(origin 생략)이면 엄격 집합만 보므로 여전히 미탐(두 번째 단언).
+ */
+test("★ 완화 디코딩: 6자 출처 값의 base64 인코딩본이 이제 탐지 — 내용 기반이면 여전히 미탐", () => {
+  const b64 = Buffer.from("h9x2mq", "utf8").toString("base64"); // "aDl4Mm1x" 8자 run
+  const asSource: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "h9x2mq" }, origin: "source" }];
+  const f = scanOutputForSensitive(asSource, { body: `payload=${b64}` }, DET);
+  assert.equal(f?.kind, "containment");
+  assert.equal(f?.matchLen, 6);
+  const asContent: SensitivePayload[] = [{ toolName: "read_github_issue", payload: { v: "h9x2mq" } }];
+  assert.equal(scanOutputForSensitive(asContent, { body: `payload=${b64}` }, DET), null);
+});
+
+test("완화 디코딩: 7자 출처 값(패딩 있는 base64 'UG43JHhRMg==')도 탐지 — 확장 벤치 X271 형태", () => {
+  const sp: SensitivePayload[] = [{ toolName: "get_db_credentials", payload: { v: "Pn7$xQ2" }, origin: "source" }];
+  const f = scanOutputForSensitive(sp, { body: "payload=UG43JHhRMg==" }, DET);
+  assert.equal(f?.kind, "containment");
+  assert.equal(f?.sourceTool, "get_db_credentials");
+});
+
+test("완화 디코딩 하한: 5자 출처 값의 base64(run 7자)는 여전히 미탐", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "h9x2m" }, origin: "source" }];
+  const b64 = Buffer.from("h9x2m", "utf8").toString("base64"); // "aDl4Mm0=" → 패딩 제외 7자 < 8
   assert.equal(scanOutputForSensitive(sp, { body: `payload=${b64}` }, DET), null);
+});
+
+test("완화 디코딩 과차단 가드: 'test'와 8~12자 평범한 토큰은 짧은 출처 needle이 있어도 미발동", () => {
+  const sp: SensitivePayload[] = [
+    { toolName: "read_secrets", payload: { v: "h9x2mq" }, origin: "source" },
+    { toolName: "get_db_credentials", payload: { v: "Pn7$xQ2" }, origin: "source" },
+  ];
+  assert.equal(scanOutputForSensitive(sp, { body: "test" }, DET), null);
+  assert.equal(scanOutputForSensitive(sp, { body: "password reset for username; settings deployed, released internal" }, DET), null);
+  assert.equal(scanOutputForSensitive(sp, { id: "550e8400-e29b-41d4-a716-446655440000", sha: "9f3ab2c1e4d5f6a7" }, DET), null);
 });
 
 // ── 정규식(엔트로피 제외) ───────────────────────────────────────────────────
