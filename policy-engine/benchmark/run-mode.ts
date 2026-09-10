@@ -22,9 +22,21 @@ if (mode !== "session" && mode !== "lineage") {
   process.exit(2);
 }
 
-// dev-bench 설정에 판정 모드를 주입한 임시 config 작성
-const baseConfig = JSON.parse(readFileSync(path.join(__dirname, "config.dev-bench.json"), "utf8"));
+// 벤치 설정 선택 — BENCH_CONFIG(절대/상대 경로)가 있으면 그 설정으로, 없으면 기존 기본값.
+// 확장 세트의 "도구 분류를 바꿔 다시 재는" 실행(B)이 기존 설정 파일을 건드리지 않고
+// 별도 파일로 돌 수 있게 하는 유일한 스위치다.
+const configPath = process.env.BENCH_CONFIG
+  ? path.resolve(process.env.BENCH_CONFIG)
+  : path.join(__dirname, "config.dev-bench.json");
+
+// 설정에 판정 모드를 주입한 임시 config 작성 (원본 파일은 무수정)
+const baseConfig = JSON.parse(readFileSync(configPath, "utf8"));
 baseConfig.judgmentMode = mode;
+// 바닥 완화 스위치 주입 — 확장 세트의 개선 전/후 비교용. 미지정이면 설정 파일 값(기본 "off").
+// lineage 전용 규칙이라 session 모드 결과에는 영향이 없어야 한다(두 정책 비교 성립 조건).
+if (process.env.BENCH_FALLBACK_RELAXATION) {
+  baseConfig.fallbackRelaxation = process.env.BENCH_FALLBACK_RELAXATION;
+}
 const tmpDir = mkdtempSync(path.join(tmpdir(), "bench-config-"));
 const tmpConfig = path.join(tmpDir, "config.json");
 writeFileSync(tmpConfig, JSON.stringify(baseConfig));
@@ -38,9 +50,10 @@ const realStdoutWrite = process.stdout.write.bind(process.stdout);
 console.log = () => {};
 
 // 시나리오 세트 선택: boundary(기존 경계 케이스 세트, 기본) | realistic(현실 분포 세트)
+//                    | ext(동결된 확장 세트 scenarios-ext.ts — 기존 세트와 별도 실행)
 const benchSet = process.env.BENCH_SET ?? "boundary";
-if (benchSet !== "boundary" && benchSet !== "realistic") {
-  console.error(`[bench] 알 수 없는 BENCH_SET: ${benchSet} (boundary | realistic)`);
+if (benchSet !== "boundary" && benchSet !== "realistic" && benchSet !== "ext") {
+  console.error(`[bench] 알 수 없는 BENCH_SET: ${benchSet} (boundary | realistic | ext)`);
   process.exit(2);
 }
 
@@ -50,7 +63,9 @@ const { runAll } = await import("./harness.js");
 const scenarios =
   benchSet === "realistic"
     ? (await import("./scenarios-realistic.js")).REALISTIC_SCENARIOS
-    : (await import("./scenarios.js")).SCENARIOS;
+    : benchSet === "ext"
+      ? (await import("./scenarios-ext.js")).EXT_SCENARIOS
+      : (await import("./scenarios.js")).SCENARIOS;
 
 const warmup = Number(process.env.BENCH_WARMUP ?? 1000);
 const iters = Number(process.env.BENCH_ITERS ?? 10000);

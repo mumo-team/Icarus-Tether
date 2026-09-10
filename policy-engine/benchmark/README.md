@@ -24,18 +24,67 @@
 두 모드를 **같은 정답**에 채점하는 게 핵심이다 — 경계 케이스에서 한 모드가 틀리고
 다른 모드가 맞으면, 그 차이가 곧 모드의 우열이 된다.
 
-## 두 시나리오 세트
+## 시나리오 세트
 
-목적이 다른 두 세트를 `BENCH_SET`으로 골라 실행한다:
+목적이 다른 세 세트를 `--set`(또는 `BENCH_SET`)으로 골라 실행한다:
 
 | 세트 | 파일 | 목적 | 분포 |
 |---|---|---|---|
 | **boundary** | `scenarios.ts` | 두 모드의 판정 **차이 증명** | 경계 케이스 고비중 (11개) |
 | **realistic** | `scenarios-realistic.ts` | **절대 오탐률 추정** (실운영 근사) | 정상 54 : 공격 27 (81개) |
+| **ext** | `scenarios-ext.ts` | **위협 모델 커버리지** (구현 미참조 생성·동결) | 정상 220 : 공격 102 (322개) |
 
-- `npm run bench` → 기본 `both` (두 세트 연속 실행).
-- `BENCH_SET=boundary` / `realistic` → 한 세트만.
-- 두 세트 모두 같은 하네스·같은 정답 채점·session/lineage 비교를 공유한다.
+- `npm run bench` → 기본 `both` (boundary + realistic). **ext는 포함되지 않는다.**
+- `npm run bench -- --set ext` → 확장 세트만. 기존 세트와 섞이지 않게 명시적으로 골라야 한다.
+- `npm run bench -- --set all` → 세 세트 전부.
+- `BENCH_SET=boundary` / `realistic` / `ext` → env로도 같은 선택이 된다(CLI 플래그가 우선).
+- 세 세트 모두 같은 하네스·같은 정답 채점·session/lineage 비교를 공유한다.
+
+### ext 세트의 두 실행 (A / B) — 도구 등록 여부의 영향 측정
+
+같은 동결 세트를 **설정만 바꿔** 두 번 돌린다. 시나리오도 엔진도 그대로다.
+
+| 실행 | 설정 | 등록된 도구 | 리포트 |
+|---|---|---|---|
+| **A** | `config.dev-bench.json` | dev.json 기반 일부 (세트가 쓰는 47개 중 22개) | `results-ext-A.md` |
+| **B** | `config.dev-bench-ext.json` | `scenarios-ext.README.md`가 선언한 47개 전부 | `results-ext-B.md` |
+
+```bash
+npm run bench -- --set ext --label A                                            # 실행 A
+npm run bench -- --set ext --config benchmark/config.dev-bench-ext.json --label B  # 실행 B
+```
+
+각 실행에 `--relax`를 더하면 안전 바닥 완화를 켠 `results-ext-A-relax.md` / `results-ext-B-relax.md`가
+따로 생긴다. 네 파일이 논문의 "개선 전/후" 표에 대응한다(단계별 수치는 `results-ext-scan-hardening.md`).
+
+`config.dev-bench-ext.json`은 A와 **도구 분류만** 다르다(민감 11 · 비신뢰 9 · 외부 싱크
+10 · 중립 17). `secretDetection`·`extractionSchema`·정책 스위치는 A와 같고 `piiPatterns`는
+양쪽 다 없다. `--config`는 ext 세트에만 적용된다 — 기존 두 세트는 어떤 실행에서도 항상
+`config.dev-bench.json`으로 돌아야 비교 기준이 되기 때문이다.
+
+### ext 세트 실행 시 자동 생성물
+
+`--set ext`는 실행 후 `results-ext-<label>.md`를 쓴다(`--out <path>`로 위치 변경,
+`--no-report`로 생략). 비교표의 여러 열이 서로 다른 시점의 측정이 되지 않도록, 리포트를
+만들 때 realistic 세트를 같은 실행 안에서 함께 돌린다. `--config`로 대체 설정을 준
+실행이면 기본 설정의 확장 세트 결과(실행 A 기준선)도 같은 실행에서 함께 돌려
+`실행 A / 실행 B / 기존 81` 세 열 비교표를 만든다.
+
+리포트에 담기는 분해 축: tier별 · **싱크 도구를 실제로 호출한 정상만의 오탐률**(중립
+도구만 평가하는 정상은 어떤 정책이든 통과하므로 분리) · 유출 형태별 미탐 · 미등록 도구
+default-deny 오탐 · 오탐/미탐 id 목록과 각 판정 지점의 `why`.
+
+> ⚠ `scenarios-ext.ts`는 커밋 `bb0a2e9`로 동결돼 있다. 어떤 이유로도 수정하지 않는다.
+> 분해에 필요한 메타데이터(도구 분류·유출 형태)는 `report-ext.ts`가 세트 밖에서
+> 시나리오 제목과 `scenarios-ext.README.md`의 분류 의도로부터 계산한다.
+
+### ext 세트의 분모 주의
+
+ext는 한 시나리오가 여러 `evaluate`를 갖는 유형("다중 전송 중 하나만 유출")을 포함해,
+**시나리오 category가 attack이면서 정답이 pass인 판정 지점이 7개** 있다. `results-ext.md`의
+비율은 판정 지점의 정답(`expect`) 기준(정상 239 · 공격 105)이고, 콘솔 표의 비율은 기존
+세트와 같은 category 기준(정상 232 · 공격 112)이다. 채점(TP/FP/TN/FN) 자체는 두 경우 모두
+동일한 `expect` 기준이다.
 
 ## 벤치 설정
 
@@ -225,11 +274,22 @@ MCP 연동에서 발견된 lineage fail-open을 두 단계로 고쳤다:
 
 ```bash
 npm run build --workspace=@icarus-tether/policy-engine   # 엔진 dist 필요
-npm run bench  --workspace=@icarus-tether/policy-engine   # 두 세트 × 두 모드 실행 + 비교표
+npm run bench  --workspace=@icarus-tether/policy-engine   # 기본 두 세트 × 두 모드 + 비교표
+npm run bench  --workspace=@icarus-tether/policy-engine -- --set ext   # 확장 세트 + results-ext.md
 ```
 
+CLI 플래그(`run.ts`):
+- `--set <boundary|realistic|ext|both|all>` — 실행할 세트 (기본 both)
+- `--config <path>` — ext 세트에 쓸 대체 설정 파일 (기본 `config.dev-bench.json`)
+- `--label <이름>` — 리포트 이름표. `results-ext-<label>.md` (기본 A)
+- `--relax` — ext 세트에 안전 바닥 완화(`fallbackRelaxation=scan-clean`)를 켠다. lineage 전용
+  규칙이라 session 열은 변하지 않는다. 이름표에 `-relax`가 붙어 끈 실행의 리포트를 덮어쓰지 않는다.
+  기존 두 세트에는 적용되지 않는다(항상 설정 파일 기본값 `off`).
+- `--out <path>` — 리포트 경로를 직접 지정
+- `--no-report` — 리포트 파일을 쓰지 않음
+
 환경변수:
-- `BENCH_SET` — `boundary` | `realistic` | `both` (기본 both)
+- `BENCH_SET` — `boundary` | `realistic` | `ext` | `both` (CLI `--set`이 우선)
 - `BENCH_ITERS` — 오버헤드 측정 반복 횟수 (기본 10000)
 - `BENCH_WARMUP` — 버릴 워밍업 횟수 (기본 1000)
 
@@ -239,8 +299,10 @@ npm run bench  --workspace=@icarus-tether/policy-engine   # 두 세트 × 두 �
 stdout에 쓰고, 오케스트레이터가 모아 표(+realistic은 tier 분해)로 출력한다.
 
 파일: `scenarios.ts`(경계 세트) · `scenarios-realistic.ts`(현실 분포 세트) ·
-`config.dev-bench.json`(벤치 설정) · `harness.ts`(재생·집계·오버헤드) ·
-`run-mode.ts`(한 세트×한 모드) · `run.ts`(오케스트레이션).
+`scenarios-ext.ts`(확장 세트 — 동결) · `config.dev-bench.json`(벤치 설정, 실행 A) ·
+`config.dev-bench-ext.json`(확장 세트 도구 분류 반영 설정, 실행 B) ·
+`harness.ts`(재생·집계·오버헤드) · `run-mode.ts`(한 세트×한 모드) ·
+`run.ts`(오케스트레이션) · `report-ext.ts`(확장 세트 리포트 생성 — 채점 무관, 분해 전용).
 엔진 소스는 무수정 — 벤치는 공개 export(`recordToolResult`/`attemptSanitization`/
 `evaluateToolCall`)만 호출한다.
 

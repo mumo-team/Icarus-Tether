@@ -1,0 +1,106 @@
+{
+  "_comment": "확장 세트(scenarios-ext.ts) 전용 벤치 설정 — 실행 B. scenarios-ext.README.md '사용한 도구 목록과 분류 의도'에 선언된 47개 도구(민감 11 · 비신뢰 9 · 외부 싱크 10 · 중립 17)를 그대로 등록한다. config.dev-bench.json(실행 A)과 다른 점은 도구 분류뿐이며, secretDetection·extractionSchema·정책 스위치는 A와 동일하다(piiPatterns는 A와 같이 없음). fetch_web_page는 dev.json에서 싱크 겸 소스지만 이 세트가 비신뢰 소스 용도로만 쓴다고 선언했고 evaluate 대상으로 한 번도 등장하지 않으므로 READ로 둔다.",
+  "domain": "dev-benchmark-ext",
+
+  "sensitiveSourceTools": [
+    "read_env_file",
+    "read_secrets",
+    "get_db_credentials",
+    "read_internal_doc",
+    "get_deploy_config",
+    "read_internal_memo",
+    "get_smtp_credentials",
+    "read_private_notes",
+    "read_meeting_notes",
+    "query_customer_db",
+    "query_analytics_db"
+  ],
+
+  "untrustedSourceTools": [
+    "read_github_issue",
+    "read_pr_comment",
+    "fetch_web_page",
+    "read_ci_log",
+    "read_inbox_email",
+    "read_support_ticket",
+    "read_shared_link_doc",
+    "read_calendar_invite",
+    "read_dataset_from_url"
+  ],
+
+  "outboundSinkTools": [
+    "http_post",
+    "push_to_remote",
+    "install_package",
+    "send_email",
+    "create_calendar_invite",
+    "crm_webhook_post",
+    "crm_export_report",
+    "post_summary_to_slack",
+    "deploy_service",
+    "upload_report"
+  ],
+
+  "sinks": {
+    "read_env_file": "READ",
+    "read_secrets": "READ",
+    "get_db_credentials": "READ",
+    "read_internal_doc": "READ",
+    "get_deploy_config": "READ",
+    "read_internal_memo": "READ",
+    "get_smtp_credentials": "READ",
+    "read_private_notes": "READ",
+    "read_meeting_notes": "READ",
+    "query_customer_db": "READ",
+    "query_analytics_db": "READ",
+
+    "read_github_issue": "READ",
+    "read_pr_comment": "READ",
+    "fetch_web_page": "READ",
+    "read_ci_log": "READ",
+    "read_inbox_email": "READ",
+    "read_support_ticket": "READ",
+    "read_shared_link_doc": "READ",
+    "read_calendar_invite": "READ",
+    "read_dataset_from_url": "READ",
+
+    "run_tests": "READ",
+    "git_status": "READ",
+    "list_files": "READ",
+    "search_contacts": "READ",
+    "read_email_draft": "READ",
+    "list_folders": "READ",
+    "list_free_slots": "READ",
+    "get_timezone": "READ",
+    "lookup_account_owner": "READ",
+    "count_open_tickets": "READ",
+    "word_count": "READ",
+    "check_health": "READ",
+    "describe_schema": "READ",
+    "format_code": "WRITE_INTERNAL",
+    "save_local_note": "WRITE_INTERNAL",
+    "write_local_csv": "WRITE_INTERNAL",
+    "restart_service": "WRITE_INTERNAL"
+  },
+
+  "unknownToolPolicy": "deny",
+  "sensitiveSourcePolicy": "tag_all",
+  "propagationMode": "snapshot",
+  "judgmentMode": "session",
+  "hitlPolicy": "off",
+  "pruningPolicy": "off",
+  "secretDetection": {
+    "bySource": true,
+    "byEntropy": { "minLength": 20, "entropyThreshold": 3.8 },
+    "byRegex": [
+      { "type": "AWS_KEY", "pattern": "\\bAKIA[0-9A-Z]{16}\\b" },
+      { "type": "GITHUB_TOKEN", "pattern": "\\bgh[pousr]_[A-Za-z0-9]{36,255}\\b" }
+    ]
+  },
+  "extractionSchema": {
+    "fields": {
+      "type": { "kind": "enum", "values": ["bug", "feature", "question"] },
+      "title": { "kind": "string", "maxLength": 80, "charset": "safe-text" }
+    }
+  }
+}

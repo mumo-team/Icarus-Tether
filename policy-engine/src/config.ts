@@ -65,6 +65,18 @@ export type HitlPolicy = "off" | "weak-only";
 export type PruningPolicy = "off" | "declassified";
 
 /**
+ * 안전 바닥(TEMPORAL_FALLBACK) 완화 정책 — lineage 모드 전용.
+ * - "off" (기본): 기존 동작. 연결 근거가 폴백뿐이어도 frontier의 S가 값-민감으로 간주돼 차단.
+ * - "scan-clean": 연결 근거가 TEMPORAL_FALLBACK뿐이고(값 매칭·명시 참조가 오염 노드를 하나도
+ *   못 잡음), 값의 내용을 직접 보는 검사(출력 스캔·볼트 원본 재전송)가 아무것도 못 찾았으면
+ *   통과. session 모드에는 출력 스캔이 없으므로 이 값을 무시한다 — session은 기존 동작 그대로
+ *   두어야 두 정책의 비교가 성립한다.
+ * ★ 형식모델(formal/TaintLineage.tla)의 ReachSink 가드는 tags[n]에 S가 있으면 무조건 차단이라
+ *   이 완화보다 강하다. 모델은 아직 이 규칙을 반영하지 않는다(benchmark/results-ext-scan-hardening.md).
+ */
+export type FallbackRelaxation = "off" | "scan-clean";
+
+/**
  * 파괴적 액션 게이트 정책 — "삭제 자체"가 아니라 "비신뢰가 유발한 파괴"만 다룬다.
  * 판정: destructiveTools 등록 도구 호출 AND 세션이 살아있는 비신뢰(U)에 노출.
  * 사용자 직접 지시 삭제(깨끗한 세션)는 통과 — 비개발자의 정상 삭제를 방해하지 않는다.
@@ -119,6 +131,8 @@ export interface PolicyConfig {
   judgmentMode: JudgmentMode;
   hitlPolicy: HitlPolicy;
   pruningPolicy: PruningPolicy;
+  /** 안전 바닥 완화 — lineage 전용, 기본 "off"(기존 동작). FallbackRelaxation 주석 참조. */
+  fallbackRelaxation: FallbackRelaxation;
   /** 파괴적 액션(DROP·대량삭제·파일삭제 등) 도구 목록 — SinkClass와 직교인 별도 축.
    *  주의: 여기 등록한 도구도 sinks에 실제 등급("WRITE_INTERNAL" 등)을 명시할 것 —
    *  안 하면 미선언 싱크 default-deny(OUTBOUND 취급)로 유출 축에도 걸린다. */
@@ -351,6 +365,12 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     fail(`"pruningPolicy"는 "off" | "declassified" 중 하나여야 합니다`);
   }
 
+  // 기본은 "off" — 안전 바닥 완화도 설정으로 명시해야만 켜진다 (기존 동작 불변, 논문 전/후 비교)
+  const fallbackRelaxation = obj.fallbackRelaxation ?? "off";
+  if (fallbackRelaxation !== "off" && fallbackRelaxation !== "scan-clean") {
+    fail(`"fallbackRelaxation"는 "off" | "scan-clean" 중 하나여야 합니다`);
+  }
+
   // 기본은 "off" — 파괴 게이트도 설정으로 명시해야만 켜진다 (기존 동작 불변)
   const destructivePolicy = obj.destructivePolicy ?? "off";
   if (destructivePolicy !== "off" && destructivePolicy !== "hitl" && destructivePolicy !== "block") {
@@ -404,6 +424,7 @@ export function loadPolicyConfig(filePath: string = resolveConfigPath()): Policy
     judgmentMode,
     hitlPolicy,
     pruningPolicy,
+    fallbackRelaxation,
     destructiveTools,
     destructivePolicy,
     toolLabels,
