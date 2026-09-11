@@ -11,17 +11,19 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ModeResult, EvalRecord } from "./harness.js";
 import { buildExtReport, printExtSummary } from "./report-ext.js";
+import { buildLimitsReport, type LimitsCondition } from "./report-limits.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RUN_MODE = path.join(__dirname, "run-mode.ts");
 
-type BenchSet = "boundary" | "realistic" | "ext";
+type BenchSet = "boundary" | "realistic" | "ext" | "limits";
 
 function runMode(
   mode: "session" | "lineage",
   set: BenchSet,
   configPath?: string,
-  relaxation?: string
+  relaxation?: string,
+  engineDir?: string
 ): ModeResult {
   const proc = spawnSync("npx", ["tsx", RUN_MODE], {
     env: {
@@ -30,8 +32,10 @@ function runMode(
       BENCH_SET: set,
       // 설정 미지정이면 자식이 기존 기본값(config.dev-bench.json)을 쓴다.
       ...(configPath ? { BENCH_CONFIG: configPath } : { BENCH_CONFIG: "" }),
-      // 바닥 완화 스위치 — ext 세트에만 넘어온다. 빈 문자열이면 설정 파일 값(기본 off).
+      // 바닥 완화 스위치 — ext/limits 세트에만 넘어온다. 빈 문자열이면 설정 파일 값(기본 off).
       BENCH_FALLBACK_RELAXATION: relaxation ?? "",
+      // 엔진 소스 디렉터리 — "개선 전" 커밋의 worktree src/를 가리켜 옛 엔진으로 잰다. 빈 문자열이면 현재 엔진.
+      BENCH_ENGINE_DIR: engineDir ?? "",
     },
     encoding: "utf8",
     shell: process.platform === "win32", // Windows에서 npx 해석
@@ -69,6 +73,7 @@ const SET_LABEL: Record<BenchSet, string> = {
   boundary: "경계 케이스 세트 (모드 차이 증명용 — 절대 수치 아님)",
   realistic: "현실 분포 세트 (실운영 근사 — 절대 오탐률 추정용)",
   ext: "확장 세트 322 (동결 — 위협 모델 기반, 구현 미참조 생성)",
+  limits: "한계 탐색 세트 112 (동결 565f11c — tag_all 기준, 구현 미참조 생성)",
 };
 
 /**
@@ -100,14 +105,15 @@ function printTierBreakdown(session: ModeResult, lineage: ModeResult): void {
 
 function runSet(
   set: BenchSet,
-  opts: { configPath?: string; note?: string; relaxation?: string } = {}
+  opts: { configPath?: string; note?: string; relaxation?: string; engineDir?: string } = {}
 ): { session: ModeResult; lineage: ModeResult } {
   console.log(`\n████ ${SET_LABEL[set]}${opts.note ? ` — ${opts.note}` : ""} ████\n`);
   if (opts.configPath) console.log(`설정: ${opts.configPath}`);
   if (opts.relaxation) console.log(`바닥 완화: fallbackRelaxation=${opts.relaxation}`);
-  if (opts.configPath || opts.relaxation) console.log("");
-  const session = runMode("session", set, opts.configPath, opts.relaxation);
-  const lineage = runMode("lineage", set, opts.configPath, opts.relaxation);
+  if (opts.engineDir) console.log(`엔진: ${opts.engineDir}`);
+  if (opts.configPath || opts.relaxation || opts.engineDir) console.log("");
+  const session = runMode("session", set, opts.configPath, opts.relaxation, opts.engineDir);
+  const lineage = runMode("lineage", set, opts.configPath, opts.relaxation, opts.engineDir);
 
   const totalNormals = session.records.filter((r) => r.category === "normal").length;
   const totalAttacks = session.records.filter((r) => r.category === "attack").length;
@@ -162,7 +168,7 @@ function runSet(
   if (!anyDiff) console.log("  (없음)");
   console.log("");
 
-  if (set !== "boundary") printTierBreakdown(session, lineage);
+  if (set !== "boundary" && set !== "limits") printTierBreakdown(session, lineage);
 
   // ---- 정직성 체크 ----
   console.log("═══ 정직성 체크 ═══");
@@ -173,7 +179,7 @@ function runSet(
     if (r.confusion.fn === 0)
       warn.push(`⚠ ${r.mode}: 미탐 0 — 분포에 교묘한 공격이 충분한지 의심할 것(또는 모두 잡음)`);
   }
-  if (set !== "boundary") {
+  if (set !== "boundary" && set !== "limits") {
     // 분포 자체의 조작 방지: 어려운 계층이 아예 빠졌으면 결과를 신뢰하면 안 된다
     if (!session.records.some((r) => r.tier === "boundary"))
       warn.push("⚠ 분포에 boundary 정상이 0개 — '쉬운 것만 넣은' 조작된 분포");
@@ -189,6 +195,8 @@ function runSet(
   } else if (set === "ext") {
     console.log("  ⓘ 한계3: 322건은 독립 표본이 아니다 — 22가지 논리 유형의 변형이라 유형별로 읽어야 한다.");
     console.log("           (scenarios-ext.README.md '세트의 성질과 한계')");
+  } else if (set === "limits") {
+    console.log("  ⓘ 한계3: 경계 탐색 세트 — 절대 수치가 아니라 축별·조건별 분해로 읽는다 (scenarios-limits.README.md).");
   } else {
     console.log("  ⓘ 한계3: 합성 분포 — 비율은 코딩 에이전트 워크플로 추정이지 실측 트래픽이 아니다.");
     console.log("           절대 수치는 '추정'이며, 분포 가정은 README의 근거와 tier 분해로 검증할 것.");
@@ -212,6 +220,11 @@ interface Args {
   label: string;
   /** 바닥 완화 스위치(fallbackRelaxation=scan-clean)를 ext 세트에 켠다 — 개선 전/후 비교용 */
   relax: boolean;
+  /**
+   * "개선 전" 엔진의 src 디렉터리 (git worktree로 받은 옛 커밋). limits 세트 전용.
+   * 주어지면 [개선 전 / 스캔만(off) / 전부(scan-clean)] 세 조건을 한 실행에서 돌려 한 리포트에 쓴다.
+   */
+  engineOld?: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -221,9 +234,12 @@ function parseArgs(argv: string[]): Args {
   let label = "A";
   let noReport = false;
   let relax = false;
+  let engineOld: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--relax") relax = true;
+    else if (a === "--engine-old") engineOld = argv[++i];
+    else if (a.startsWith("--engine-old=")) engineOld = a.slice("--engine-old=".length);
     else if (a === "--set" || a === "-s") setArg = argv[++i] ?? "";
     else if (a.startsWith("--set=")) setArg = a.slice("--set=".length);
     else if (a === "--out" || a === "-o") out = argv[++i];
@@ -236,8 +252,8 @@ function parseArgs(argv: string[]): Args {
     else {
       console.error(`[bench] 알 수 없는 인자: ${a}`);
       console.error(
-        "사용법: npm run bench -- [--set boundary|realistic|ext|both|all] [--config <path>] " +
-          "[--label <이름>] [--relax] [--out <path>] [--no-report]"
+        "사용법: npm run bench -- [--set boundary|realistic|ext|limits|both|all] [--config <path>] " +
+          "[--label <이름>] [--relax] [--engine-old <src dir>] [--out <path>] [--no-report]"
       );
       process.exit(2);
     }
@@ -248,7 +264,7 @@ function parseArgs(argv: string[]): Args {
   }
   // 완화 실행은 이름표에 "-relax"를 붙여 끈 실행의 리포트를 덮어쓰지 않게 한다.
   if (relax) label = `${label}-relax`;
-  return { setArg, out, noReport, config, label, relax };
+  return { setArg, out, noReport, config, label, relax, engineOld };
 }
 
 function gitHead(): string | undefined {
@@ -260,16 +276,73 @@ function gitHead(): string | undefined {
   return p.status === 0 ? p.stdout.trim() : undefined;
 }
 
-const VALID_SETS = new Set(["boundary", "realistic", "ext", "both", "all"]);
+const VALID_SETS = new Set(["boundary", "realistic", "ext", "limits", "both", "all"]);
 
 const DEFAULT_CONFIG = path.join(__dirname, "config.dev-bench.json");
 
+/**
+ * 한계 탐색 세트(limits) 전용 흐름 — 세 조건을 한 실행에서 돌려 results-limits.md 한 파일에 쓴다.
+ *   개선 전: --engine-old 의 옛 엔진, 완화 스위치 미주입(옛 config 로더는 그 키를 모른다)
+ *   스캔만: 현재 엔진, fallbackRelaxation=off
+ *   전부:   현재 엔진, fallbackRelaxation=scan-clean
+ * --engine-old 가 없으면 현재 엔진으로 off/scan-clean 두 조건만 돈다.
+ * 시나리오·설정·하네스는 세 조건 모두 현재 것이며 엔진 소스만 바뀐다.
+ */
+function mainLimits(args: Args): void {
+  const configPath = args.config ? path.resolve(args.config) : DEFAULT_CONFIG;
+  const relConfig = path.relative(path.join(__dirname, ".."), configPath).replace(/\\/g, "/");
+  const engineOld = args.engineOld ? path.resolve(args.engineOld) : undefined;
+  const conditions: LimitsCondition[] = [];
+  if (engineOld) {
+    const before = runSet("limits", { configPath, engineDir: engineOld, note: "조건: 개선 전 (bb0a2e9 엔진)" });
+    conditions.push({ key: "before", label: "개선 전", commit: gitHeadAt(engineOld), relaxation: "미주입", engineDir: engineOld, ...before });
+  }
+  const scanOnly = runSet("limits", { configPath, relaxation: "off", note: "조건: 스캔만 (fallbackRelaxation=off)" });
+  conditions.push({ key: "scan", label: "스캔만", commit: gitHead(), relaxation: "off", ...scanOnly });
+  const all = runSet("limits", { configPath, relaxation: "scan-clean", note: "조건: 전부 (fallbackRelaxation=scan-clean)" });
+  conditions.push({ key: "all", label: "전부", commit: gitHead(), relaxation: "scan-clean", ...all });
+
+  if (args.noReport) return;
+  const outPath = args.out ? path.resolve(args.out) : path.join(__dirname, "results-limits.md");
+  const md = buildLimitsReport({
+    conditions,
+    configPath: relConfig,
+    generatedAt: new Date().toISOString().slice(0, 10),
+  });
+  writeFileSync(outPath, md, "utf8");
+  console.log(`[bench] 한계 탐색 세트 리포트 기록: ${outPath}`);
+}
+
+/** 주어진 디렉터리가 속한 git 체크아웃의 HEAD (worktree의 옛 커밋 확인용) */
+function gitHeadAt(dir: string): string | undefined {
+  const p = spawnSync("git", ["rev-parse", "--short", "HEAD"], {
+    encoding: "utf8",
+    cwd: dir,
+    shell: process.platform === "win32",
+  });
+  return p.status === 0 ? p.stdout.trim() : undefined;
+}
+
 function main(): void {
-  const { setArg, out, noReport, config, label, relax } = parseArgs(process.argv.slice(2));
+  const args = parseArgs(process.argv.slice(2));
+  const { setArg, out, noReport, config, label, relax } = args;
   const relaxation = relax ? "scan-clean" : undefined;
   if (!VALID_SETS.has(setArg)) {
-    console.error(`[bench] 알 수 없는 세트: ${setArg} (boundary | realistic | ext | both | all)`);
+    console.error(`[bench] 알 수 없는 세트: ${setArg} (boundary | realistic | ext | limits | both | all)`);
     process.exit(2);
+  }
+  if (args.engineOld && setArg !== "limits") {
+    console.error("[bench] --engine-old는 limits 세트에만 적용된다. --set limits와 함께 쓸 것.");
+    process.exit(2);
+  }
+  if (setArg === "limits") {
+    if (relaxation) {
+      console.error("[bench] limits 세트는 off/scan-clean 두 조건을 항상 함께 돈다. --relax는 쓰지 않는다.");
+      process.exit(2);
+    }
+    console.log("한계 탐색 세트 벤치마크 실행 중... (조건×모드별 하위 프로세스)");
+    mainLimits(args);
+    return;
   }
   const sets: BenchSet[] =
     setArg === "both"
