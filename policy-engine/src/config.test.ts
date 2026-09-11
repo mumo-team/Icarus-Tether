@@ -147,6 +147,32 @@ test("pruningPolicy: 생략 시 기본 off(기존 동작 불변), 잘못된 값�
   assert.throws(() => loadPolicyConfig(bad), /"off" \| "declassified"/);
 });
 
+test("fallbackRelaxation: 생략 시 기본 off(기존 동작 불변), scan-clean 허용, 잘못된 값은 예외", () => {
+  const legacy = writeTmpConfig("relax-default.json", {
+    sensitiveSources: [],
+    untrustedSources: [],
+    sinks: {},
+  });
+  assert.equal(loadPolicyConfig(legacy).fallbackRelaxation, "off");
+  assert.equal(loadPolicyConfig(DEV_JSON).fallbackRelaxation, "off");
+
+  const on = writeTmpConfig("relax-on.json", {
+    sensitiveSourceTools: [],
+    untrustedSourceTools: [],
+    outboundSinkTools: [],
+    fallbackRelaxation: "scan-clean",
+  });
+  assert.equal(loadPolicyConfig(on).fallbackRelaxation, "scan-clean");
+
+  const bad = writeTmpConfig("relax-bad.json", {
+    sensitiveSourceTools: [],
+    untrustedSourceTools: [],
+    outboundSinkTools: [],
+    fallbackRelaxation: "always",
+  });
+  assert.throws(() => loadPolicyConfig(bad), /"off" \| "scan-clean"/);
+});
+
 test("toolLabels: 생략 시 빈 맵, dev.json 라벨 로드, 잘못된 형식은 예외", () => {
   const legacy = writeTmpConfig("labels-default.json", {
     sensitiveSources: [],

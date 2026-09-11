@@ -31,6 +31,10 @@ export interface Confusion {
 export interface EvalRecord {
   scenarioId: string;
   category: "normal" | "attack";
+  /** 시나리오 제목 — 확장 세트의 유출 형태별 분해에 쓴다. 채점에는 관여하지 않는다. */
+  title?: string;
+  /** 같은 시나리오 안에서 몇 번째 evaluate인지 (분할·다중 전송처럼 evaluate가 여럿일 때 식별용) */
+  evalIndex?: number;
   /** 시나리오 난이도 계층 (현실 분포 세트의 tier별 분해용 — 경계 세트는 없음) */
   tier?: ScenarioTier;
   tool: string;
@@ -78,6 +82,7 @@ function resolveArgs(step: Step, binds: Map<string, string>): Record<string, unk
 function runScenario(engine: EngineApi, scenario: Scenario, records: EvalRecord[]): void {
   const sid = `bench-${scenario.id}`;
   const binds = new Map<string, string>();
+  let evalIndex = 0;
 
   for (const step of scenario.steps) {
     if (step.op === "record") {
@@ -98,6 +103,8 @@ function runScenario(engine: EngineApi, scenario: Scenario, records: EvalRecord[
       records.push({
         scenarioId: scenario.id,
         category: scenario.category,
+        title: scenario.title,
+        evalIndex: evalIndex++,
         tier: scenario.tier,
         tool: step.tool!,
         expect: step.expect!,

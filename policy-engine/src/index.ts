@@ -39,6 +39,7 @@ import {
   scanOutputForSensitive,
   type OutputScanFinding,
   type SensitivePayload,
+  type SensitiveOrigin,
 } from "./output-scan.js";
 import {
   collectLiveTagHolders,
@@ -87,6 +88,7 @@ export {
   type JudgmentMode,
   type HitlPolicy,
   type PruningPolicy,
+  type FallbackRelaxation,
   type DestructivePolicy,
   type SecretDetectionConfig,
   type ExtractionSchemaConfig,
@@ -247,6 +249,18 @@ interface RecordedPayload {
   payload: unknown;
   /** 대응하는 계보 노드 id — 정화 성공 시 그 노드의 태그도 함께 해제하기 위한 연결 고리 */
   nodeId?: string;
+  /**
+   * SENSITIVE가 붙은 사유 (기록 시점에 확정). 출력-스캔이 needle 문턱을 고르는 데 쓴다:
+   * "source" = 민감 소스 도구(1순위 출처 기반) → 6자, "content" = 엔트로피·정규식(2·3순위) → 12자.
+   * SENSITIVE가 없는 레코드(U만)는 undefined.
+   */
+  sensitiveOrigin?: SensitiveOrigin;
+}
+
+/** computeResultTags의 두 경로 중 어느 쪽이 SENSITIVE를 붙였는지 — 출처 기반이 우선한다 */
+function sensitiveOriginOf(toolName: string, tags: ToolRiskTag[]): SensitiveOrigin | undefined {
+  if (!tags.includes(ToolRiskTag.SENSITIVE)) return undefined;
+  return classifySourceTags(toolName).includes(ToolRiskTag.SENSITIVE) ? "source" : "content";
 }
 
 const payloadStore = new Map<string, RecordedPayload[]>();
@@ -260,7 +274,10 @@ function getSensitivePayloads(sessionId: string): SensitivePayload[] {
   const records = payloadStore.get(sessionId) ?? [];
   const out: SensitivePayload[] = [];
   for (const r of records) {
-    if (r.tags.includes(ToolRiskTag.SENSITIVE)) out.push({ toolName: r.toolName, payload: r.payload });
+    if (r.tags.includes(ToolRiskTag.SENSITIVE)) {
+      // 사유가 없는 옛 레코드는 "content"(긴 문턱)로 — 스캔 쪽 기본값과 같은 보수적 해석.
+      out.push({ toolName: r.toolName, payload: r.payload, origin: r.sensitiveOrigin ?? "content" });
+    }
   }
   return out;
 }
@@ -309,7 +326,13 @@ export function recordToolResult(
   if (tags.length > 0) {
     // 깨끗한 소스·내용은 정화 대상이 아니므로 payloadStore에는 기록하지 않는다
     const records = payloadStore.get(sessionId) ?? [];
-    records.push({ toolName, tags, payload: result, nodeId: node.id });
+    records.push({
+      toolName,
+      tags,
+      payload: result,
+      nodeId: node.id,
+      sensitiveOrigin: sensitiveOriginOf(toolName, tags),
+    });
     payloadStore.set(sessionId, records);
   }
 
@@ -360,7 +383,14 @@ export function recordExternalContent(
 
   if (tags.length > 0) {
     const records = payloadStore.get(sessionId) ?? [];
-    records.push({ toolName: label, tags, payload: content, nodeId: node.id });
+    // 외부 콘텐츠는 등록된 민감 소스가 아니므로 SENSITIVE가 붙었다면 전부 내용 기반이다.
+    records.push({
+      toolName: label,
+      tags,
+      payload: content,
+      nodeId: node.id,
+      sensitiveOrigin: tags.includes(ToolRiskTag.SENSITIVE) ? "content" : undefined,
+    });
     payloadStore.set(sessionId, records);
   }
   return node;
@@ -598,6 +628,37 @@ function computeLineageDecision(ctx: ToolCallContext, sinkClass: SinkClass): Pol
     // valueSensitive AND는 유지되므로 S 토큰화 시엔 여전히 통과(RE35 과차단 없음).
     const sessionUntrusted =
       effectiveTags.has(ToolRiskTag.UNTRUSTED_ORIGIN) || sessionExposure.has(ctx.sessionId);
+
+    // ★ 안전 바닥 완화 (fallbackRelaxation="scan-clean", lineage 전용 — session 판정은 무관):
+    //   여기까지 왔을 때 valueSensitive의 S가 "이 값의 계보"가 아니라 폴백이 덧붙인 frontier에서만
+    //   왔고(linkMethod === TEMPORAL_FALLBACK — 값 매칭·명시 참조가 오염 노드를 하나도 못 잡음,
+    //   오염 근거 노드가 전부 weak), 값의 내용을 직접 보는 두 검사(출력 스캔·볼트 원본 재전송)가
+    //   전부 무결과면 "이 값이 민감을 담는다"는 근거가 없다고 보고 통과시킨다. argTags에 S가
+    //   실려 있으면(프록시 확정 증거) 완화하지 않는다. 기본 "off"는 기존 동작(폴백도 차단).
+    //   근거: 확장 벤치 실행 B에서 오탐 73건이 전부 이 조건이었고, 출력 스캔 강화(출처 문턱 6·
+    //   역순·조각) 후 같은 조건의 공격은 105건 중 4건(짧은 값의 base64)만 남았다.
+    //   ★ 형식모델 주의: TaintLineage.tla ReachSink 가드는 tags[n]∋S ∧ exposure면 무조건 차단이라
+    //   이 규칙은 모델의 ExfilSafety보다 약하다 — 모델은 이 규칙을 아직 반영하지 않는다.
+    if (
+      getPolicyConfig().fallbackRelaxation === "scan-clean" &&
+      valueSensitive &&
+      sessionUntrusted &&
+      evidence.linkMethod === "TEMPORAL_FALLBACK" &&
+      evidence.nodes.every((n) => n.weak || n.tags.length === 0) &&
+      !ctx.argTags.includes(ToolRiskTag.SENSITIVE) &&
+      outputScanFinding === null &&
+      !resendsSanitizedOriginal
+    ) {
+      return {
+        sessionId: ctx.sessionId,
+        toolName: ctx.toolName,
+        allowed: true,
+        matchedTags: [],
+        reason:
+          "안전 바닥 완화 통과(fallbackRelaxation=scan-clean): 계보 연결 근거가 시간 폴백뿐이고 " +
+          "출력 스캔·원본 재전송 검사에서 민감 내용이 발견되지 않음",
+      };
+    }
 
     if (valueSensitive && sessionUntrusted) {
       const hitlPolicy = getPolicyConfig().hitlPolicy;

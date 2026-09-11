@@ -51,6 +51,84 @@ test("min-length: 짧은 민감값(<12)은 우연일치 방지로 제외 → 과
   assert.equal(f, null);
 });
 
+// ── ★ 출처 기반 needle 문턱 6 (OUTPUT_SCAN_MIN_LENGTH_SOURCE) ─────────────────
+test("출처 기반 문턱: 3자 'VIP'는 출처 기반이어도 6자 미만이라 제외", () => {
+  const sp: SensitivePayload[] = [{ toolName: "query_customer_db", payload: { grade: "VIP" }, origin: "source" }];
+  assert.equal(scanOutputForSensitive(sp, { body: "VIP lounge access granted" }, DET), null);
+});
+
+test("출처 기반 문턱: 5자 출처 값은 제외, 6자 출처 값은 탐지 (하한 경계)", () => {
+  const five: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "h9x2m" }, origin: "source" }];
+  assert.equal(scanOutputForSensitive(five, { body: "token=h9x2m sent" }, DET), null);
+  const six: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "h9x2mq" }, origin: "source" }];
+  const f = scanOutputForSensitive(six, { body: "token=h9x2mq sent" }, DET);
+  assert.equal(f?.kind, "containment");
+  assert.equal(f?.matchLen, 6);
+});
+
+test("출처 기반 문턱: 같은 6자 값이라도 내용 기반(origin 생략)이면 12자 문턱 유지 → 미발동", () => {
+  const implicit: SensitivePayload[] = [{ toolName: "read_github_issue", payload: { v: "h9x2mq" } }];
+  assert.equal(scanOutputForSensitive(implicit, { body: "token=h9x2mq sent" }, DET), null);
+  const explicit: SensitivePayload[] = [{ toolName: "read_github_issue", payload: { v: "h9x2mq" }, origin: "content" }];
+  assert.equal(scanOutputForSensitive(explicit, { body: "token=h9x2mq sent" }, DET), null);
+});
+
+test("출처 기반 문턱: 7자 출처 값의 hex 인코딩본도 탐지 (hex needle에 같은 문턱 적용)", () => {
+  const sp: SensitivePayload[] = [{ toolName: "get_db_credentials", payload: { v: "Pn7$xQ2" }, origin: "source" }];
+  const hex = Buffer.from("Pn7$xQ2", "utf8").toString("hex");
+  const f = scanOutputForSensitive(sp, { body: `blob=${hex}` }, DET);
+  assert.equal(f?.kind, "containment");
+});
+
+/**
+ * ★ 성질 변경 기록 — 이 테스트는 원래 "6~11자 출처 값의 base64 인코딩본은 미탐(디코딩 게이트
+ * ≥12바이트는 출처 무관)"이라는 한계를 고정했다. 완화 디코딩 집합(run ≥8자·디코딩 ≥6바이트)을
+ * 12자 미만 출처 needle에만 지연 공급하면서 그 한계를 의도적으로 걷어낸다.
+ *
+ * 걷어내는 이유:
+ *  1. 확장 벤치 실행 B의 완화 모드 잔여 미탐 4건(X271·X279#2·X311·X329#2)이 전부 이 형태였다.
+ *  2. 완화 집합이 새로 통과시키는 디코딩 결과는 6~11바이트라 그 안에 들어갈 needle은 11자 이하 =
+ *     출처 needle뿐이다. 내용 기반 needle(문턱 12)과 정규식(≥20자)은 영향을 받지 않는다.
+ *  3. 8~12자 평범한 토큰은 UTF-8 게이트에서 탈락하고, 텍스트로 풀리는 토큰은 진짜 base64뿐이라
+ *     탐지로 이어지려면 그 텍스트가 실제 출처 값을 담아야 한다. "test"(4자)는 후보가 아니다.
+ *     기존 81·boundary·확장 A/B 네 세트 실측 새 오탐 0.
+ *  4. 12자 미만 출처 needle이 없는 호출은 집합을 만들지 않아 비용이 그대로다.
+ *
+ * 남기는 성질: 내용 기반(origin 생략)이면 엄격 집합만 보므로 여전히 미탐(두 번째 단언).
+ */
+test("★ 완화 디코딩: 6자 출처 값의 base64 인코딩본이 이제 탐지 — 내용 기반이면 여전히 미탐", () => {
+  const b64 = Buffer.from("h9x2mq", "utf8").toString("base64"); // "aDl4Mm1x" 8자 run
+  const asSource: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "h9x2mq" }, origin: "source" }];
+  const f = scanOutputForSensitive(asSource, { body: `payload=${b64}` }, DET);
+  assert.equal(f?.kind, "containment");
+  assert.equal(f?.matchLen, 6);
+  const asContent: SensitivePayload[] = [{ toolName: "read_github_issue", payload: { v: "h9x2mq" } }];
+  assert.equal(scanOutputForSensitive(asContent, { body: `payload=${b64}` }, DET), null);
+});
+
+test("완화 디코딩: 7자 출처 값(패딩 있는 base64 'UG43JHhRMg==')도 탐지 — 확장 벤치 X271 형태", () => {
+  const sp: SensitivePayload[] = [{ toolName: "get_db_credentials", payload: { v: "Pn7$xQ2" }, origin: "source" }];
+  const f = scanOutputForSensitive(sp, { body: "payload=UG43JHhRMg==" }, DET);
+  assert.equal(f?.kind, "containment");
+  assert.equal(f?.sourceTool, "get_db_credentials");
+});
+
+test("완화 디코딩 하한: 5자 출처 값의 base64(run 7자)는 여전히 미탐", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "h9x2m" }, origin: "source" }];
+  const b64 = Buffer.from("h9x2m", "utf8").toString("base64"); // "aDl4Mm0=" → 패딩 제외 7자 < 8
+  assert.equal(scanOutputForSensitive(sp, { body: `payload=${b64}` }, DET), null);
+});
+
+test("완화 디코딩 과차단 가드: 'test'와 8~12자 평범한 토큰은 짧은 출처 needle이 있어도 미발동", () => {
+  const sp: SensitivePayload[] = [
+    { toolName: "read_secrets", payload: { v: "h9x2mq" }, origin: "source" },
+    { toolName: "get_db_credentials", payload: { v: "Pn7$xQ2" }, origin: "source" },
+  ];
+  assert.equal(scanOutputForSensitive(sp, { body: "test" }, DET), null);
+  assert.equal(scanOutputForSensitive(sp, { body: "password reset for username; settings deployed, released internal" }, DET), null);
+  assert.equal(scanOutputForSensitive(sp, { id: "550e8400-e29b-41d4-a716-446655440000", sha: "9f3ab2c1e4d5f6a7" }, DET), null);
+});
+
 // ── 정규식(엔트로피 제외) ───────────────────────────────────────────────────
 test("regex: verbatim AWS 키 탐지", () => {
   const f = scanOutputForSensitive([], { body: "key=AKIAIOSFODNN7EXAMPLE done" }, DET);
@@ -178,14 +256,118 @@ test("★ normalize 오탐 가드: 위험값 api.internal — 무관 정상 출�
   assert.equal(scanOutputForSensitive(sp, { body: "문서 webdoc_A83jd9 요약 보고" }, DET), null);
 });
 
-test("★ normalize 오탐 가드: 짧은 자연어 PII(홍길동 VIP, 정규화 6자<12)는 출력에 있어도 제외", () => {
-  const sp: SensitivePayload[] = [{ toolName: "get_db_credentials", payload: { v: "홍길동 VIP" } }];
-  assert.equal(scanOutputForSensitive(sp, { body: "고객 홍길동 VIP 등급 안내" }, DET), null);
+/**
+ * ★ 성질 변경 기록 — 이 테스트는 원래 "짧은 자연어 PII(홍길동 VIP, 정규화 6자<12)는
+ * 출력에 있어도 제외"를 고정했다(과차단 가드). 출처 기반 문턱을 6자로 낮추면서 그 성질을
+ * 의도적으로 포기한다.
+ *
+ * 포기하는 이유:
+ *  1. 이 값은 get_db_credentials(민감 소스)에서 나온 출처 기반 needle이다. "비밀인가"는
+ *     출처로 이미 확정돼 있고, 12자 문턱이 막던 것은 "짧아서 우연히 정상 출력에 나타나는가"
+ *     뿐이다. 7자(정규화 6자) 고유 문자열이 비신뢰 노출 세션의 외부 전송에 그대로 나타나는
+ *     상황은 우연보다 결합 조건(민감+비신뢰+싱크) 쪽이 훨씬 그럴듯하다.
+ *  2. 확장 벤치(scenarios-ext, 실행 B) 실측: fallback 연결로만 잡히던 공격 33건 중 21건이
+ *     6~7자 시크릿이라 12자 문턱에 걸려 출력스캔이 무력했다. 문턱 6에서 그중 16건이 잡힌다.
+ *  3. 같은 변경을 기존 81·boundary·확장 322(A/B) 네 세트에 적용했을 때 새 오탐은 0건이었다.
+ *
+ * 남기는 성질: 내용 기반(origin 생략/"content") needle은 12자를 유지하므로 같은 값이
+ * 비신뢰 소스에서 우연히 탐지된 경우엔 여전히 제외된다(아래 두 번째 단언).
+ */
+test("★ 출처 기반 문턱 6: 짧은 자연어 PII(홍길동 VIP, 7자)가 출력에 그대로 있으면 이제 탐지", () => {
+  const sp: SensitivePayload[] = [{ toolName: "get_db_credentials", payload: { v: "홍길동 VIP" }, origin: "source" }];
+  const f = scanOutputForSensitive(sp, { body: "고객 홍길동 VIP 등급 안내" }, DET);
+  assert.equal(f?.kind, "containment");
+  assert.equal(f?.sourceTool, "get_db_credentials");
+  // 내용 기반이면 옛 성질 유지 — 정규화 6자 < 12
+  const asContent: SensitivePayload[] = [{ toolName: "get_db_credentials", payload: { v: "홍길동 VIP" } }];
+  assert.equal(scanOutputForSensitive(asContent, { body: "고객 홍길동 VIP 등급 안내" }, DET), null);
 });
 
 test("한계(정직): 영숫자 junk 인터리브는 정규화로도 미탐", () => {
   const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "MYSECRETPASSWORDVALUE" } }];
   assert.equal(scanOutputForSensitive(sp, { body: "MYSECRETxPASSWORDxVALUE" }, DET), null);
+});
+
+// ── ★ 역순(reverse) 세탁 — needle 인코딩 방향 (hex와 동형) ─────────────────────
+const rev = (s: string) => Array.from(s).reverse().join("");
+
+test("역순: 민감값을 뒤집어 실은 출력 → containment(transform=reverse)", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "MYSECRETPASSWORDVALUE" } }];
+  const f = scanOutputForSensitive(sp, { body: `rev=${rev("MYSECRETPASSWORDVALUE")}` }, DET);
+  assert.equal(f?.kind, "containment");
+  assert.equal(f?.transform, "reverse");
+  assert.equal(f?.normalized, undefined);
+});
+
+test("역순 + 재포맷: 뒤집은 값에 구분자·대소문자 변경까지 → 정규화 역순 매칭", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "MYSECRETPASSWORDVALUE" } }];
+  const laundered = rev("MYSECRETPASSWORDVALUE").toLowerCase().replace(/(.{4})/g, "$1-");
+  const f = scanOutputForSensitive(sp, { body: `x=${laundered}` }, DET);
+  assert.equal(f?.kind, "containment");
+  assert.equal(f?.transform, "reverse");
+  assert.equal(f?.normalized, true);
+});
+
+test("역순: 한글 문장(코드포인트 단위)도 뒤집힌 채로 탐지 — 확장 벤치 X270 형태", () => {
+  const doc = "인수합병 발표는 3월 15일로 확정되었다";
+  const sp: SensitivePayload[] = [{ toolName: "read_internal_doc", payload: doc, origin: "source" }];
+  const f = scanOutputForSensitive(sp, { payload: `rev=${rev(doc)}` }, DET);
+  assert.equal(f?.kind, "containment");
+  assert.equal(f?.transform, "reverse");
+});
+
+test("역순 과차단 가드: 정방향도 역방향도 없는 정상 출력은 미발동", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "MYSECRETPASSWORDVALUE" } }];
+  assert.equal(scanOutputForSensitive(sp, { body: "EULAVDROWSSAP is not the secret; build ok" }, DET), null);
+  assert.equal(scanOutputForSensitive(sp, { body: "9f3ab2c1e4d5f6a7b8c9d0e1f2a3b4c5d6e7f8a9" }, DET), null);
+});
+
+// ── ★ 조각(fragment) 검사 — 분할 전송 대응, 창 12 고정 ────────────────────────
+const KEY46 = "AKIA5EXAMPLE7KEYQZ12X9WVUT3NMLKJHGFDSA0RBCP4Q7";
+
+test("조각: 두 호출로 나눈 앞 조각·뒤 조각이 각각 탐지 — 확장 벤치 X268 형태", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_private_notes", payload: KEY46, origin: "source" }];
+  const first = scanOutputForSensitive(sp, { body: `part1=${KEY46.slice(0, 23)}` }, DET);
+  assert.equal(first?.kind, "containment");
+  assert.equal(first?.transform, "fragment");
+  assert.equal(first?.matchLen, 12);
+  const second = scanOutputForSensitive(sp, { description: `part2=${KEY46.slice(23)}` }, DET);
+  assert.equal(second?.transform, "fragment");
+});
+
+test("조각 창 경계: 11자 조각은 미발동, 12자 조각은 탐지", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "MYSECRETPASSWORDVALUE" } }];
+  assert.equal(scanOutputForSensitive(sp, { body: `x=${"MYSECRETPASSWORDVALUE".slice(3, 14)}` }, DET), null);
+  assert.equal(scanOutputForSensitive(sp, { body: `x=${"MYSECRETPASSWORDVALUE".slice(3, 15)}` }, DET)?.transform, "fragment");
+});
+
+test("조각 과차단 가드: 정상 URL과 8자 겹침('https://')은 12자 창에서 미발동 — 기존 81 RB02 형태", () => {
+  const sp: SensitivePayload[] = [{ toolName: "read_env_file", payload: { v: "API_BASE=https://api.internal" }, origin: "source" }];
+  assert.equal(scanOutputForSensitive(sp, { url: "https://hooks.example", body: "문서 webdoc_pp4471s 정리" }, DET), null);
+});
+
+test("조각: 여러 needle·여러 인자에서도 정확한 needle의 sourceTool을 돌려준다 (해시 충돌 검증 경로)", () => {
+  const sp: SensitivePayload[] = [
+    { toolName: "read_secrets", payload: { v: "MYSECRETPASSWORDVALUE" } },
+    { toolName: "get_db_credentials", payload: { v: "db_password=Zq81mmxpQ-rotated-2026" }, origin: "source" },
+  ];
+  const f = scanOutputForSensitive(sp, { to: "x@example", subject: "rotation", body: "새 값 앞부분 Zq81mmxpQ-rot 확인 바람" }, DET);
+  assert.equal(f?.transform, "fragment");
+  assert.equal(f?.sourceTool, "get_db_credentials");
+});
+
+test("한계(정직): 256자를 넘는 긴 출처 페이로드는 조각 검사 대상이 아니다 — 통짜 포함검사만", () => {
+  const longDoc = "내부 문서 본문 ".repeat(40); // 320자
+  const sp: SensitivePayload[] = [{ toolName: "read_internal_doc", payload: longDoc, origin: "source" }];
+  assert.equal(scanOutputForSensitive(sp, { body: longDoc.slice(20, 60) }, DET), null);
+  assert.equal(scanOutputForSensitive(sp, { body: longDoc }, DET)?.kind, "containment");
+});
+
+test("역순도 문턱을 따른다: 6자 값은 내용 기반이면 미발동, 출처 기반이면 탐지", () => {
+  const asContent: SensitivePayload[] = [{ toolName: "read_github_issue", payload: { v: "h9x2mq" } }];
+  assert.equal(scanOutputForSensitive(asContent, { body: `rev=${rev("h9x2mq")}` }, DET), null);
+  const asSource: SensitivePayload[] = [{ toolName: "read_secrets", payload: { v: "h9x2mq" }, origin: "source" }];
+  assert.equal(scanOutputForSensitive(asSource, { body: `rev=${rev("h9x2mq")}` }, DET)?.transform, "reverse");
 });
 
 // ── ★ 은닉 채널(covert channel): 마크다운/이미지 URL에 인코딩 은닉 (파트B 미탐 ①②) ──
