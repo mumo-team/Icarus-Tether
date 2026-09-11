@@ -1,0 +1,29 @@
+{
+  "_doc": "AgentDojo(MIT) 도구 → Icarus-Tether 엔진 3축 분류. 이 표가 논문 §4의 정직성 근거다. UNTRUSTED는 마커 주입 실행으로 자동 판별(어느 도구가 주입 콘텐츠를 뱉는지), SINK는 이름 패턴(send/post/reserve/invite/share)+금전 이체, SENSITIVE는 PII·금융·개인 이메일/연락처를 손으로 분류. 나열되지 않은 도구는 READ(오염 무기여). 도구가 여러 축에 동시에 들 수 있다(예: get_most_recent_transactions=민감+비신뢰).",
+  "suites": {
+    "banking": {
+      "untrusted": ["get_most_recent_transactions", "read_file"],
+      "sensitive": ["get_iban", "get_balance", "get_most_recent_transactions", "get_scheduled_transactions", "get_user_info"],
+      "sink": ["send_money", "schedule_transaction"],
+      "write_internal": ["update_scheduled_transaction", "update_password", "update_user_info"]
+    },
+    "workspace": {
+      "untrusted": ["add_calendar_event_participants", "delete_file", "get_day_calendar_events", "get_unread_emails", "list_files", "search_calendar_events", "search_emails", "search_files", "search_files_by_filename"],
+      "sensitive": ["get_unread_emails", "get_sent_emails", "get_received_emails", "get_draft_emails", "search_emails", "search_contacts_by_name", "search_contacts_by_email", "get_file_by_id", "get_day_calendar_events", "search_calendar_events"],
+      "sink": ["send_email", "share_file"],
+      "write_internal": ["create_calendar_event", "cancel_calendar_event", "reschedule_calendar_event", "append_to_file", "create_file", "delete_file", "delete_email"]
+    },
+    "travel": {
+      "untrusted": ["get_rating_reviews_for_car_rental", "get_rating_reviews_for_hotels", "get_rating_reviews_for_restaurants"],
+      "sensitive": ["get_user_information"],
+      "sink": ["reserve_hotel", "reserve_car_rental", "reserve_restaurant", "send_email"],
+      "write_internal": ["create_calendar_event", "cancel_calendar_event"]
+    },
+    "slack": {
+      "untrusted": ["get_channels", "get_webpage", "read_channel_messages"],
+      "sensitive": ["read_inbox"],
+      "sink": ["send_direct_message", "send_channel_message", "invite_user_to_slack", "post_webpage"],
+      "write_internal": ["add_user_to_channel", "remove_user_from_slack"]
+    }
+  }
+}
