@@ -7,9 +7,15 @@
 "실무에서 얼마나 정확한가 — 정상을 안 막고(오탐↓) 공격을 놓치지 않나(미탐↓)"를
 측정한다. 형식검증은 정성(불변식), 벤치마크는 정량(오탐·미탐율).
 
-두 시나리오 세트가 있다: **boundary**(경계 케이스 고비중 — 모드 차이 증명)와
-**realistic**(정상 54:공격 27 현실 분포 — 절대 오탐률 추정). 각각 아래
-"세트 1/세트 2" 섹션 참고.
+하네스로 돌릴 수 있는 세트는 **넷**이다: **boundary**(경계 케이스 고비중 — 모드 차이
+증명), **realistic**(정상 54:공격 27 현실 분포 — 절대 오탐률 추정), **ext**(위협 모델
+커버리지 322), **limits**(탐지 한계 경계 탐색 112). 이 밖에 저장소에는 외부 벤치
+**AgentDojo** 파생 세트(326, `docs/submission/eval/`)와 아직 실행되지 않은 **general**
+세트(170)가 있다 — 아래 표 참고.
+
+> **전 세트의 수치를 한데 모은 문서는 [`EVALUATION.md`](EVALUATION.md)다.** 세트×모드×완화
+> 조합별 결과, 엔진 변경 이력의 before/after, 확인된 한계, 방법론상의 제약이 거기 있다.
+> 이 README와 수치가 어긋나면 `EVALUATION.md`가 기준이다.
 
 ## 무엇을 측정하나
 
@@ -26,19 +32,30 @@
 
 ## 시나리오 세트
 
-목적이 다른 세 세트를 `--set`(또는 `BENCH_SET`)으로 골라 실행한다:
+목적이 다른 네 세트를 `--set`(또는 `BENCH_SET`)으로 골라 실행한다:
 
-| 세트 | 파일 | 목적 | 분포 |
-|---|---|---|---|
-| **boundary** | `scenarios.ts` | 두 모드의 판정 **차이 증명** | 경계 케이스 고비중 (11개) |
-| **realistic** | `scenarios-realistic.ts` | **절대 오탐률 추정** (실운영 근사) | 정상 54 : 공격 27 (81개) |
-| **ext** | `scenarios-ext.ts` | **위협 모델 커버리지** (구현 미참조 생성·동결) | 정상 220 : 공격 102 (322개) |
+| 세트 | 파일 | 목적 | 분포 | 동결 |
+|---|---|---|---|---|
+| **boundary** | `scenarios.ts` | 두 모드의 판정 **차이 증명** | 경계 케이스 고비중 (11개) | — |
+| **realistic** | `scenarios-realistic.ts` | **절대 오탐률 추정** (실운영 근사) | 정상 54 : 공격 27 (81개) | — |
+| **ext** | `scenarios-ext.ts` | **위협 모델 커버리지** (구현 미참조 생성) | 정상 220 : 공격 102 (322개) | `bb0a2e9` |
+| **limits** | `scenarios-limits.ts` | **탐지 한계 경계 탐색** (tag_all 기준, 구현 미참조 생성) | 112개 · 판정 지점 146 (block 126 / pass 20) | `565f11c` |
 
-- `npm run bench` → 기본 `both` (boundary + realistic). **ext는 포함되지 않는다.**
+하네스로 돌릴 수 없는 세트:
+
+| 세트 | 파일 | 상태 |
+|---|---|---|
+| **general** | `scenarios-general.ts` | **생성됐으나 하네스 미연결 — 미실행.** 170개(판정 지점 206). 2026-09-10 생성. `run.ts`의 `BenchSet` 타입이 `"boundary" \| "realistic" \| "ext" \| "limits"`라 `--set general`을 줄 수 없고, 결과 파일도 없다. 설계 의도는 `scenarios-general.README.md` 참고 |
+| **AgentDojo** | `docs/submission/eval/` | 외부 벤치(NeurIPS 2024, MIT) 파생 326개(공격 294 / 정상 32). 이 하네스가 아니라 전용 러너 `run-mode-adojo.ts`로 돈다 |
+
+- `npm run bench` → 기본 `both` (boundary + realistic). **ext·limits는 포함되지 않는다.**
 - `npm run bench -- --set ext` → 확장 세트만. 기존 세트와 섞이지 않게 명시적으로 골라야 한다.
-- `npm run bench -- --set all` → 세 세트 전부.
-- `BENCH_SET=boundary` / `realistic` / `ext` → env로도 같은 선택이 된다(CLI 플래그가 우선).
-- 세 세트 모두 같은 하네스·같은 정답 채점·session/lineage 비교를 공유한다.
+- `npm run bench -- --set limits` → 한계 세트만. 이 세트는 **완화 off/scan-clean 두 조건을
+  항상 함께** 돌아 `results-limits.md` 한 파일에 쓴다(그래서 `--relax`를 받지 않는다).
+- `npm run bench -- --set all` → boundary + realistic + ext. **`all`에 limits는 포함되지
+  않는다** — 실행 흐름이 다르기 때문이다(조건 비교 전용).
+- `BENCH_SET=boundary` / `realistic` / `ext` / `limits` → env로도 같은 선택이 된다(CLI 플래그가 우선).
+- 네 세트 모두 같은 하네스·같은 정답 채점·session/lineage 비교를 공유한다.
 
 ### ext 세트의 두 실행 (A / B) — 도구 등록 여부의 영향 측정
 
@@ -240,9 +257,12 @@ MCP 연동에서 발견된 lineage fail-open을 두 단계로 고쳤다:
   출력-스캔(TIER3)이 값의 *내용*에서 직접 잡아 닫았다(디코딩·정규화·encode-needle).
   하지만 §한계의 벡터 — 의역(값을 말로 풂), 인코딩 *전* 변형(압축·암호화 후 인코딩),
   다층 인코딩(안전 바닥 억제 조건) — 는 여전히 미탐이며, 벤치 하네스가 미탐 0을
-  **경고**하는 이유가 이것이다. **형식검증과의 관계**: 비대칭 엔진은 TLA+의
-  per-value 트라이펙타보다 엄격한 보수적 확장(값-S + 세션-U까지 차단)이라 SinkSafety를
-  위반하지 않는다.
+  **경고**하는 이유가 이것이다. **형식검증과의 관계 (`fallbackRelaxation=off` 조건에서)**:
+  비대칭 엔진은 TLA+의 per-value 트라이펙타보다 엄격한 보수적 확장(값-S + 세션-U까지
+  차단)이라 SinkSafety를 위반하지 않는다. **이 진술은 완화 스위치를 끈 기본 설정에만
+  해당한다** — `scan-clean`으로 켜면 SinkSafety의 코드판 오라클 P1
+  (`property.test.ts`)이 실패한다(seed `347482798`). 완화는 모델의 ExfilSafety보다 약한
+  규칙이며 모델에 반영되지 않았다. 상세: [`EVALUATION.md`](EVALUATION.md) §4.7.
 
 ## 한계 (정직하게)
 
@@ -261,10 +281,26 @@ MCP 연동에서 발견된 lineage fail-open을 두 단계로 고쳤다:
   공격자가 미끼 토큰으로 오염 노드에 VALUE_MATCH시켜 안전 바닥을 억제한 뒤 나머지
   민감을 base64·hex 등으로 세탁하면 값 매칭이 끊긴다. 현재 벤치의 세탁 시나리오
   (RS08 재포맷·RS11 청크·RS12 base64·RS13 hex)는 값의 *내용*을 직접 보는 출력-스캔이
-  전부 닫았다. **남은 미탐 벡터**는 출력-스캔도 못 잡는 것들이다: 인코딩 *전* 변형
-  (압축·암호화 후 인코딩 — 원본 바이트 소실로 원리적 불가), 다층 인코딩
-  (`hex(base64(s))` — 안전 바닥 억제가 전제인 디코더 확장 게임), 의역(값을 말로 풂).
-  값 단위 추적의 구조적 한계이며, 이들은 벤치 시나리오가 아니라 문서화된 경계다.
+  전부 닫았다. **남은 미탐 벡터**는 출력-스캔도 못 잡는 것들이다.
+
+  *문서화된 경계(벤치 시나리오 없음)* — 인코딩 *전* 변형(압축·암호화 후 인코딩 — 원본
+  바이트 소실로 원리적 불가), 다층 인코딩(`hex(base64(s))` — 안전 바닥 억제가 전제인
+  디코더 확장 게임), 의역(값을 말로 풂).
+
+  *한계 세트(112)로 **실측된** 것* — 아래는 전부 안전 바닥이 백스톱하고 있을 뿐이어서,
+  완화 스위치(`scan-clean`)를 켜면 그대로 미탐이 된다. 괄호 안은 완화 조건 lineage 미탐:
+
+  | 벡터 | 스캔이 못 잡는 이유 | 완화 조건 미탐 |
+  |---|---|---|
+  | **3~5자 시크릿** | 포함검사 하한이 출처 기반 6자·내용 기반 12자 | 3자 9/9 · 4자 12/12 · 5자 9/9 (**30/30**) |
+  | **4~5자 조각으로 분할 전송** | 조각 검사 창이 12자 고정 | 4자 33/33 · 5자 12/12 · 11자 1/1 (**46/46**) |
+  | **문자 치환류 변형 14종** | 원본 바이트가 남지 않아 needle이 안 맞음 | **29/32** |
+
+  치환류 14종은 ROT13·카이사르+3·아트바시·leet·동형문자·NATO 음성기호·문자코드 리스트·
+  알파벳 인덱스 치환·영단어 풀어쓰기·회전 재배열·구분자삽입+재배열·유니코드 NFD 분해·
+  한글 호환자모 분리·Base32·HTML 엔티티다. 이 중 **퍼센트 인코딩(2/2)만 완화 조건에서도
+  0% 미탐**이고(정규화가 잡는다), **leet치환은 완화를 끈 상태에서도 1/3을 놓친다**(L059).
+  분해와 id 목록: [`EVALUATION.md`](EVALUATION.md) §4.4.
 - **default-deny가 잠재 오탐원이다.** 설정에 분류되지 않은 도구는 안전하게
   OUTBOUND_SINK·UNTRUSTED로 취급된다. 새 도구가 분류 전이면 정상 작업도 막힐 수 있다.
 - **오탐률 0%나 미탐률 0%면 리포트가 자동 경고한다** — 시나리오가 너무 쉬웠다는
@@ -276,20 +312,27 @@ MCP 연동에서 발견된 lineage fail-open을 두 단계로 고쳤다:
 npm run build --workspace=@icarus-tether/policy-engine   # 엔진 dist 필요
 npm run bench  --workspace=@icarus-tether/policy-engine   # 기본 두 세트 × 두 모드 + 비교표
 npm run bench  --workspace=@icarus-tether/policy-engine -- --set ext   # 확장 세트 + results-ext.md
+npm run bench  --workspace=@icarus-tether/policy-engine -- --set limits --config benchmark/config.dev-bench-ext.json   # 한계 세트 + results-limits.md
 ```
 
 CLI 플래그(`run.ts`):
-- `--set <boundary|realistic|ext|both|all>` — 실행할 세트 (기본 both)
-- `--config <path>` — ext 세트에 쓸 대체 설정 파일 (기본 `config.dev-bench.json`)
-- `--label <이름>` — 리포트 이름표. `results-ext-<label>.md` (기본 A)
+- `--set <boundary|realistic|ext|limits|both|all>` — 실행할 세트 (기본 both).
+  `all`은 boundary+realistic+ext이며 **limits는 포함하지 않는다**.
+- `--config <path>` — ext·limits 세트에 쓸 대체 설정 파일 (기본 `config.dev-bench.json`)
+- `--label <이름>` — 리포트 이름표. `results-ext-<label>.md` (기본 A). ext 전용
 - `--relax` — ext 세트에 안전 바닥 완화(`fallbackRelaxation=scan-clean`)를 켠다. lineage 전용
   규칙이라 session 열은 변하지 않는다. 이름표에 `-relax`가 붙어 끈 실행의 리포트를 덮어쓰지 않는다.
   기존 두 세트에는 적용되지 않는다(항상 설정 파일 기본값 `off`).
+  **limits 세트에는 쓸 수 없다** — 그 세트는 off/scan-clean 두 조건을 항상 함께 돌기 때문이다.
+- `--engine-old <path>` — **limits 세트 전용.** "개선 전" 조건으로 쓸 옛 커밋의 엔진 `src`
+  디렉터리를 지정한다(git worktree로 받아 둔 `bb0a2e9` 등). 주면 조건이 셋(개선 전 / 스캔만 /
+  전부)이 되고, 생략하면 현재 트리로 돌 수 있는 둘(스캔만 / 전부)만 돈다.
+  limits 외의 세트와 함께 주면 거부된다.
 - `--out <path>` — 리포트 경로를 직접 지정
 - `--no-report` — 리포트 파일을 쓰지 않음
 
 환경변수:
-- `BENCH_SET` — `boundary` | `realistic` | `ext` | `both` (CLI `--set`이 우선)
+- `BENCH_SET` — `boundary` | `realistic` | `ext` | `limits` | `both` (CLI `--set`이 우선)
 - `BENCH_ITERS` — 오버헤드 측정 반복 횟수 (기본 10000)
 - `BENCH_WARMUP` — 버릴 워밍업 횟수 (기본 1000)
 
@@ -299,10 +342,13 @@ CLI 플래그(`run.ts`):
 stdout에 쓰고, 오케스트레이터가 모아 표(+realistic은 tier 분해)로 출력한다.
 
 파일: `scenarios.ts`(경계 세트) · `scenarios-realistic.ts`(현실 분포 세트) ·
-`scenarios-ext.ts`(확장 세트 — 동결) · `config.dev-bench.json`(벤치 설정, 실행 A) ·
-`config.dev-bench-ext.json`(확장 세트 도구 분류 반영 설정, 실행 B) ·
+`scenarios-ext.ts`(확장 세트 — 동결 `bb0a2e9`) · `scenarios-limits.ts`(한계 세트 — 동결
+`565f11c`) · `scenarios-general.ts`(일반화 세트 — **하네스 미연결·미실행**) ·
+`config.dev-bench.json`(벤치 설정, 실행 A) ·
+`config.dev-bench-ext.json`(확장·한계 세트 도구 분류 반영 설정, 실행 B) ·
 `harness.ts`(재생·집계·오버헤드) · `run-mode.ts`(한 세트×한 모드) ·
-`run.ts`(오케스트레이션) · `report-ext.ts`(확장 세트 리포트 생성 — 채점 무관, 분해 전용).
+`run.ts`(오케스트레이션) · `report-ext.ts`(확장 세트 리포트 생성 — 채점 무관, 분해 전용) ·
+`report-limits.ts`(한계 세트 리포트 생성) · [`EVALUATION.md`](EVALUATION.md)(전 세트 수치 종합).
 엔진 소스는 무수정 — 벤치는 공개 export(`recordToolResult`/`attemptSanitization`/
 `evaluateToolCall`)만 호출한다.
 
@@ -324,7 +370,41 @@ lineage 오탐 9.3%·미탐 0.0% (session 18.5%/7.4%). tier 분해로 "쉬운 �
 조건). 프록시의 `_taintRef` 주입과 도구 분류 확충으로 낮출 수 있으며, 그 효과를
 같은 세트로 재측정하면 개선을 정량화할 수 있다.
 
-### 2. 측정 범위: 엔진 단독 → 프록시 end-to-end
+### 2. 위협 모델 커버리지 확장 ✅ 완료
+
+**완료됨 (ext 세트 322, 동결 `bb0a2e9`).** 구현을 참조하지 않고 위협 모델에서 생성했다.
+같은 세트를 도구 분류 설정만 바꿔 두 번 돌려(실행 A/B) **분류 미비의 비용**을 분리
+측정했다: 실행 B 오탐 30.5%·미탐 0.0% / 실행 A 오탐 14.6%·**미탐 62.9%**. 미탐 62.9%는
+판정 로직의 결함이 아니라 민감 소스가 설정에 등록되지 않아 트라이펙타가 성립하지
+않은 결과다.
+
+### 3. 탐지 한계 경계 탐색 ✅ 완료
+
+**완료됨 (limits 세트 112, 동결 `565f11c`).** 4개 축(시크릿 길이·조각 길이·변형 종류·갈래)으로
+문턱 주변을 훑어 "어디서부터 못 잡는가"를 수치화했다. 완화 off에서 lineage 미탐 3.2%,
+`scan-clean`에서 **88.1%** — 완화 스위치의 대가를 정량화한 것이 이 세트의 주 성과다
+(§한계의 실측 표).
+
+### 4. 외부 벤치마크로 일반화 ✅ 완료
+
+**완료됨 (AgentDojo 파생 326, `docs/submission/eval/`).** 유일한 외부 출처 세트다.
+banking·workspace·travel·slack 4개 도메인에서 **공격 294건 미탐 0%**. 다만 정상 32건의
+오탐은 46.9%이고, 두 모드가 갈린 지점은 **0건**이다(싱크 인자에 상류 토큰이 없어 항상
+안전 바닥으로 떨어진다). LLM을 실행하지 않는 `ground_truth` 재생이라 **utility 개념이
+없고**, CaMeL/Fides 등의 "보안 × utility" 수치와 직접 비교할 수 없다.
+
+### 5. 과적합 판별: 일반화 세트 실행 ⬜ 미완료
+
+스캔 강화의 각 문턱은 **확장 세트에서 관측된 미탐을 근거로** 조정됐다(출처 needle 6자,
+조각 창 12자). 따라서 확장 세트에서의 스캔 성능은 **세트 내적(in-sample) 결과**다.
+이를 가리려고 구현 미참조로 `scenarios-general.ts`(170개)를 만들었으나 **아직 한 번도
+돌리지 않았고**, `run.ts`의 `BenchSet`에 연결돼 있지도 않다.
+
+**다음 단계.** ① `BenchSet`에 `general`을 추가하고 `run.ts`에 분기 연결. ② 실행 후
+확장 세트 대비 문턱의 out-of-sample 성능 비교. **이것이 끝나기 전까지 "문턱 조정이
+일반화된다"고 쓸 근거는 없다.**
+
+### 6. 측정 범위: 엔진 단독 → 프록시 end-to-end ⬜ 미완료
 
 **현재 범위.** 정확도의 순수한 측정을 위해 `evaluateToolCall`을 **직접** 호출한다 —
 프록시·MCP 프로토콜 계층을 거치지 않는다. 판정 로직만 변수로 통제하려는 의도적
